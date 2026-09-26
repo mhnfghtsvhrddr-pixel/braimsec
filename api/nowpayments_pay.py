@@ -7,14 +7,20 @@ Do NOT change billing.SEED_PLANS from here.
 
 Flow:
   1. POST /api/checkout/crypto {tier, cycle, email}
-     -> creates a free org, creates a NOWPayments hosted invoice,
-        returns {invoice_url}.
+     -> reuses the org for a known email (renewal) or creates a free org +
+        provisions an API key (raw key returned once — the buyer saves it
+        before paying). Creates a NOWPayments hosted invoice.
   2. Customer pays USDT on the NOWPayments hosted page.
   3. NOWPayments POSTs an IPN to /api/webhooks/nowpayments.
   4. Signature verified: HMAC-SHA512 over the raw body with the IPN secret,
      compared (constant-time) to the x-nowpayments-sig header.
   5. payment_status in {"finished", "confirmed"} -> activate the mapped plan
-     with provider="nowpayments". Idempotent on payment_id.
+     with provider="nowpayments" and a cycle-based period end
+     (monthly +30d, annual +365d). Idempotent on payment_id.
+  6. Renewal = same email checks out again -> same org, fresh period.
+     run_expiry() expires past-due nowpayments subs (never Paddle ones).
+  7. GET /checkout/success?order_id=... shows live payment status;
+     GET /api/checkout/status backs it.
 
 Deploy-time env:
   NOWPAYMENTS_API_KEY      API key from the NOWPayments dashboard
@@ -50,6 +56,48 @@ FULFILL_STATUSES = ("finished", "confirmed")
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def period_end_for_cycle(cycle):
+    """Crypto is one-time, not auto-renewing: monthly=+30d, annual=+365d."""
+    from datetime import timedelta
+    days = 365 if cycle == "annual" else 30
+    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+
+
+def find_org_by_email(email):
+    """Existing org created by an earlier checkout (renewal path)."""
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT id FROM organizations WHERE name=? AND status='active'"
+            " ORDER BY created_at LIMIT 1", (email,)).fetchone()
+        return row["id"] if row else None
+    finally:
+        db.close()
+
+
+def get_order_status(order_id):
+    """Public status view for the success page. Returns dict or None.
+
+    One order can have two rows (the invoice row + the IPN fulfillment row);
+    the fulfilled one wins so the success page shows the truth.
+    """
+    init_crypto_tables()
+    db = get_db()
+    try:
+        row = db.execute(
+            """SELECT c.order_id, c.status AS pay_status, c.tier, c.cycle,
+                      c.amount_usd, c.org_id,
+                      s.status AS sub_status, s.plan_id, s.current_period_end
+               FROM crypto_payments c
+               LEFT JOIN subscriptions s ON s.org_id = c.org_id
+               WHERE c.order_id=?
+               ORDER BY CASE c.status WHEN 'fulfilled' THEN 0 ELSE 1 END,
+                        c.created_at DESC""", (order_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        db.close()
 
 
 def catalog_entry(tier, cycle):
@@ -223,7 +271,8 @@ def fulfill_ipn(payload):
     if not exists:
         return ("reject", f"unknown org: {info['org_id']}")
     set_subscription_plan(info["org_id"], plan_id, "active",
-                          provider="nowpayments", external_id=payment_id)
+                          provider="nowpayments", external_id=payment_id,
+                          period_end=period_end_for_cycle(info["cycle"]))
     db = get_db()
     try:
         db.execute(
