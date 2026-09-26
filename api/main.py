@@ -28,6 +28,9 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
 from database import get_db, init_db
+from billing import (  # noqa: E402
+    OWNER_ORG_ID, consume_scan, ensure_owner_org, quota_status, verify_key,
+)
 
 # Reuse the scan engine prototype
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -78,13 +81,27 @@ if not API_KEY:
 
 @app.middleware("http")
 async def api_key_gate(request: Request, call_next):
-    """Require X-API-Key on every /api/* route. Dashboard static files stay open."""
+    """Require X-API-Key on every /api/* route. Dashboard static files stay open.
+
+    Two key types:
+    - the master key (BRAIMSEC_API_KEY env): maps to the built-in 'owner' org.
+    - per-customer keys (api_keys table, hashed): map to their org + plan.
+    Sets request.state.org_id / request.state.plan for downstream handlers.
+    """
     if request.url.path.startswith("/api/"):
         presented = request.headers.get("x-api-key", "")
-        if not presented or not secrets.compare_digest(presented, API_KEY):
+        org = None
+        if presented:
+            if secrets.compare_digest(presented, API_KEY):
+                org = {"org_id": OWNER_ORG_ID, "plan": "team"}
+            else:
+                org = verify_key(presented)
+        if not org:
             return JSONResponse(
                 {"detail": "Invalid or missing X-API-Key header"}, status_code=401
             )
+        request.state.org_id = org["org_id"]
+        request.state.plan = org["plan"]
     return await call_next(request)
 
 
@@ -164,6 +181,7 @@ def _resolve_scan_target(target_path: str) -> str:
 @app.on_event("startup")
 def startup():
     init_db()
+    ensure_owner_org()
 
 
 def do_scan(scan_id: str, target_dir: str, cleanup_dir: str | None = None):
@@ -197,11 +215,25 @@ def do_scan(scan_id: str, target_dir: str, cleanup_dir: str | None = None):
             shutil.rmtree(cleanup_dir, ignore_errors=True)
 
 
-def _new_scan(target_name: str, target_dir: str, cleanup_dir, background_tasks: BackgroundTasks):
+def _new_scan(org_id: str, target_name: str, target_dir: str,
+              cleanup_dir, background_tasks: BackgroundTasks):
+    """Create a scan owned by org_id. Consumes one unit of monthly quota.
+
+    Raises HTTPException(402) when the org's plan quota is exhausted.
+    """
+    if not consume_scan(org_id):
+        allowed, used, quota = quota_status(org_id)
+        raise HTTPException(
+            402,
+            f"Monthly scan quota exceeded ({used}/{quota} used). "
+            "Upgrade your plan to continue scanning.",
+        )
     scan_id = uuid.uuid4().hex[:12]
     db = get_db()
-    db.execute("INSERT INTO scans (id, target_name, status, created_at) VALUES (?,?,?,?)",
-               (scan_id, target_name, "queued", now()))
+    db.execute(
+        "INSERT INTO scans (id, org_id, target_name, status, created_at)"
+        " VALUES (?,?,?,?,?)",
+        (scan_id, org_id, target_name, "queued", now()))
     db.commit()
     db.close()
     background_tasks.add_task(do_scan, scan_id, target_dir, cleanup_dir)
@@ -216,7 +248,19 @@ async def create_scan(
     target_path: str | None = Form(None),
     file: UploadFile | None = File(None),
 ):
-    """Start a scan from a server-local path or an uploaded zip."""
+    """Start a scan from a server-local path or an uploaded zip.
+
+    Quota is checked before any expensive work, and consumed only when a
+    scan is actually created (validation failures cost nothing).
+    """
+    org_id = request.state.org_id
+    allowed, used, quota = quota_status(org_id)
+    if not allowed:
+        raise HTTPException(
+            402,
+            f"Monthly scan quota exceeded ({used}/{quota} used). "
+            "Upgrade your plan to continue scanning.",
+        )
     if file is not None:
         # Enforce the size cap while streaming (Content-Length headers can lie).
         chunks, size = [], 0
@@ -242,28 +286,32 @@ async def create_scan(
             target_dir = extract_dir
         else:
             raise HTTPException(400, "Uploaded file must be a zip archive")
-        return _new_scan(filename, target_dir, workdir, background_tasks)
+        return _new_scan(org_id, filename, target_dir, workdir, background_tasks)
 
     if target_path:
         target_dir = _resolve_scan_target(target_path)
-        return _new_scan(os.path.basename(target_dir.rstrip("/")) or target_dir,
+        return _new_scan(org_id, os.path.basename(target_dir.rstrip("/")) or target_dir,
                          target_dir, None, background_tasks)
 
     raise HTTPException(400, "Provide target_path or upload a zip file")
 
 
 @app.get("/api/scans")
-def list_scans():
+def list_scans(request: Request):
+    # Org-scoped: a customer only ever sees their own scans.
     db = get_db()
-    rows = db.execute("SELECT * FROM scans ORDER BY created_at DESC").fetchall()
+    rows = db.execute(
+        "SELECT * FROM scans WHERE org_id=? ORDER BY created_at DESC",
+        (request.state.org_id,)).fetchall()
     db.close()
     return [dict(r) for r in rows]
 
 
 @app.get("/api/scans/{scan_id}")
-def scan_status(scan_id: str):
+def scan_status(request: Request, scan_id: str):
     db = get_db()
-    row = db.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
+    row = db.execute("SELECT * FROM scans WHERE id=? AND org_id=?",
+                     (scan_id, request.state.org_id)).fetchone()
     if not row:
         db.close()
         raise HTTPException(404, "Scan not found")
@@ -277,9 +325,10 @@ def scan_status(scan_id: str):
 
 
 @app.get("/api/scans/{scan_id}/results")
-def scan_results(scan_id: str, severity: str | None = None):
+def scan_results(request: Request, scan_id: str, severity: str | None = None):
     db = get_db()
-    exists = db.execute("SELECT 1 FROM scans WHERE id=?", (scan_id,)).fetchone()
+    exists = db.execute("SELECT 1 FROM scans WHERE id=? AND org_id=?",
+                        (scan_id, request.state.org_id)).fetchone()
     if not exists:
         db.close()
         raise HTTPException(404, "Scan not found")
@@ -320,7 +369,8 @@ def do_ai_review(scan_id: str):
 @limiter.limit("30/minute")  # LLM calls are expensive — stricter budget
 def start_ai_review(request: Request, scan_id: str, background_tasks: BackgroundTasks):
     db = get_db()
-    exists = db.execute("SELECT 1 FROM scans WHERE id=?", (scan_id,)).fetchone()
+    exists = db.execute("SELECT 1 FROM scans WHERE id=? AND org_id=?",
+                        (scan_id, request.state.org_id)).fetchone()
     db.close()
     if not exists:
         raise HTTPException(404, "Scan not found")
@@ -329,8 +379,8 @@ def start_ai_review(request: Request, scan_id: str, background_tasks: Background
 
 
 @app.get("/api/scans/{scan_id}/sarif")
-def scan_sarif(scan_id: str):
-    findings = scan_results(scan_id)
+def scan_sarif(request: Request, scan_id: str):
+    findings = scan_results(request, scan_id)
     return to_sarif([{
         "tool": f["tool"], "rule_id": f["rule_id"], "severity": f["severity"],
         "message": f["message"], "file": f["file"],
