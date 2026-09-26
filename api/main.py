@@ -15,6 +15,7 @@ import secrets
 import shutil
 import sys
 import tempfile
+import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -29,7 +30,10 @@ from slowapi.util import get_remote_address
 
 from database import get_db, init_db
 from billing import (  # noqa: E402
-    OWNER_ORG_ID, consume_scan, ensure_owner_org, quota_status, verify_key,
+    OWNER_ORG_ID, cancel_subscription, consume_scan, effective_plan,
+    ensure_owner_org, ensure_subscription, get_subscription, list_plans,
+    quota_check, quota_status, record_usage, run_expiry, seed_plans,
+    start_trial, usage_count, verify_key,
 )
 
 # Reuse the scan engine prototype
@@ -87,8 +91,10 @@ async def api_key_gate(request: Request, call_next):
     - the master key (BRAIMSEC_API_KEY env): maps to the built-in 'owner' org.
     - per-customer keys (api_keys table, hashed): map to their org + plan.
     Sets request.state.org_id / request.state.plan for downstream handlers.
+
+    /api/plans is public (pricing catalog for the marketing page).
     """
-    if request.url.path.startswith("/api/"):
+    if request.url.path.startswith("/api/") and request.url.path != "/api/plans":
         presented = request.headers.get("x-api-key", "")
         org = None
         if presented:
@@ -181,7 +187,9 @@ def _resolve_scan_target(target_path: str) -> str:
 @app.on_event("startup")
 def startup():
     init_db()
+    seed_plans()
     ensure_owner_org()
+    ensure_subscription(OWNER_ORG_ID)
 
 
 def do_scan(scan_id: str, target_dir: str, cleanup_dir: str | None = None):
@@ -345,15 +353,23 @@ def scan_results(request: Request, scan_id: str, severity: str | None = None):
 
 
 def do_ai_review(scan_id: str):
-    """Background job: LLM second-opinion review of every finding."""
+    """Background job: LLM second-opinion review of every finding.
+
+    Each reviewed finding consumes one unit of the org's monthly AI-review
+    quota (the real variable cost) and is recorded in the usage ledger.
+    """
     client = LLMClient()
     db = get_db()
     try:
+        scan = db.execute("SELECT org_id FROM scans WHERE id=?", (scan_id,)).fetchone()
+        org_id = scan["org_id"] if scan else None
         rows = db.execute("SELECT * FROM findings WHERE scan_id=?", (scan_id,)).fetchall()
         for r in rows:
             f = dict(r)
             snippet = read_snippet(f.get("file") or "", f.get("line") or 0)
+            t0 = time.monotonic()
             res = analyze_finding(client, f, snippet)
+            wall_ms = int((time.monotonic() - t0) * 1000)
             db.execute(
                 """UPDATE findings SET ai_verdict=?, ai_confidence=?,
                    ai_explanation=?, ai_fix=? WHERE id=?""",
@@ -361,6 +377,8 @@ def do_ai_review(scan_id: str):
                  res["ai_explanation"], res["ai_fix"], f["id"]),
             )
             db.commit()
+            if org_id:
+                record_usage(org_id, "ai_review", scan_id, wall_time_ms=wall_ms)
     finally:
         db.close()
 
@@ -368,12 +386,26 @@ def do_ai_review(scan_id: str):
 @app.post("/api/scans/{scan_id}/ai-review")
 @limiter.limit("30/minute")  # LLM calls are expensive — stricter budget
 def start_ai_review(request: Request, scan_id: str, background_tasks: BackgroundTasks):
+    org_id = request.state.org_id
     db = get_db()
     exists = db.execute("SELECT 1 FROM scans WHERE id=? AND org_id=?",
-                        (scan_id, request.state.org_id)).fetchone()
-    db.close()
+                        (scan_id, org_id)).fetchone()
     if not exists:
+        db.close()
         raise HTTPException(404, "Scan not found")
+    # AI reviews are the real variable cost: gate on the monthly AI quota.
+    # Reserve one unit per finding still awaiting review.
+    pending = db.execute(
+        "SELECT COUNT(*) c FROM findings WHERE scan_id=? AND ai_verdict IS NULL",
+        (scan_id,)).fetchone()["c"]
+    db.close()
+    allowed, used, quota = quota_check(org_id, "ai_review", max(pending, 1))
+    if not allowed:
+        raise HTTPException(
+            402,
+            f"Monthly AI-review quota exceeded ({used}/{quota} used). "
+            "Upgrade your plan to continue.",
+        )
     background_tasks.add_task(do_ai_review, scan_id)
     return {"scan_id": scan_id, "ai_review": "queued"}
 
@@ -386,6 +418,53 @@ def scan_sarif(request: Request, scan_id: str):
         "message": f["message"], "file": f["file"],
         "line": f["line"] or 1, "col": f["col"] or 1,
     } for f in findings])
+
+
+# ---------------------------------------------------------------------------
+# Subscriptions (Phase 1): plans, current subscription, usage.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/plans")
+def api_plans():
+    """Public plan catalog. Prices are placeholders until customer interviews."""
+    return list_plans()
+
+
+@app.get("/api/subscription")
+def api_subscription(request: Request):
+    """The caller's org subscription: plan, status, period, quotas in force."""
+    sub = get_subscription(request.state.org_id)
+    plan = effective_plan(request.state.org_id)
+    return {
+        "plan_id": sub["plan_id"],
+        "plan_name": sub["plan_name"],
+        "status": sub["status"],
+        "current_period_start": sub["current_period_start"],
+        "current_period_end": sub["current_period_end"],
+        "trial_ends_at": sub["trial_ends_at"],
+        "quotas": {
+            "scans": plan["scan_quota"],
+            "ai_reviews": plan["ai_review_quota"],
+        },
+        "limits": {
+            "max_projects": plan["max_projects"],
+            "max_seats": plan["max_seats"],
+        },
+        "features": plan["features"],
+    }
+
+
+@app.get("/api/usage")
+def api_usage(request: Request):
+    """Current month's consumption vs quota. Quotas never roll over."""
+    org_id = request.state.org_id
+    out = {}
+    for kind, label in (("scan", "scans"), ("ai_review", "ai_reviews")):
+        allowed, used, quota = quota_check(org_id, kind, 1)
+        out[label] = {"used": used, "quota": quota,
+                      "remaining": (quota - used) if quota >= 0 else -1,
+                      "unlimited": quota < 0}
+    return out
 
 
 # Dashboard (served after API routes so /api/* matches first)
