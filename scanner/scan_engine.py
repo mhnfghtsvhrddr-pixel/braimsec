@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""
+BraimSec Scan Engine (prototype v0.1.0)
+--------------------------------------
+Orchestrates Semgrep + gitleaks on a target code directory and
+produces a unified SARIF 2.1.0 report.
+
+Usage:
+    python3 scan_engine.py /path/to/code -o results.sarif
+
+Env overrides:
+    SEMGREP_BIN   path to semgrep binary
+    GITLEAKS_BIN  path to gitleaks binary
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+SEMGREP_BIN = os.environ.get("SEMGREP_BIN", "semgrep")
+GITLEAKS_BIN = os.environ.get("GITLEAKS_BIN", "gitleaks")
+
+ENGINE_NAME = "BraimSec Scanner"
+ENGINE_VERSION = "0.1.0"
+
+SEMGREP_SEVERITY = {"ERROR": "error", "WARNING": "warning", "INFO": "note"}
+
+
+def _run(cmd, timeout=600):
+    """Run a command, never raise on non-zero exit (scanners signal findings)."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        print(f"ERROR: binary not found: {cmd[0]}", file=sys.stderr)
+        sys.exit(2)
+    except subprocess.TimeoutExpired:
+        print(f"ERROR: timed out: {' '.join(cmd)}", file=sys.stderr)
+        sys.exit(3)
+
+
+def run_semgrep(target):
+    """Run Semgrep and return normalized findings."""
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        out_path = f.name
+    try:
+        _run([SEMGREP_BIN, "--config", "auto", "--json", "-o", out_path, target])
+        with open(out_path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError):
+        data = {}
+    finally:
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+    findings = []
+    for r in data.get("results", []):
+        findings.append({
+            "tool": "semgrep",
+            "rule_id": r.get("check_id", "unknown"),
+            "severity": SEMGREP_SEVERITY.get(r.get("extra", {}).get("severity"), "warning"),
+            "message": r.get("extra", {}).get("message", "").strip(),
+            "file": r.get("path", ""),
+            "line": r.get("start", {}).get("line", 1),
+            "col": r.get("start", {}).get("col", 1),
+        })
+    return findings
+
+
+def run_gitleaks(target):
+    """Run gitleaks and return normalized findings."""
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        out_path = f.name
+    try:
+        # gitleaks exits 1 when leaks are found -> handled by _run
+        _run([GITLEAKS_BIN, "detect", "--source", target, "--no-git",
+              "--report-format", "json", "--report-path", out_path])
+        try:
+            with open(out_path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            data = []
+    finally:
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+    findings = []
+    for r in data or []:
+        findings.append({
+            "tool": "gitleaks",
+            "rule_id": r.get("RuleID", "secret"),
+            "severity": "error",  # leaked secrets are critical by default
+            "message": f"Possible secret: {r.get('Description', r.get('RuleID', ''))}",
+            "file": r.get("File", ""),
+            "line": r.get("StartLine", 1),
+            "col": r.get("StartColumn", 1),
+        })
+    return findings
+
+
+def to_sarif(findings):
+    """Convert normalized findings to SARIF 2.1.0."""
+    rules = {}
+    results = []
+    for f in findings:
+        rule_id = f"{f['tool']}/{f['rule_id']}"
+        if rule_id not in rules:
+            rules[rule_id] = {
+                "id": rule_id,
+                "name": f["rule_id"],
+                "shortDescription": {"text": f["message"][:200]},
+            }
+        results.append({
+            "ruleId": rule_id,
+            "level": f["severity"],
+            "message": {"text": f["message"]},
+            "locations": [{
+                "physicalLocation": {
+                    "artifactLocation": {"uri": f["file"]},
+                    "region": {
+                        "startLine": f["line"],
+                        "startColumn": f["col"],
+                    },
+                }
+            }],
+        })
+
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": ENGINE_NAME,
+                    "version": ENGINE_VERSION,
+                    "rules": list(rules.values()),
+                }
+            },
+            "results": results,
+        }],
+    }
+
+
+def print_summary(findings):
+    counts = {}
+    for f in findings:
+        counts[f["severity"]] = counts.get(f["severity"], 0) + 1
+    print(f"\n{'=' * 50}")
+    print(f"  {ENGINE_NAME} v{ENGINE_VERSION} — scan complete")
+    print(f"{'=' * 50}")
+    print(f"  Total findings: {len(findings)}")
+    for sev in ("error", "warning", "note"):
+        if sev in counts:
+            print(f"    {sev}: {counts[sev]}")
+    print(f"{'=' * 50}\n")
+    for f in findings:
+        print(f"[{f['severity'].upper():7}] {f['tool']}/{f['rule_id']}")
+        print(f"         {f['file']}:{f['line']}")
+    print()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="BraimSec Scan Engine")
+    parser.add_argument("target", help="directory of code to scan")
+    parser.add_argument("-o", "--output", default="results.sarif",
+                        help="SARIF output path (default: results.sarif)")
+    args = parser.parse_args()
+
+    if not os.path.isdir(args.target):
+        print(f"ERROR: not a directory: {args.target}", file=sys.stderr)
+        sys.exit(2)
+
+    print(f"[*] Scanning {args.target} with Semgrep...", flush=True)
+    findings = run_semgrep(args.target)
+    print(f"[*] Scanning {args.target} with gitleaks...", flush=True)
+    findings += run_gitleaks(args.target)
+
+    sarif = to_sarif(findings)
+    with open(args.output, "w") as f:
+        json.dump(sarif, f, indent=2, ensure_ascii=False)
+
+    print_summary(findings)
+    print(f"[+] SARIF report written to {args.output}")
+
+
+if __name__ == "__main__":
+    main()
