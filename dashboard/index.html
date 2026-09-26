@@ -141,6 +141,12 @@
     <h1>Braim<span>Sec</span></h1>
     <p>منصة فحص الثغرات الأمنية للمؤسسات</p>
   </div>
+  <div style="margin-inline-start: auto; display: flex; align-items: center; gap: 0.5rem;">
+    <input id="api-key" type="password" placeholder="API key"
+      style="background: var(--bg3); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.45rem 0.7rem; font-size: 0.85rem; width: 11rem;"
+      oninput="localStorage.setItem('braimsec_key', this.value)">
+    <script>document.getElementById('api-key').value = localStorage.getItem('braimsec_key') || '';</script>
+  </div>
 </header>
 
 <main>
@@ -197,6 +203,10 @@ const SEV_AR = { error: "حرجة", warning: "متوسطة", note: "منخفضة
 const STATUS_AR = { queued: "في الانتظار", running: "جارٍ الفحص", done: "مكتمل", failed: "فشل" };
 
 async function api(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers, {
+    "X-API-Key": localStorage.getItem("braimsec_key") || ""
+  });
   const r = await fetch(API + path, opts);
   if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || r.statusText); }
   return r.json();
