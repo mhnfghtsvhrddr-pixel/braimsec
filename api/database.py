@@ -52,6 +52,42 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
 CREATE INDEX IF NOT EXISTS idx_api_keys_org ON api_keys(org_id);
+-- Phase 1 (subscriptions): plans catalog, subscription lifecycle, usage ledger.
+CREATE TABLE IF NOT EXISTS plans (
+    plan_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    monthly_price_cents INTEGER NOT NULL DEFAULT 0,
+    scan_quota INTEGER NOT NULL,
+    ai_review_quota INTEGER NOT NULL,
+    max_projects INTEGER NOT NULL DEFAULT 1,
+    max_seats INTEGER NOT NULL DEFAULT 1,
+    features TEXT NOT NULL DEFAULT '[]',
+    rate_limit_tier TEXT NOT NULL DEFAULT 'standard'
+);
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL UNIQUE REFERENCES organizations(id),
+    plan_id TEXT NOT NULL REFERENCES plans(plan_id),
+    status TEXT NOT NULL DEFAULT 'active',
+    current_period_start TEXT NOT NULL,
+    current_period_end TEXT NOT NULL,
+    trial_ends_at TEXT,
+    canceled_at TEXT,
+    payment_provider TEXT,
+    external_subscription_id TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    scan_id TEXT,
+    kind TEXT NOT NULL,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    wall_time_ms INTEGER NOT NULL DEFAULT 0,
+    period TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_org_period ON usage_ledger(org_id, period, kind);
 """
 
 
