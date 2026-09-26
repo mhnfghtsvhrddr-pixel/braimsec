@@ -1,0 +1,40 @@
+# BraimSec benchmark gate — runs on every push / PR.
+# Fails the build if the engine's F1 drops below baseline.
+
+name: benchmark
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  f1-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Install gitleaks
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Run F1 benchmark gate
+        run: |
+          # Repo layout: benchmark/ci_benchmark.py + benchmark/corpus/ + benchmark/labels.json
+          python3 benchmark/ci_benchmark.py --tool ours --baseline 0.80
+
+      - name: Upload history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-history
+          path: benchmark/history.jsonl
