@@ -21,12 +21,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import main  # noqa: E402
 from billing import (  # noqa: E402
     OWNER_ORG_ID, consume_scan, create_org, ensure_owner_org, provision_key,
-    quota_status, revoke_key, set_plan, verify_key,
+    quota_status, revoke_key, seed_plans, set_plan, verify_key,
 )
 from database import init_db  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 init_db()
+seed_plans()
 ensure_owner_org()
 
 results = []
