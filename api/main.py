@@ -22,7 +22,7 @@ import zipfile
 from datetime import datetime, timezone
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
@@ -33,8 +33,8 @@ from database import get_db, init_db
 from billing import (  # noqa: E402
     OWNER_ORG_ID, cancel_subscription, consume_scan, create_org, effective_plan,
     ensure_owner_org, ensure_subscription, get_subscription, list_plans,
-    quota_check, quota_status, record_usage, run_expiry, seed_plans,
-    start_trial, usage_count, verify_key,
+    provision_key, quota_check, quota_status, record_usage, run_expiry,
+    seed_plans, start_trial, usage_count, verify_key,
 )
 import nowpayments_pay as nowpay  # noqa: E402
 
@@ -99,7 +99,7 @@ async def api_key_gate(request: Request, call_next):
     /api/webhooks/nowpayments is public (NOWPayments IPN; secured by HMAC).
     """
     public_paths = ("/api/plans", "/api/checkout/crypto",
-                    "/api/webhooks/nowpayments")
+                    "/api/checkout/status", "/api/webhooks/nowpayments")
     if request.url.path.startswith("/api/") and request.url.path not in public_paths:
         presented = request.headers.get("x-api-key", "")
         org = None
@@ -447,7 +447,12 @@ async def crypto_checkout(request: Request):
 
     Public (new customers have no API key yet); rate-limited to 10/min/IP.
     Body: {tier: starter|pro|advanced, cycle: monthly|annual, email: str}
-    Returns: {invoice_url, invoice_id, order_id}
+    Returns: {invoice_url, invoice_id, order_id, api_key}
+
+    Key delivery: a fresh API key is provisioned for NEW orgs and returned
+    here, shown once — the buyer saves it before paying (it works on the
+    free tier until the IPN upgrades the plan). Renewals reuse the existing
+    org (same email) and get api_key=null: they already have a key.
     """
     api_key = os.environ.get("NOWPAYMENTS_API_KEY", "")
     if not api_key:
@@ -466,12 +471,16 @@ async def crypto_checkout(request: Request):
         raise HTTPException(400, "A valid email is required")
     usd_price, _plan = entry
 
-    org_id = create_org(email)
+    org_id = nowpay.find_org_by_email(email)
+    raw_key = None
+    if org_id is None:
+        org_id = create_org(email)
+        raw_key = provision_key(org_id, name="checkout")
     ensure_subscription(org_id)
     order_id = nowpay.make_order_id(tier, cycle, org_id)
     base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
     ipn_url = f"{base}/api/webhooks/nowpayments" if base else ""
-    success_url = f"{base}/checkout/success" if base else ""
+    success_url = f"{base}/checkout/success?order_id={order_id}" if base else ""
     cancel_url = f"{base}/pricing" if base else ""
     try:
         invoice = nowpay.create_invoice(
@@ -485,7 +494,73 @@ async def crypto_checkout(request: Request):
                           usd_price, customer_email=email)
     return {"invoice_url": invoice.get("invoice_url"),
             "invoice_id": invoice_id, "order_id": order_id,
-            "amount_usd": usd_price, "pay_currency": nowpay.PAY_CURRENCY}
+            "amount_usd": usd_price, "pay_currency": nowpay.PAY_CURRENCY,
+            "api_key": raw_key,
+            "key_note": ("Save this API key now — it is shown only once."
+                         if raw_key else
+                         "Use the API key from your previous checkout.")}
+
+
+@app.get("/api/checkout/status")
+@limiter.limit("30/minute")
+async def checkout_status(request: Request, order_id: str = ""):
+    """Public order status for the success page. Keyed by the unguessable
+    order_id (8 random hex chars); reveals only that order's own state."""
+    st = nowpay.get_order_status(order_id) if order_id else None
+    if not st:
+        raise HTTPException(404, "Unknown order")
+    return {"order_id": st["order_id"], "pay_status": st["pay_status"],
+            "tier": st["tier"], "cycle": st["cycle"],
+            "amount_usd": st["amount_usd"],
+            "plan": st["plan_id"], "subscription": st["sub_status"],
+            "period_end": st["current_period_end"]}
+
+
+@app.get("/checkout/success", response_class=HTMLResponse)
+async def checkout_success(request: Request):
+    """Post-payment landing page. NOWPayments redirects here with
+    ?order_id=... — the page polls /api/checkout/status and shows the
+    activation state. The API key itself was shown at checkout time."""
+    return """<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BraimSec — Payment status</title>
+<style>body{font-family:system-ui,sans-serif;background:#0b1020;color:#e8ecf4;
+display:flex;justify-content:center;padding:48px 16px;margin:0}
+.card{max-width:560px;background:#131a30;border:1px solid #24304f;border-radius:12px;
+padding:32px}h1{font-size:22px;margin:0 0 12px}.ok{color:#4ade80}.wait{color:#fbbf24}
+code{background:#0b1020;padding:2px 8px;border-radius:6px;font-size:13px}
+p{line-height:1.6;color:#b9c2d8}.small{font-size:13px;color:#7d88a3}</style>
+</head><body><div class="card">
+<h1>🛡️ BraimSec payment status</h1>
+<p id="msg" class="wait">Checking your payment…</p>
+<p class="small">Your API key was shown on the checkout page before payment.
+Lost it? Email <code>support@braimsec.world</code> from your purchase email
+and we'll rotate a new one for you.</p>
+<script>
+const oid = new URLSearchParams(location.search).get('order_id');
+const msg = document.getElementById('msg');
+if (!oid) { msg.textContent = 'Missing order id.'; }
+else {
+  async function poll() {
+    try {
+      const r = await fetch('/api/checkout/status?order_id=' + encodeURIComponent(oid));
+      if (!r.ok) throw 0;
+      const s = await r.json();
+      if (s.pay_status === 'fulfilled' && s.subscription === 'active') {
+        msg.className = 'ok';
+        msg.innerHTML = 'Payment confirmed — <b>' + s.tier + ' (' + s.cycle +
+          ')</b> is active until ' + (s.period_end || '').slice(0, 10) +
+          '.<br>Use your API key with header <code>X-API-Key</code>.';
+        return;
+      }
+      msg.textContent = 'Payment status: ' + s.pay_status +
+        ' — this page updates automatically once the network confirms.';
+    } catch (e) { msg.textContent = 'Could not reach the server — retrying…'; }
+    setTimeout(poll, 8000);
+  }
+  poll();
+}
+</script></div></body></html>"""
 
 
 @app.post("/api/webhooks/nowpayments")
