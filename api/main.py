@@ -11,6 +11,7 @@ Endpoints:
     GET  /api/scans/{id}/sarif     SARIF 2.1.0 report
 """
 import os
+import secrets
 import shutil
 import sys
 import tempfile
@@ -18,7 +19,8 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from database import get_db, init_db
@@ -45,6 +47,42 @@ def now():
 
 
 app = FastAPI(title="BraimSec API", version="0.1.0")
+
+
+# ---------------------------------------------------------------------------
+# Security hardening (prototype-grade — not a substitute for production auth)
+# ---------------------------------------------------------------------------
+MAX_ZIP_BYTES = 50 * 1024 * 1024  # 50 MB upload cap (ZIP bombs)
+API_KEY_ENV = "BRAIMSEC_API_KEY"
+
+API_KEY = os.environ.get(API_KEY_ENV)
+if not API_KEY:
+    # Secure by default: an unset key means a random ephemeral one.
+    # Printed to the operator's console only — never written to files.
+    API_KEY = secrets.token_urlsafe(32)
+    print(f"[braimsec] {API_KEY_ENV} not set — generated ephemeral API key (console only).")
+
+
+@app.middleware("http")
+async def api_key_gate(request: Request, call_next):
+    """Require X-API-Key on every /api/* route. Dashboard static files stay open."""
+    if request.url.path.startswith("/api/"):
+        presented = request.headers.get("x-api-key", "")
+        if not presented or not secrets.compare_digest(presented, API_KEY):
+            return JSONResponse(
+                {"detail": "Invalid or missing X-API-Key header"}, status_code=401
+            )
+    return await call_next(request)
+
+
+def _safe_extract(z: zipfile.ZipFile, dest: str):
+    """Extract a zip archive, refusing Zip Slip path traversal."""
+    dest = os.path.abspath(dest)
+    for member in z.infolist():
+        target = os.path.abspath(os.path.join(dest, member.filename))
+        if not target.startswith(dest + os.sep):
+            raise HTTPException(400, f"Unsafe path in zip archive: {member.filename}")
+    z.extractall(dest)
 
 
 @app.on_event("startup")
@@ -102,16 +140,27 @@ async def create_scan(
 ):
     """Start a scan from a server-local path or an uploaded zip."""
     if file is not None:
+        # Enforce the size cap while streaming (Content-Length headers can lie).
+        chunks, size = [], 0
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_ZIP_BYTES:
+                raise HTTPException(
+                    413, f"ZIP exceeds {MAX_ZIP_BYTES // (1024 * 1024)} MB limit")
+            chunks.append(chunk)
         workdir = tempfile.mkdtemp(prefix="braimsec-")
         filename = file.filename or "upload.zip"
         dest = os.path.join(workdir, filename)
         with open(dest, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+            f.write(b"".join(chunks))
         if zipfile.is_zipfile(dest):
             extract_dir = os.path.join(workdir, "src")
             os.makedirs(extract_dir, exist_ok=True)
             with zipfile.ZipFile(dest) as z:
-                z.extractall(extract_dir)
+                _safe_extract(z, extract_dir)
             target_dir = extract_dir
         else:
             raise HTTPException(400, "Uploaded file must be a zip archive")
@@ -215,3 +264,15 @@ def scan_sarif(scan_id: str):
 DASHBOARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dashboard")
 if os.path.isdir(DASHBOARD_DIR):
     app.mount("/", StaticFiles(directory=DASHBOARD_DIR, html=True), name="dashboard")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    # Local-only by default. Set BRAIMSEC_HOST=0.0.0.0 explicitly to expose —
+    # and only behind proper auth/TLS.
+    host = os.environ.get("BRAIMSEC_HOST", "127.0.0.1")
+    port = int(os.environ.get("BRAIMSEC_PORT", "8000"))
+    if host == "0.0.0.0":
+        print("[braimsec] WARNING: listening on 0.0.0.0 — expose only behind auth/TLS.")
+    uvicorn.run(app, host=host, port=port)
