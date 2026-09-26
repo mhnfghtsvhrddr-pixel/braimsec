@@ -39,7 +39,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from database import get_db  # noqa: E402
 
 NOWP_API = "https://api.nowpayments.io/v1"
-PAY_CURRENCY = "usdttrc20"  # USDT on TRON: cent-level fees
+# USDT on BNB Smart Chain (Mahmoud's payout wallet). Override per deploy:
+# NOWPAYMENTS_PAY_CURRENCY=usdttrc20
+PAY_CURRENCY = os.environ.get("NOWPAYMENTS_PAY_CURRENCY", "usdtbsc")
 
 # (public tier, billing cycle) -> (USD price, internal plan_id). DRAFT.
 CRYPTO_CATALOG = {
