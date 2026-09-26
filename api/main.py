@@ -52,7 +52,16 @@ app = FastAPI(title="BraimSec API", version="0.1.0")
 # ---------------------------------------------------------------------------
 # Security hardening (prototype-grade — not a substitute for production auth)
 # ---------------------------------------------------------------------------
-MAX_ZIP_BYTES = 50 * 1024 * 1024  # 50 MB upload cap (ZIP bombs)
+MAX_ZIP_BYTES = 50 * 1024 * 1024  # 50 MB upload cap (compressed size)
+# Decompression-bomb guards: the 50MB cap above measures compressed bytes only.
+MAX_ZIP_UNCOMPRESSED_BYTES = 500 * 1024 * 1024  # 500 MB total extracted
+MAX_ZIP_MEMBERS = 10_000
+MAX_ZIP_MEMBER_BYTES = 100 * 1024 * 1024  # 100 MB per member
+MAX_ZIP_COMPRESSION_RATIO = 100  # file_size / compress_size
+# Sandbox for target_path: server-local scans may only read inside this root.
+# Prevents LFI (e.g. target_path=/etc). Override with BRAIMSEC_SCAN_ROOT.
+SCAN_ROOT = os.path.realpath(os.environ.get("BRAIMSEC_SCAN_ROOT", "/tmp/braimsec_scans"))
+os.makedirs(SCAN_ROOT, exist_ok=True)
 API_KEY_ENV = "BRAIMSEC_API_KEY"
 
 API_KEY = os.environ.get(API_KEY_ENV)
@@ -76,13 +85,43 @@ async def api_key_gate(request: Request, call_next):
 
 
 def _safe_extract(z: zipfile.ZipFile, dest: str):
-    """Extract a zip archive, refusing Zip Slip path traversal."""
-    dest = os.path.abspath(dest)
-    for member in z.infolist():
-        target = os.path.abspath(os.path.join(dest, member.filename))
-        if not target.startswith(dest + os.sep):
+    """Extract a zip archive with Zip Slip + decompression-bomb guards."""
+    dest_real = os.path.realpath(dest)
+    members = z.infolist()
+    if len(members) > MAX_ZIP_MEMBERS:
+        raise HTTPException(400, f"ZIP has too many entries ({len(members)})")
+    total = 0
+    for member in members:
+        # Symlinks can escape the sandbox on extraction: refuse them.
+        if (member.external_attr >> 16) & 0o170000 == 0o120000:
+            raise HTTPException(400, f"Symlinks not allowed in ZIP: {member.filename}")
+        if member.file_size > MAX_ZIP_MEMBER_BYTES:
+            raise HTTPException(400, f"ZIP member too large: {member.filename}")
+        if member.file_size > 0 and member.compress_size > 0:
+            if member.file_size / member.compress_size > MAX_ZIP_COMPRESSION_RATIO:
+                raise HTTPException(400, f"Suspicious compression ratio: {member.filename}")
+        total += member.file_size
+        if total > MAX_ZIP_UNCOMPRESSED_BYTES:
+            raise HTTPException(400, "ZIP uncompressed size exceeds limit")
+        target = os.path.realpath(os.path.join(dest, member.filename))
+        if target != dest_real and not target.startswith(dest_real + os.sep):
             raise HTTPException(400, f"Unsafe path in zip archive: {member.filename}")
     z.extractall(dest)
+
+
+def _resolve_scan_target(target_path: str) -> str:
+    """Resolve target_path inside the scan sandbox (LFI fix).
+
+    realpath resolves '..' and symlinks; anything escaping SCAN_ROOT
+    is rejected with 403. Without this, target_path allowed reading
+    arbitrary server-local paths (e.g. /etc/passwd).
+    """
+    real = os.path.realpath(target_path)
+    if real != SCAN_ROOT and not real.startswith(SCAN_ROOT + os.sep):
+        raise HTTPException(403, "target_path must be inside the scan sandbox")
+    if not os.path.isdir(real):
+        raise HTTPException(400, f"Not a directory: {target_path}")
+    return real
 
 
 @app.on_event("startup")
@@ -167,10 +206,9 @@ async def create_scan(
         return _new_scan(filename, target_dir, workdir, background_tasks)
 
     if target_path:
-        if not os.path.isdir(target_path):
-            raise HTTPException(400, f"Not a directory: {target_path}")
-        return _new_scan(os.path.basename(target_path.rstrip("/")) or target_path,
-                         target_path, None, background_tasks)
+        target_dir = _resolve_scan_target(target_path)
+        return _new_scan(os.path.basename(target_dir.rstrip("/")) or target_dir,
+                         target_dir, None, background_tasks)
 
     raise HTTPException(400, "Provide target_path or upload a zip file")
 
