@@ -22,6 +22,10 @@ from datetime import datetime, timezone
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
 from database import get_db, init_db
 
@@ -82,6 +86,39 @@ async def api_key_gate(request: Request, call_next):
                 {"detail": "Invalid or missing X-API-Key header"}, status_code=401
             )
     return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting (slowapi). Added after api_key_gate so it runs FIRST:
+# abuse is throttled before authentication is even checked.
+# ---------------------------------------------------------------------------
+def _rate_limit_key(request: Request) -> str:
+    """Rate-limit identity: API key when present, client IP otherwise.
+
+    Only a key prefix is used — the full secret never enters logs or storage.
+    """
+    presented = request.headers.get("x-api-key", "")
+    if presented:
+        return f"apikey:{presented[:8]}"
+    return f"ip:{get_remote_address(request)}"
+
+
+limiter = Limiter(key_func=_rate_limit_key, default_limits=["600/minute"])
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    # slowapi's default handler omits Retry-After; clients need it to back off.
+    # All windows here are per-minute, so 60s is the honest conservative value.
+    return JSONResponse(
+        {"detail": f"Rate limit exceeded: {exc.detail}"},
+        status_code=429,
+        headers={"Retry-After": "60"},
+    )
+
+
+app.add_middleware(SlowAPIMiddleware)
 
 
 def _safe_extract(z: zipfile.ZipFile, dest: str):
@@ -172,7 +209,9 @@ def _new_scan(target_name: str, target_dir: str, cleanup_dir, background_tasks: 
 
 
 @app.post("/api/scans")
+@limiter.limit("60/minute")
 async def create_scan(
+    request: Request,
     background_tasks: BackgroundTasks,
     target_path: str | None = Form(None),
     file: UploadFile | None = File(None),
@@ -278,7 +317,8 @@ def do_ai_review(scan_id: str):
 
 
 @app.post("/api/scans/{scan_id}/ai-review")
-def start_ai_review(scan_id: str, background_tasks: BackgroundTasks):
+@limiter.limit("30/minute")  # LLM calls are expensive — stricter budget
+def start_ai_review(request: Request, scan_id: str, background_tasks: BackgroundTasks):
     db = get_db()
     exists = db.execute("SELECT 1 FROM scans WHERE id=?", (scan_id,)).fetchone()
     db.close()
