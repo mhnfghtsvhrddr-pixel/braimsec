@@ -367,7 +367,8 @@ def effective_plan(org_id: str):
 
 
 def set_subscription_plan(org_id: str, plan_id: str, status: str = "active",
-                          provider: str | None = None, external_id: str | None = None):
+                          provider: str | None = None, external_id: str | None = None,
+                          period_end: str | None = None):
     if status not in VALID_STATUSES:
         raise ValueError(f"Unknown status: {status}")
     ensure_subscription(org_id)
@@ -379,7 +380,8 @@ def set_subscription_plan(org_id: str, plan_id: str, status: str = "active",
                       external_subscription_id=COALESCE(?, external_subscription_id),
                       current_period_start=?, current_period_end=?
                WHERE org_id=?""",
-            (plan_id, status, provider, external_id, _now(), _month_end(), org_id))
+            (plan_id, status, provider, external_id, _now(),
+             period_end or _month_end(), org_id))
         if cur.rowcount == 0:
             raise KeyError(f"No subscription for org: {org_id}")
         db.execute("UPDATE organizations SET plan=? WHERE id=?", (plan_id, org_id))
@@ -425,12 +427,17 @@ def run_expiry(org_id: str | None = None):
 
     - trialing past trial_ends_at -> expired (falls back to free quotas)
     - canceled past current_period_end -> expired
+    - active past current_period_end, one-time crypto (provider='nowpayments')
+      -> expired. Card subscriptions (Paddle) stay webhook-driven: never
+      auto-expire an active card sub from here, a missed renewal webhook
+      must not cut off a paying customer.
     Returns the list of orgs whose status changed.
     """
     db = get_db()
     changed = []
     try:
-        q = "SELECT org_id, status, trial_ends_at, current_period_end FROM subscriptions"
+        q = ("SELECT org_id, status, trial_ends_at, current_period_end,"
+             " payment_provider FROM subscriptions")
         args: tuple = ()
         if org_id:
             q += " WHERE org_id=?"
@@ -442,6 +449,10 @@ def run_expiry(org_id: str | None = None):
                 new_status = "expired"
             elif (r["status"] == "canceled" and r["current_period_end"]
                   and r["current_period_end"] < now_s):
+                new_status = "expired"
+            elif (r["status"] == "active" and r["current_period_end"]
+                  and r["current_period_end"] < now_s
+                  and r["payment_provider"] == "nowpayments"):
                 new_status = "expired"
             if new_status:
                 db.execute("UPDATE subscriptions SET status=? WHERE org_id=?",
