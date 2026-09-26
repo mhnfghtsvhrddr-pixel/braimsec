@@ -11,6 +11,7 @@ Endpoints:
     GET  /api/scans/{id}/sarif     SARIF 2.1.0 report
 """
 import os
+import json
 import secrets
 import shutil
 import sys
@@ -30,11 +31,12 @@ from slowapi.util import get_remote_address
 
 from database import get_db, init_db
 from billing import (  # noqa: E402
-    OWNER_ORG_ID, cancel_subscription, consume_scan, effective_plan,
+    OWNER_ORG_ID, cancel_subscription, consume_scan, create_org, effective_plan,
     ensure_owner_org, ensure_subscription, get_subscription, list_plans,
     quota_check, quota_status, record_usage, run_expiry, seed_plans,
     start_trial, usage_count, verify_key,
 )
+import nowpayments_pay as nowpay  # noqa: E402
 
 # Reuse the scan engine prototype
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -93,8 +95,12 @@ async def api_key_gate(request: Request, call_next):
     Sets request.state.org_id / request.state.plan for downstream handlers.
 
     /api/plans is public (pricing catalog for the marketing page).
+    /api/checkout/crypto is public (new-customer crypto checkout; rate-limited).
+    /api/webhooks/nowpayments is public (NOWPayments IPN; secured by HMAC).
     """
-    if request.url.path.startswith("/api/") and request.url.path != "/api/plans":
+    public_paths = ("/api/plans", "/api/checkout/crypto",
+                    "/api/webhooks/nowpayments")
+    if request.url.path.startswith("/api/") and request.url.path not in public_paths:
         presented = request.headers.get("x-api-key", "")
         org = None
         if presented:
@@ -428,6 +434,83 @@ def scan_sarif(request: Request, scan_id: str):
 def api_plans():
     """Public plan catalog. Prices are placeholders until customer interviews."""
     return list_plans()
+
+
+# ---------------------------------------------------------------------------
+# NOWPayments crypto checkout (USDT). DRAFT — see nowpayments_pay module.
+# Deploy-time env: NOWPAYMENTS_API_KEY, NOWPAYMENTS_IPN_SECRET, PUBLIC_BASE_URL
+# ---------------------------------------------------------------------------
+@app.post("/api/checkout/crypto")
+@limiter.limit("10/minute")
+async def crypto_checkout(request: Request):
+    """Create a hosted NOWPayments invoice for a public tier.
+
+    Public (new customers have no API key yet); rate-limited to 10/min/IP.
+    Body: {tier: starter|pro|advanced, cycle: monthly|annual, email: str}
+    Returns: {invoice_url, invoice_id, order_id}
+    """
+    api_key = os.environ.get("NOWPAYMENTS_API_KEY", "")
+    if not api_key:
+        raise HTTPException(503, "Crypto checkout is not configured yet")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+    tier = str(body.get("tier", "")).lower()
+    cycle = str(body.get("cycle", "")).lower()
+    email = str(body.get("email", "")).strip()
+    entry = nowpay.catalog_entry(tier, cycle)
+    if not entry:
+        raise HTTPException(400, "Unknown tier/cycle")
+    if "@" not in email or len(email) > 254:
+        raise HTTPException(400, "A valid email is required")
+    usd_price, _plan = entry
+
+    org_id = create_org(email)
+    ensure_subscription(org_id)
+    order_id = nowpay.make_order_id(tier, cycle, org_id)
+    base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    ipn_url = f"{base}/api/webhooks/nowpayments" if base else ""
+    success_url = f"{base}/checkout/success" if base else ""
+    cancel_url = f"{base}/pricing" if base else ""
+    try:
+        invoice = nowpay.create_invoice(
+            api_key, usd_price, order_id,
+            f"BraimSec {tier.title()} ({cycle})",
+            ipn_url, success_url, cancel_url)
+    except Exception as e:
+        raise HTTPException(502, f"Payment provider error: {e}")
+    invoice_id = str(invoice.get("id"))
+    nowpay.record_invoice(invoice_id, order_id, org_id, tier, cycle,
+                          usd_price, customer_email=email)
+    return {"invoice_url": invoice.get("invoice_url"),
+            "invoice_id": invoice_id, "order_id": order_id,
+            "amount_usd": usd_price, "pay_currency": nowpay.PAY_CURRENCY}
+
+
+@app.post("/api/webhooks/nowpayments")
+async def nowpayments_ipn(request: Request):
+    """NOWPayments Instant Payment Notification receiver.
+
+    Public by necessity (called by NOWPayments). Security is the HMAC-SHA512
+    signature in x-nowpayments-sig, verified against NOWPAYMENTS_IPN_SECRET.
+    Always returns 200 on a valid signature (even for ignored events) so
+    NOWPayments stops retrying; 400 only on bad signature.
+    """
+    secret = os.environ.get("NOWPAYMENTS_IPN_SECRET", "")
+    raw = await request.body()
+    sig = request.headers.get("x-nowpayments-sig")
+    if not nowpay.verify_ipn_signature(raw, sig, secret):
+        return JSONResponse({"ok": False, "error": "bad signature"},
+                            status_code=400)
+    try:
+        payload = json.loads(raw.decode())
+    except Exception:
+        return JSONResponse({"ok": False, "error": "bad json"},
+                            status_code=400)
+    verdict, info = nowpay.fulfill_ipn(payload)
+    return {"ok": True, "verdict": verdict,
+            "detail": info if isinstance(info, str) else "fulfilled"}
 
 
 @app.get("/api/subscription")
