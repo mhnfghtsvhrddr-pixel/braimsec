@@ -29,16 +29,27 @@ ENGINE_VERSION = "0.1.0"
 SEMGREP_SEVERITY = {"ERROR": "error", "WARNING": "warning", "INFO": "note"}
 
 
+class EngineError(RuntimeError):
+    """A scanner binary is missing or timed out.
+
+    Raised instead of sys.exit() so the engine is safe to embed in a
+    long-lived process (the API server): a SystemExit inside a background
+    task would hang the request instead of failing the scan cleanly.
+    """
+
+    def __init__(self, message, exit_code=2):
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
 def _run(cmd, timeout=600):
     """Run a command, never raise on non-zero exit (scanners signal findings)."""
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
-        print(f"ERROR: binary not found: {cmd[0]}", file=sys.stderr)
-        sys.exit(2)
+        raise EngineError(f"binary not found: {cmd[0]}", exit_code=2)
     except subprocess.TimeoutExpired:
-        print(f"ERROR: timed out: {' '.join(cmd)}", file=sys.stderr)
-        sys.exit(3)
+        raise EngineError(f"timed out: {' '.join(cmd)}", exit_code=3)
 
 
 def run_semgrep(target):
@@ -173,9 +184,13 @@ def main():
         sys.exit(2)
 
     print(f"[*] Scanning {args.target} with Semgrep...", flush=True)
-    findings = run_semgrep(args.target)
-    print(f"[*] Scanning {args.target} with gitleaks...", flush=True)
-    findings += run_gitleaks(args.target)
+    try:
+        findings = run_semgrep(args.target)
+        print(f"[*] Scanning {args.target} with gitleaks...", flush=True)
+        findings += run_gitleaks(args.target)
+    except EngineError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(e.exit_code)
 
     sarif = to_sarif(findings)
     with open(args.output, "w") as f:
