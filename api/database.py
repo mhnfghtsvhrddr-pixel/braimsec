@@ -117,5 +117,9 @@ def init_db():
         conn.execute("ALTER TABLE scans ADD COLUMN webhook_url TEXT")
     if "webhook_secret" not in scan_cols:
         conn.execute("ALTER TABLE scans ADD COLUMN webhook_secret TEXT")
+    # Lightweight migration: scan target dir (high-risk sink auditing needs
+    # the sources at AI-review time; may be gone for cleaned-up zip uploads)
+    if "target_dir" not in scan_cols:
+        conn.execute("ALTER TABLE scans ADD COLUMN target_dir TEXT")
     conn.commit()
     conn.close()
