@@ -1,6 +1,7 @@
 [
   "test_async_queue.py::test_broker_unreachable_returns_503",
   "test_async_queue.py::test_enqueue_falls_back_inline_when_unconfigured",
+  "test_async_queue.py::test_enqueue_passes_baseline_to_celery",
   "test_async_queue.py::test_enqueue_routes_to_celery_when_configured",
   "test_async_queue.py::test_no_webhook_without_url",
   "test_async_queue.py::test_run_scan_exhausted_retries_marks_failed",
@@ -31,6 +32,15 @@
   "test_fix_suggestions.py::test_validate_fix_missing_file",
   "test_fix_suggestions.py::test_validate_fix_non_python_skips_syntax",
   "test_fix_suggestions.py::test_validate_fix_original_not_found",
+  "test_incremental.py::test_carried_findings_keep_ai_review",
+  "test_incremental.py::test_changed_file_rescans_with_import_hop",
+  "test_incremental.py::test_code_change_skips_sca",
+  "test_incremental.py::test_manifest_change_runs_sca",
+  "test_incremental.py::test_no_change_carries_findings_without_engines",
+  "test_incremental.py::test_other_org_baseline_fails_scan",
+  "test_incremental.py::test_unknown_baseline_fails_scan",
+  "test_incremental.py::test_unknown_baseline_rejected_before_quota",
+  "test_incremental.py::test_zip_with_baseline_rejected",
   "test_rate_limit.py::test_rate_limit_key_prefers_api_key",
   "test_rate_limit.py::test_scan_endpoint_rate_limited",
   "test_rate_limit.py::test_unauthenticated_still_rejected",
@@ -49,5 +59,11 @@
   "test_sink_audit.py::test_task_quota_exhausted_spends_nothing",
   "test_sink_audit.py::test_task_respects_kill_switch",
   "test_sink_audit.py::test_task_skips_safe_verdicts",
-  "test_sink_audit.py::test_task_skips_when_sources_gone"
+  "test_sink_audit.py::test_task_skips_when_sources_gone",
+  "test_taint_flow.py::test_happy_path_linear_trace",
+  "test_taint_flow.py::test_missing_finding_404",
+  "test_taint_flow.py::test_no_key_401",
+  "test_taint_flow.py::test_other_org_gets_404",
+  "test_taint_flow.py::test_sanitized_verdict",
+  "test_taint_flow.py::test_sources_deleted_reports_unavailable"
 ]
