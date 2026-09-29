@@ -52,9 +52,13 @@ except Exception:  # noqa: BLE001 - bot works AI-less (secrets only)
     LLMClient = analyze_finding = read_snippet = None
 
 try:
-    from taintflow import ast_backward_slice, extract_taint_path  # noqa: E402
+    from taintflow import (ast_backward_slice, extract_taint_path,  # noqa: E402
+                           _is_taint_rule)
 except Exception:  # noqa: BLE001
     ast_backward_slice = extract_taint_path = None
+
+    def _is_taint_rule(rule_id):  # fallback if taintflow import fails
+        return bool(rule_id) and "braimsec.taint." in rule_id
 
 try:
     from fix_suggestions import (  # noqa: E402
@@ -63,16 +67,6 @@ except Exception:  # noqa: BLE001
     extract_fix_context = generate_fix = None
 
 SEVERITY_RANK = {"note": 0, "warning": 1, "error": 2}
-
-
-def _is_taint_rule(rule_id):
-    """Our taint rules, however semgrep names them.
-
-    check_id is the plain id (``braimsec.taint.x``) in some flows and a
-    dotted file path (``....rules.braimsec.taint.x``) in others — match
-    the segment, not the prefix.
-    """
-    return bool(rule_id) and "braimsec.taint." in rule_id
 
 GIT_TIMEOUT = 60
 SCAN_TIMEOUT_NOTE = ("semgrep runs are bounded by scan_engine itself; "
