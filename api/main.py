@@ -13,10 +13,8 @@ Endpoints:
 import os
 import json
 import secrets
-import shutil
 import sys
 import tempfile
-import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -42,17 +40,12 @@ import nowpayments_pay as nowpay  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "scanner"))
 from scan_engine import (  # noqa: E402
-    ENGINE_NAME,
-    ENGINE_VERSION,
-    run_gitleaks,
-    run_semgrep,
     to_sarif,
 )
 
-# AI layer
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "ai"))
-from ai_layer import LLMClient, analyze_finding, read_snippet  # noqa: E402
+# Durable queue (Celery + Redis); falls back to inline BackgroundTasks
+# when BRAIMSEC_BROKER_URL is unset.
+from tasks import enqueue_ai_review, enqueue_scan  # noqa: E402
 
 
 def now():
@@ -198,42 +191,14 @@ def startup():
     ensure_subscription(OWNER_ORG_ID)
 
 
-def do_scan(scan_id: str, target_dir: str, cleanup_dir: str | None = None):
-    """Background job: run both engines, store normalized findings."""
-    db = get_db()
-    try:
-        db.execute("UPDATE scans SET status='running', started_at=? WHERE id=?",
-                   (now(), scan_id))
-        db.commit()
-        findings = run_semgrep(target_dir) + run_gitleaks(target_dir)
-        for f in findings:
-            db.execute(
-                """INSERT INTO findings
-                   (scan_id, tool, rule_id, severity, message, file, line, col)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (scan_id, f["tool"], f["rule_id"], f["severity"],
-                 f["message"], f["file"], f["line"], f["col"]),
-            )
-        db.execute(
-            "UPDATE scans SET status='done', finished_at=?, total_findings=? WHERE id=?",
-            (now(), len(findings), scan_id),
-        )
-        db.commit()
-    except Exception as e:  # noqa: BLE001 - prototype: record failure
-        db.execute("UPDATE scans SET status='failed', finished_at=?, error=? WHERE id=?",
-                   (now(), str(e), scan_id))
-        db.commit()
-    finally:
-        db.close()
-        if cleanup_dir and os.path.isdir(cleanup_dir):
-            shutil.rmtree(cleanup_dir, ignore_errors=True)
-
-
 def _new_scan(org_id: str, target_name: str, target_dir: str,
-              cleanup_dir, background_tasks: BackgroundTasks):
+              cleanup_dir, background_tasks: BackgroundTasks,
+              webhook_url: str | None = None,
+              webhook_secret: str | None = None):
     """Create a scan owned by org_id. Consumes one unit of monthly quota.
 
-    Raises HTTPException(402) when the org's plan quota is exhausted.
+    Raises HTTPException(402) when the org's plan quota is exhausted,
+    HTTPException(503) when the durable queue is configured but unreachable.
     """
     if not consume_scan(org_id):
         allowed, used, quota = quota_status(org_id)
@@ -245,13 +210,25 @@ def _new_scan(org_id: str, target_name: str, target_dir: str,
     scan_id = uuid.uuid4().hex[:12]
     db = get_db()
     db.execute(
-        "INSERT INTO scans (id, org_id, target_name, status, created_at)"
-        " VALUES (?,?,?,?,?)",
-        (scan_id, org_id, target_name, "queued", now()))
+        "INSERT INTO scans (id, org_id, target_name, status, created_at,"
+        " webhook_url, webhook_secret) VALUES (?,?,?,?,?,?,?)",
+        (scan_id, org_id, target_name, "queued", now(),
+         webhook_url, webhook_secret))
     db.commit()
     db.close()
-    background_tasks.add_task(do_scan, scan_id, target_dir, cleanup_dir)
-    return {"scan_id": scan_id, "status": "queued"}
+    try:
+        enqueue_scan(scan_id, target_dir, cleanup_dir, background_tasks)
+    except Exception as e:  # noqa: BLE001 - e.g. broker unreachable
+        db = get_db()
+        db.execute("UPDATE scans SET status='failed', finished_at=?, error=?"
+                   " WHERE id=?", (now(), f"queue unavailable: {e}", scan_id))
+        db.commit()
+        db.close()
+        raise HTTPException(503, "Scan queue unavailable, try again shortly.")
+    result = {"scan_id": scan_id, "status": "queued"}
+    if webhook_secret:
+        result["webhook_secret"] = webhook_secret
+    return result
 
 
 @app.post("/api/scans")
@@ -261,11 +238,16 @@ async def create_scan(
     background_tasks: BackgroundTasks,
     target_path: str | None = Form(None),
     file: UploadFile | None = File(None),
+    webhook_url: str | None = Form(None),
 ):
     """Start a scan from a server-local path or an uploaded zip.
 
     Quota is checked before any expensive work, and consumed only when a
     scan is actually created (validation failures cost nothing).
+
+    Optional ``webhook_url`` (http/https): the worker POSTs a signed JSON
+    payload (``X-BraimSec-Signature: sha256=...``) when the scan reaches a
+    terminal state. The signing secret is returned once in the response.
     """
     org_id = request.state.org_id
     allowed, used, quota = quota_status(org_id)
@@ -275,6 +257,12 @@ async def create_scan(
             f"Monthly scan quota exceeded ({used}/{quota} used). "
             "Upgrade your plan to continue scanning.",
         )
+    webhook_secret = None
+    if webhook_url:
+        from urllib.parse import urlparse
+        if urlparse(webhook_url).scheme not in ("http", "https"):
+            raise HTTPException(400, "webhook_url must be http(s)")
+        webhook_secret = secrets.token_hex(16)
     if file is not None:
         # Enforce the size cap while streaming (Content-Length headers can lie).
         chunks, size = [], 0
@@ -300,12 +288,14 @@ async def create_scan(
             target_dir = extract_dir
         else:
             raise HTTPException(400, "Uploaded file must be a zip archive")
-        return _new_scan(org_id, filename, target_dir, workdir, background_tasks)
+        return _new_scan(org_id, filename, target_dir, workdir, background_tasks,
+                         webhook_url, webhook_secret)
 
     if target_path:
         target_dir = _resolve_scan_target(target_path)
         return _new_scan(org_id, os.path.basename(target_dir.rstrip("/")) or target_dir,
-                         target_dir, None, background_tasks)
+                         target_dir, None, background_tasks,
+                         webhook_url, webhook_secret)
 
     raise HTTPException(400, "Provide target_path or upload a zip file")
 
@@ -358,37 +348,6 @@ def scan_results(request: Request, scan_id: str, severity: str | None = None):
     return [dict(r) for r in rows]
 
 
-def do_ai_review(scan_id: str):
-    """Background job: LLM second-opinion review of every finding.
-
-    Each reviewed finding consumes one unit of the org's monthly AI-review
-    quota (the real variable cost) and is recorded in the usage ledger.
-    """
-    client = LLMClient()
-    db = get_db()
-    try:
-        scan = db.execute("SELECT org_id FROM scans WHERE id=?", (scan_id,)).fetchone()
-        org_id = scan["org_id"] if scan else None
-        rows = db.execute("SELECT * FROM findings WHERE scan_id=?", (scan_id,)).fetchall()
-        for r in rows:
-            f = dict(r)
-            snippet = read_snippet(f.get("file") or "", f.get("line") or 0)
-            t0 = time.monotonic()
-            res = analyze_finding(client, f, snippet)
-            wall_ms = int((time.monotonic() - t0) * 1000)
-            db.execute(
-                """UPDATE findings SET ai_verdict=?, ai_confidence=?,
-                   ai_explanation=?, ai_fix=? WHERE id=?""",
-                (res["ai_verdict"], res["ai_confidence"],
-                 res["ai_explanation"], res["ai_fix"], f["id"]),
-            )
-            db.commit()
-            if org_id:
-                record_usage(org_id, "ai_review", scan_id, wall_time_ms=wall_ms)
-    finally:
-        db.close()
-
-
 @app.post("/api/scans/{scan_id}/ai-review")
 @limiter.limit("30/minute")  # LLM calls are expensive — stricter budget
 def start_ai_review(request: Request, scan_id: str, background_tasks: BackgroundTasks):
@@ -412,7 +371,10 @@ def start_ai_review(request: Request, scan_id: str, background_tasks: Background
             f"Monthly AI-review quota exceeded ({used}/{quota} used). "
             "Upgrade your plan to continue.",
         )
-    background_tasks.add_task(do_ai_review, scan_id)
+    try:
+        enqueue_ai_review(scan_id, background_tasks)
+    except Exception:  # noqa: BLE001 - e.g. broker unreachable
+        raise HTTPException(503, "Review queue unavailable, try again shortly.")
     return {"scan_id": scan_id, "ai_review": "queued"}
 
 
