@@ -283,7 +283,7 @@ def _semgrep_trace_steps(abs_path, rule_id, line, timeout=120):
     """Best-effort: run semgrep --dataflow-traces scoped to one file."""
     if not os.path.isfile(SEMGREP_BIN) and not _which(SEMGREP_BIN):
         return None
-    if rule_id.startswith("braimsec.taint") and os.path.isfile(TAINT_RULES):
+    if "braimsec.taint." in (rule_id or "") and os.path.isfile(TAINT_RULES):
         cfg = TAINT_RULES
     else:
         cfg = "auto"
