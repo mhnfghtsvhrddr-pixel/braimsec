@@ -1,4 +1,5 @@
 {
   "scanner/test_incremental.py": true,
-  "api/test_billing.py": true
+  "api/test_billing.py": true,
+  "api/test_subscriptions.py": true
 }
