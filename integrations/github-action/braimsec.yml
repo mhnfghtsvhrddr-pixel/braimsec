@@ -1,0 +1,50 @@
+name: BraimSec PR Review
+
+# Reviews the PR *diff* only. Comments inline on new, high-confidence
+# findings (error severity + AI verdict "vulnerable", or leaked secrets).
+# Warnings never comment. Nothing unreviewed by the AI ever comments.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  braimsec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the bot diffs base...head; shallow clones break it
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install BraimSec scanner
+        run: |
+          pip install --quiet semgrep
+          # gitleaks binary (pinned; check for newer releases)
+          curl -sL https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz \
+            | tar -xz -C /tmp gitleaks
+          echo "/tmp" >> "$GITHUB_PATH"
+          # BraimSec engine (shallow clone of the product repo)
+          git clone --depth 1 https://github.com/mhnfghtsvhrddr-pixel/braimsec /tmp/braimsec
+
+      - name: Review the diff
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # AI gate (same contract as the BraimSec API layer). Without these,
+          # only leaked secrets can produce comments.
+          AI_API_URL: ${{ secrets.BRAIMSEC_AI_API_URL }}
+          AI_API_KEY: ${{ secrets.BRAIMSEC_AI_API_KEY }}
+          AI_MODEL: ${{ secrets.BRAIMSEC_AI_MODEL }}
+        run: |
+          python /tmp/braimsec/scanner/prbot.py . \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}" \
+            --post \
+            --repo-slug "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}"
