@@ -112,5 +112,10 @@ def init_db():
     if "org_id" not in scan_cols:
         conn.execute("ALTER TABLE scans ADD COLUMN org_id TEXT")
         conn.execute("UPDATE scans SET org_id='owner' WHERE org_id IS NULL")
+    # Lightweight migration: scan-completion webhooks (async queue)
+    if "webhook_url" not in scan_cols:
+        conn.execute("ALTER TABLE scans ADD COLUMN webhook_url TEXT")
+    if "webhook_secret" not in scan_cols:
+        conn.execute("ALTER TABLE scans ADD COLUMN webhook_secret TEXT")
     conn.commit()
     conn.close()
