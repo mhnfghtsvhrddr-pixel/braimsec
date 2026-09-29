@@ -51,6 +51,7 @@ from sink_audit import (  # noqa: E402
     enabled as sink_audit_enabled,
 )
 from ai_layer import LLMClient  # noqa: E402
+from taintflow import extract_taint_path  # noqa: E402
 from fix_suggestions import (  # noqa: E402
     extract_fix_context,
     generate_fix,
@@ -513,6 +514,37 @@ def fix_suggestion(request: Request, finding_id: int):
     payload = _fix_payload(dict(row2))
     db2.close()
     return {"finding_id": finding_id, "cached": False, "suggestion": payload}
+
+
+@app.get("/api/findings/{finding_id}/taint-flow")
+@limiter.limit("30/minute")  # on-demand semgrep/AST work per call
+def taint_flow(request: Request, finding_id: int):
+    """Linear taint-flow trace for one finding (Proposal Part 3, v1).
+
+    Deterministic — no LLM, no quota consumed. Returns the proposal §2
+    schema: ordered steps (source -> propagation -> sink) each labeled with
+    ``origin`` (``semgrep-trace`` | ``ast-slice``; ``ai-inferred`` is
+    reserved for the AI layer and never emitted here), plus the tri-state
+    ``sanitization`` verdict (unsanitized / sanitized / uncertain).
+    """
+    org_id = request.state.org_id
+    db = get_db()
+    row = db.execute(
+        """SELECT f.*, s.target_dir FROM findings f
+           JOIN scans s ON s.id = f.scan_id
+           WHERE f.id = ? AND s.org_id = ?""",
+        (finding_id, org_id)).fetchone()
+    db.close()
+    if not row:
+        raise HTTPException(404, "Finding not found")
+    finding = dict(row)
+    target_dir = finding.pop("target_dir", None)
+    if not target_dir or not os.path.isdir(target_dir):
+        # zero-retention: zip-scan sources are deleted after the scan
+        return {"available": False, "finding_id": finding_id,
+                "reason": ("Scan sources are no longer available "
+                           "(deleted after scan — zero-retention).")}
+    return extract_taint_path(finding, target_dir)
 
 
 @app.get("/api/scans/{scan_id}/sarif")
