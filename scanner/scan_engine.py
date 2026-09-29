@@ -67,14 +67,19 @@ def _run(cmd, timeout=600):
         raise EngineError(f"timed out: {' '.join(cmd)}", exit_code=3)
 
 
-def run_semgrep(target):
-    """Run Semgrep and return normalized findings."""
+def run_semgrep(target, scope=None):
+    """Run Semgrep and return normalized findings.
+
+    scope: optional list of absolute file paths to scan instead of the whole
+    target directory (incremental scans). None = full target.
+    """
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
         out_path = f.name
     cmd = [SEMGREP_BIN, "--config", "auto"]
     if BRAIMSEC_TAINT_RULES and os.path.isfile(BRAIMSEC_TAINT_RULES):
         cmd += ["--config", BRAIMSEC_TAINT_RULES]
-    cmd += ["--json", "-o", out_path, target]
+    targets = list(scope) if scope else [target]
+    cmd += ["--json", "-o", out_path] + targets
     try:
         _run(cmd)
         with open(out_path) as f:
@@ -99,8 +104,20 @@ def run_semgrep(target):
     return findings
 
 
-def run_gitleaks(target):
-    """Run gitleaks and return normalized findings."""
+def run_gitleaks(target, scope=None):
+    """Run gitleaks and return normalized findings.
+
+    scope: optional list of absolute file paths to scan instead of the whole
+    target directory (incremental scans). None = full target.
+    """
+    targets = list(scope) if scope else [target]
+    findings = []
+    for t in targets:
+        findings.extend(_run_gitleaks_one(t))
+    return findings
+
+
+def _run_gitleaks_one(target):
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
         out_path = f.name
     try:
