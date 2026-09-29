@@ -279,6 +279,16 @@ def _rules_match(block_rule, rule_id):
             or rule_id.endswith(block_rule))
 
 
+def _is_taint_rule(rule_id):
+    """Our taint rules, however semgrep names the check_id.
+
+    check_id is the plain id (``braimsec.taint.x``) in some flows and a
+    dotted file path (``...rules.braimsec.taint.x``) in others — match the
+    segment, not the prefix.
+    """
+    return bool(rule_id) and "braimsec.taint." in rule_id
+
+
 def _semgrep_trace_steps(abs_path, rule_id, line, timeout=120):
     """Best-effort: run semgrep --dataflow-traces scoped to one file."""
     if not os.path.isfile(SEMGREP_BIN) and not _which(SEMGREP_BIN):
