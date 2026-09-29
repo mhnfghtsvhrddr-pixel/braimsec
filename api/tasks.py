@@ -89,6 +89,32 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _engine_versions() -> dict:
+    """Best-effort engine versions for the report honesty appendix
+    (proposal Part 5 §4.1). Never raises; unknown versions are honest."""
+    import subprocess
+    out = {}
+    for key, env, default, flag in (
+            ("semgrep", "SEMGREP_BIN", "semgrep", "--version"),
+            ("gitleaks", "GITLEAKS_BIN", "gitleaks", "version")):
+        try:
+            p = subprocess.run([os.environ.get(env, default), flag],
+                               capture_output=True, text=True, timeout=30)
+            text = (p.stdout or p.stderr or "").strip().splitlines()
+            out[key] = text[0][:80] if text else "unknown"
+        except Exception:  # noqa: BLE001
+            out[key] = "unknown"
+    try:
+        rules = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "scanner", "rules", "braimsec-taint.yaml")
+        with open(rules, "rb") as f:
+            out["braimsec_taint_rules"] = \
+                "braimsec-taint.yaml@" + hashlib.sha256(f.read()).hexdigest()[:8]
+    except Exception:  # noqa: BLE001
+        out["braimsec_taint_rules"] = "unknown"
+    return out
+
+
 def _deliver_webhook(scan_id: str) -> None:
     """Best-effort signed webhook on terminal scan state. Never fails the scan."""
     db = get_db()
@@ -248,10 +274,10 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
             )
         db.execute(
             "UPDATE scans SET status='done', finished_at=?, total_findings=?,"
-            " fingerprint_json=?, incremental_of=? WHERE id=?",
+            " fingerprint_json=?, incremental_of=?, engines_json=? WHERE id=?",
             (_now_iso(), len(findings),
              json.dumps(fingerprint_tree(target_dir)), incremental_of,
-             scan_id),
+             json.dumps(_engine_versions()), scan_id),
         )
         db.commit()
     except Exception as e:  # noqa: BLE001 - prototype: record failure
