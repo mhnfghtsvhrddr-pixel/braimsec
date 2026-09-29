@@ -121,5 +121,12 @@ def init_db():
     # the sources at AI-review time; may be gone for cleaned-up zip uploads)
     if "target_dir" not in scan_cols:
         conn.execute("ALTER TABLE scans ADD COLUMN target_dir TEXT")
+    # Lightweight migration: AI fix suggestions (cached per finding)
+    finding_cols = {r["name"] for r in conn.execute("PRAGMA table_info(findings)")}
+    for col, ctype in (("fix_diff", "TEXT"), ("fix_explanation", "TEXT"),
+                       ("fix_confidence", "REAL"), ("fix_caveats", "TEXT"),
+                       ("fix_checks", "TEXT"), ("fix_generated_at", "TEXT")):
+        if col not in finding_cols:
+            conn.execute(f"ALTER TABLE findings ADD COLUMN {col} {ctype}")
     conn.commit()
     conn.close()
