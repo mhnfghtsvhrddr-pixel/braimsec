@@ -128,5 +128,13 @@ def init_db():
                        ("fix_checks", "TEXT"), ("fix_generated_at", "TEXT")):
         if col not in finding_cols:
             conn.execute(f"ALTER TABLE findings ADD COLUMN {col} {ctype}")
+    # Lightweight migration: incremental scanning (diff-based rescans).
+    # fingerprint_json: {relpath: sha256} of the scannable tree, captured
+    # after every scan. incremental_of: id of the baseline scan when this
+    # scan ran incrementally (NULL = full scan).
+    if "fingerprint_json" not in scan_cols:
+        conn.execute("ALTER TABLE scans ADD COLUMN fingerprint_json TEXT")
+    if "incremental_of" not in scan_cols:
+        conn.execute("ALTER TABLE scans ADD COLUMN incremental_of TEXT")
     conn.commit()
     conn.close()
