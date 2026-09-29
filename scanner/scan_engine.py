@@ -11,6 +11,9 @@ Usage:
 Env overrides:
     SEMGREP_BIN   path to semgrep binary
     GITLEAKS_BIN  path to gitleaks binary
+    BRAIMSEC_TAINT_RULES  path to the custom taint rule pack
+                          (default: scanner/rules/braimsec-taint.yaml;
+                           empty string disables it)
     (SCA)         see sca.py: OSV_API_URL, OSV_TIMEOUT, SCA_TIMEOUT, SCA_OFFLINE
 """
 
@@ -25,6 +28,15 @@ from sca import run_sca
 
 SEMGREP_BIN = os.environ.get("SEMGREP_BIN", "semgrep")
 GITLEAKS_BIN = os.environ.get("GITLEAKS_BIN", "gitleaks")
+
+# BraimSec custom taint rules (SSRF / file-upload / path-traversal gaps that
+# the open-source registry does not cover). Shipped with the engine; loaded
+# alongside `--config auto`. Env override for tests: BRAIMSEC_TAINT_RULES=path
+# (empty string disables the custom pack).
+_TAINT_RULES_DEFAULT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "rules", "braimsec-taint.yaml")
+BRAIMSEC_TAINT_RULES = os.environ.get("BRAIMSEC_TAINT_RULES",
+                                      _TAINT_RULES_DEFAULT)
 
 ENGINE_NAME = "BraimSec Scanner"
 ENGINE_VERSION = "0.1.0"
@@ -59,8 +71,12 @@ def run_semgrep(target):
     """Run Semgrep and return normalized findings."""
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
         out_path = f.name
+    cmd = [SEMGREP_BIN, "--config", "auto"]
+    if BRAIMSEC_TAINT_RULES and os.path.isfile(BRAIMSEC_TAINT_RULES):
+        cmd += ["--config", BRAIMSEC_TAINT_RULES]
+    cmd += ["--json", "-o", out_path, target]
     try:
-        _run([SEMGREP_BIN, "--config", "auto", "--json", "-o", out_path, target])
+        _run(cmd)
         with open(out_path) as f:
             data = json.load(f)
     except (json.JSONDecodeError, FileNotFoundError):
