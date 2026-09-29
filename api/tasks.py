@@ -41,9 +41,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "ai"))
 
 from database import get_db  # noqa: E402
-from billing import record_usage  # noqa: E402
+from billing import quota_check, record_usage  # noqa: E402
 from scan_engine import run_gitleaks, run_semgrep, run_sca  # noqa: E402
 from ai_layer import LLMClient, analyze_finding, read_snippet  # noqa: E402
+from sink_audit import (  # noqa: E402
+    analyze_sink,
+    audit_candidates,
+    discover_sinks,
+    enabled as sink_audit_enabled,
+    should_store,
+)
 
 log = logging.getLogger("braimsec.tasks")
 
@@ -191,9 +198,13 @@ def _run_ai_review_impl(task_self, scan_id: str):
     client = LLMClient()
     db = get_db()
     will_retry = False
+    sink_summary = {"status": "skipped", "sites": 0, "candidates": 0,
+                    "audited": 0, "confirmed": 0, "skipped_quota": 0}
     try:
-        scan = db.execute("SELECT org_id FROM scans WHERE id=?", (scan_id,)).fetchone()
+        scan = db.execute("SELECT org_id, target_dir FROM scans WHERE id=?",
+                          (scan_id,)).fetchone()
         org_id = scan["org_id"] if scan else None
+        target_dir = scan["target_dir"] if scan else None
         rows = db.execute("SELECT * FROM findings WHERE scan_id=?", (scan_id,)).fetchall()
         # Only pending findings: retries resume where the last attempt stopped
         # and never double-bill the AI-review quota.
@@ -222,6 +233,78 @@ def _run_ai_review_impl(task_self, scan_id: str):
         if pending and failed == len(pending):
             # Total outage (e.g. LLM down): retry the whole batch with backoff.
             raise RuntimeError("all findings failed AI review")
+        # --- High-risk sink auditing: proactive second pass over dangerous
+        # sinks (SSRF, command injection, ...) that no scanner rule fired on.
+        # Each AI call spends one ai_review quota unit — the same pool as
+        # finding reviews. Findings created here are pre-reviewed, so the
+        # pending-findings loop above (ai_verdict IS NULL) never re-bills them.
+        if sink_audit_enabled() and client.configured:
+            if not (target_dir and os.path.isdir(target_dir)):
+                # Sources gone (e.g. cleaned-up zip upload): nothing to hunt.
+                sink_summary["status"] = "skipped_no_sources"
+            else:
+                try:
+                    sites = discover_sinks(target_dir)
+                except Exception as e:  # noqa: BLE001 - fail-soft
+                    log.warning("sink discovery failed for scan %s: %s",
+                                scan_id, e)
+                    sites = []
+                candidates = audit_candidates(sites)
+                sink_summary.update(status="audited", sites=len(sites),
+                                    candidates=len(candidates))
+                new_findings = 0
+                for idx, site in enumerate(candidates):
+                    if org_id:
+                        allowed, _, _ = quota_check(org_id, "ai_review", 1)
+                        if not allowed:
+                            # Quota exhausted mid-pass: count the rest as skipped.
+                            sink_summary["skipped_quota"] = len(candidates) - idx
+                            break
+                    snippet = read_snippet(site["file"], site["line"], radius=30)
+                    t0 = time.monotonic()
+                    try:
+                        res = analyze_sink(client, site, snippet)
+                    except Exception as e:  # noqa: BLE001 - one bad site != dead job
+                        log.warning("sink audit failed at %s:%s: %s",
+                                    site["file"], site["line"], e)
+                        continue
+                    wall_ms = int((time.monotonic() - t0) * 1000)
+                    sink_summary["audited"] += 1
+                    if org_id:
+                        record_usage(org_id, "ai_review", scan_id,
+                                     wall_time_ms=wall_ms)
+                    if not should_store(res):
+                        continue
+                    # Idempotency: a retried job must not duplicate sink findings.
+                    dup = db.execute(
+                        "SELECT 1 FROM findings WHERE scan_id=? AND tool='sink-audit'"
+                        " AND rule_id=? AND file=? AND line=?",
+                        (scan_id, site["category"] + "-sink",
+                         site["file"], site["line"])).fetchone()
+                    if dup:
+                        continue
+                    db.execute(
+                        """INSERT INTO findings
+                           (scan_id, tool, rule_id, severity, message, file, line, col,
+                            ai_verdict, ai_confidence, ai_explanation, ai_fix)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (scan_id, "sink-audit", site["category"] + "-sink",
+                         site["severity"], res["ai_explanation"], site["file"],
+                         site["line"], site["col"], res["ai_verdict"],
+                         res["ai_confidence"], res["ai_explanation"],
+                         res["ai_fix"]),
+                    )
+                    db.commit()
+                    new_findings += 1
+                if new_findings:
+                    db.execute("UPDATE scans SET total_findings = total_findings + ?"
+                               " WHERE id=?", (new_findings, scan_id))
+                    db.commit()
+                sink_summary["confirmed"] = new_findings
+        elif not sink_audit_enabled():
+            sink_summary["status"] = "disabled"
+        else:
+            sink_summary["status"] = "skipped_no_llm"
     except Exception as e:  # noqa: BLE001
         if isinstance(e, RuntimeError) and task_self.request.retries < (task_self.max_retries or 0):
             will_retry = True
@@ -229,7 +312,8 @@ def _run_ai_review_impl(task_self, scan_id: str):
         log.error("ai review job %s failed: %s", scan_id, e)
     finally:
         db.close()
-    return {"scan_id": scan_id, "will_retry": will_retry}
+    return {"scan_id": scan_id, "will_retry": will_retry,
+            "sink_audit": sink_summary}
 
 
 def enqueue_scan(scan_id: str, target_dir: str, cleanup_dir: str | None,
