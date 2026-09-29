@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 from database import get_db  # noqa: E402
 from billing import record_usage  # noqa: E402
-from scan_engine import run_gitleaks, run_semgrep  # noqa: E402
+from scan_engine import run_gitleaks, run_semgrep, run_sca  # noqa: E402
 from ai_layer import LLMClient, analyze_finding, read_snippet  # noqa: E402
 
 log = logging.getLogger("braimsec.tasks")
@@ -143,7 +143,7 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
         db.execute("UPDATE scans SET status='running', started_at=? WHERE id=?",
                    (_now_iso(), scan_id))
         db.commit()
-        findings = run_semgrep(target_dir) + run_gitleaks(target_dir)
+        findings = run_semgrep(target_dir) + run_gitleaks(target_dir) + run_sca(target_dir)
         for f in findings:
             db.execute(
                 """INSERT INTO findings
