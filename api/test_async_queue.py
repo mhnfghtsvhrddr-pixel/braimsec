@@ -217,8 +217,18 @@ def test_enqueue_routes_to_celery_when_configured(monkeypatch):
     monkeypatch.setattr(tasks.run_scan, "delay",
                         lambda *a: calls.append(a))
     assert tasks.enqueue_scan("s1", "/tmp", None) == "celery"
-    assert calls == [("s1", "/tmp", None)]
+    assert calls == [("s1", "/tmp", None, None)]
     assert tasks.queue_enabled() is True
+
+
+def test_enqueue_passes_baseline_to_celery(monkeypatch):
+    monkeypatch.setenv("BRAIMSEC_BROKER_URL", "redis://127.0.0.1:6379/0")
+    calls = []
+    monkeypatch.setattr(tasks.run_scan, "delay",
+                        lambda *a: calls.append(a))
+    assert tasks.enqueue_scan("s1", "/tmp", None,
+                              baseline_scan_id="base1") == "celery"
+    assert calls == [("s1", "/tmp", None, "base1")]
 
 
 def test_enqueue_falls_back_inline_when_unconfigured(engines, monkeypatch):
