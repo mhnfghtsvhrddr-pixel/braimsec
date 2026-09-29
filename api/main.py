@@ -15,6 +15,7 @@ import json
 import secrets
 import sys
 import tempfile
+import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -48,6 +49,12 @@ from sink_audit import (  # noqa: E402
     audit_candidates,
     discover_sinks,
     enabled as sink_audit_enabled,
+)
+from ai_layer import LLMClient  # noqa: E402
+from fix_suggestions import (  # noqa: E402
+    extract_fix_context,
+    generate_fix,
+    validate_fix,
 )
 
 # Durable queue (Celery + Redis); falls back to inline BackgroundTasks
@@ -396,6 +403,86 @@ def start_ai_review(request: Request, scan_id: str, background_tasks: Background
         raise HTTPException(503, "Review queue unavailable, try again shortly.")
     return {"scan_id": scan_id, "ai_review": "queued",
             "sink_audit": {"status": sink_status, "budget": sink_budget}}
+
+
+def _fix_payload(row):
+    """Serialize the cached AI fix-suggestion columns of a finding row."""
+    try:
+        checks = json.loads(row.get("fix_checks") or "{}")
+    except Exception:  # noqa: BLE001 - corrupted cache entry: treat as empty
+        checks = {}
+    return {
+        "explanation": row.get("fix_explanation"),
+        "diff": row.get("fix_diff"),
+        "confidence": row.get("fix_confidence"),
+        "caveats": row.get("fix_caveats"),
+        "checks": checks,  # {applies, syntax_ok}: mechanical sanity only
+        "generated_at": row.get("fix_generated_at"),
+    }
+
+
+@app.post("/api/findings/{finding_id}/fix-suggestion")
+@limiter.limit("30/minute")  # LLM calls are expensive — stricter budget
+def fix_suggestion(request: Request, finding_id: int):
+    """AI-powered fix suggestion for one finding.
+
+    On demand and cached: the first call spends one unit of the monthly
+    ``ai_review`` quota and stores the suggestion on the finding; later
+    calls return the cached suggestion for free.
+    """
+    org_id = request.state.org_id
+    db = get_db()
+    row = db.execute(
+        """SELECT f.* FROM findings f JOIN scans s ON s.id = f.scan_id
+           WHERE f.id = ? AND s.org_id = ?""",
+        (finding_id, org_id)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Finding not found")
+    finding = dict(row)
+    if finding.get("fix_generated_at"):
+        db.close()
+        return {"finding_id": finding_id, "cached": True,
+                "suggestion": _fix_payload(finding)}
+    # One fix = one LLM call = one unit from the same ai_review pool.
+    allowed, used, quota = quota_check(org_id, "ai_review", 1)
+    if not allowed:
+        db.close()
+        raise HTTPException(
+            402,
+            f"Monthly AI-review quota exceeded ({used}/{quota} used). "
+            "Upgrade your plan to continue.",
+        )
+    client = LLMClient()
+    if not client.configured:
+        db.close()
+        raise HTTPException(503, "AI provider not configured")
+    func_src, imports_src = extract_fix_context(
+        finding.get("file") or "", finding.get("line") or 0)
+    t0 = time.monotonic()
+    try:
+        gen = generate_fix(client, finding, func_src, imports_src)
+    except Exception as e:  # noqa: BLE001 - LLM failure: clean error
+        db.close()
+        raise HTTPException(502, f"Fix generation failed: {e}")
+    wall_ms = int((time.monotonic() - t0) * 1000)
+    checks = validate_fix(finding.get("file") or "",
+                          gen["fix_original"], gen["fix_patched"])
+    generated_at = now()
+    db.execute(
+        """UPDATE findings SET fix_diff=?, fix_explanation=?, fix_confidence=?,
+           fix_caveats=?, fix_checks=?, fix_generated_at=? WHERE id=?""",
+        (checks["diff"], gen["fix_explanation"], gen["fix_confidence"],
+         gen["fix_caveats"], json.dumps(checks), generated_at, finding_id))
+    db.commit()
+    db.close()
+    record_usage(org_id, "ai_review", finding["scan_id"], wall_time_ms=wall_ms)
+    db2 = get_db()
+    row2 = db2.execute(
+        "SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
+    payload = _fix_payload(dict(row2))
+    db2.close()
+    return {"finding_id": finding_id, "cached": False, "suggestion": payload}
 
 
 @app.get("/api/scans/{scan_id}/sarif")
