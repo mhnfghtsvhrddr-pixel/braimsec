@@ -2,8 +2,8 @@
 """
 BraimSec Scan Engine (prototype v0.1.0)
 --------------------------------------
-Orchestrates Semgrep + gitleaks on a target code directory and
-produces a unified SARIF 2.1.0 report.
+Orchestrates Semgrep + gitleaks + OSV-based SCA on a target code directory
+and produces a unified SARIF 2.1.0 report.
 
 Usage:
     python3 scan_engine.py /path/to/code -o results.sarif
@@ -11,6 +11,7 @@ Usage:
 Env overrides:
     SEMGREP_BIN   path to semgrep binary
     GITLEAKS_BIN  path to gitleaks binary
+    (SCA)         see sca.py: OSV_API_URL, OSV_TIMEOUT, SCA_TIMEOUT, SCA_OFFLINE
 """
 
 import argparse
@@ -19,6 +20,8 @@ import os
 import subprocess
 import sys
 import tempfile
+
+from sca import run_sca
 
 SEMGREP_BIN = os.environ.get("SEMGREP_BIN", "semgrep")
 GITLEAKS_BIN = os.environ.get("GITLEAKS_BIN", "gitleaks")
@@ -188,6 +191,8 @@ def main():
         findings = run_semgrep(args.target)
         print(f"[*] Scanning {args.target} with gitleaks...", flush=True)
         findings += run_gitleaks(args.target)
+        print(f"[*] Scanning dependencies with OSV (SCA)...", flush=True)
+        findings += run_sca(args.target)
     except EngineError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(e.exit_code)
