@@ -63,6 +63,7 @@ class FakeSelf:
 def engines(monkeypatch):
     monkeypatch.setattr(tasks, "run_semgrep", lambda d: [dict(FINDINGS[0])])
     monkeypatch.setattr(tasks, "run_gitleaks", lambda d: [dict(FINDINGS[1])])
+    monkeypatch.setattr(tasks, "run_sca", lambda d: [])
     monkeypatch.setattr(tasks.time, "sleep", lambda s: None)
 
 
