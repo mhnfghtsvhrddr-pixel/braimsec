@@ -1,0 +1,189 @@
+# BraimSec custom taint rules (v1) — first principles, not holdout-tuned.
+#
+# Why these exist: the open-source Semgrep registry (`--config auto`) has no
+# taint rule that fires on the two proven gap families from our discovery
+# work — SSRF through requests/urllib with a user-controlled URL, and
+# unrestricted file upload / path traversal through open() with a
+# user-controlled path. Verified with Semgrep 1.x on minimal repros:
+# `--config auto` reports 0 findings on both patterns.
+#
+# Design philosophy (precision-first, honest):
+# - Rules are written for RECALL on the gap families: sources are web/user
+#   inputs, sinks are the dangerous call arguments. Taint mode means a
+#   constant URL/path never fires — that alone removes the bulk of noise.
+# - The SSRF rules deliberately ship WITHOUT pattern sanitizers: real
+#   SSRF sanitization is an allowlist check, which cannot be expressed as
+#   a syntactic pattern. The AI review layer (FINDING_SYSTEM) is the
+#   precision filter for these, by product architecture.
+# - The file rules DO ship sanitizers (secure_filename, os.path.basename)
+#   because those are the canonical, syntactic fixes for the sink.
+# - Rule IDs are namespaced `braimsec.taint.*` so they are distinguishable
+#   from registry rules in findings and in the AI router.
+#
+# DO NOT tune these against the old holdout set (SPEC v1.0 §4 — no
+# holdout contamination). Measure on scanner/eval/fresh-holdout-v1/.
+
+rules:
+  - id: braimsec.taint.ssrf-requests
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: >-
+      User-controlled URL passed to requests — possible Server-Side Request
+      Forgery (SSRF). Validate the URL against an allowlist of hosts/schemes
+      before requesting it.
+    metadata:
+      category: security
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp: "A10:2021 - Server-Side Request Forgery (SSRF)"
+      confidence: MEDIUM
+      impact: HIGH
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: request.args.get(...)
+              - pattern: request.args[...]
+              - pattern: request.form.get(...)
+              - pattern: request.form[...]
+              - pattern: request.values.get(...)
+              - pattern: request.values[...]
+              - pattern: request.json.get(...)
+              - pattern: request.json[...]
+              - pattern: request.data
+              - pattern: request.GET.get(...)
+              - pattern: request.GET[...]
+              - pattern: request.POST.get(...)
+              - pattern: request.POST[...]
+              - pattern: input(...)
+              - pattern: sys.argv[...]
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: requests.get($URL, ...)
+              - pattern-inside: requests.post($URL, ...)
+              - pattern-inside: requests.put($URL, ...)
+              - pattern-inside: requests.patch($URL, ...)
+              - pattern-inside: requests.delete($URL, ...)
+              - pattern-inside: requests.head($URL, ...)
+              - pattern-inside: requests.options($URL, ...)
+              - pattern-inside: requests.request($M, $URL, ...)
+          - focus-metavariable: $URL
+
+  - id: braimsec.taint.ssrf-urllib
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: >-
+      User-controlled URL passed to urllib — possible Server-Side Request
+      Forgery (SSRF). Validate the URL against an allowlist of hosts/schemes
+      before opening it.
+    metadata:
+      category: security
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp: "A10:2021 - Server-Side Request Forgery (SSRF)"
+      confidence: MEDIUM
+      impact: HIGH
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: request.args.get(...)
+              - pattern: request.args[...]
+              - pattern: request.form.get(...)
+              - pattern: request.form[...]
+              - pattern: request.values.get(...)
+              - pattern: request.values[...]
+              - pattern: request.json.get(...)
+              - pattern: request.json[...]
+              - pattern: request.data
+              - pattern: request.GET.get(...)
+              - pattern: request.GET[...]
+              - pattern: request.POST.get(...)
+              - pattern: request.POST[...]
+              - pattern: input(...)
+              - pattern: sys.argv[...]
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: urllib.request.urlopen($URL, ...)
+              - pattern-inside: urlopen($URL, ...)
+          - focus-metavariable: $URL
+
+  - id: braimsec.taint.unrestricted-file-upload
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Uploaded file saved to a user-controlled path without sanitization —
+      possible unrestricted file upload / path traversal. Wrap the filename
+      with werkzeug.utils.secure_filename() and enforce an allowlist of
+      extensions.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      impact: HIGH
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: request.files.get(...)
+              - pattern: request.files[...]
+    pattern-sinks:
+      - patterns:
+          - pattern-inside: $F.save($DST, ...)
+          - focus-metavariable: $DST
+    pattern-sanitizers:
+      - patterns:
+          - pattern-either:
+              - pattern: secure_filename(...)
+              - pattern: os.path.basename(...)
+
+  - id: braimsec.taint.path-traversal-open
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: >-
+      User-controlled path passed to a file operation — possible path
+      traversal / arbitrary file read or write. Normalize with
+      os.path.abspath() and enforce containment under an intended directory,
+      or map the input through an allowlist.
+    metadata:
+      category: security
+      cwe: "CWE-22: Improper Limitation of a Pathname to a Restricted Directory"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      impact: HIGH
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: request.args.get(...)
+              - pattern: request.args[...]
+              - pattern: request.form.get(...)
+              - pattern: request.form[...]
+              - pattern: request.values.get(...)
+              - pattern: request.values[...]
+              - pattern: request.json.get(...)
+              - pattern: request.json[...]
+              - pattern: request.data
+              - pattern: request.GET.get(...)
+              - pattern: request.GET[...]
+              - pattern: request.POST.get(...)
+              - pattern: request.POST[...]
+              - pattern: input(...)
+              - pattern: sys.argv[...]
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: open($P, ...)
+              - pattern-inside: io.open($P, ...)
+              - pattern-inside: os.open($P, ...)
+              - pattern-inside: pathlib.Path($P).read_text(...)
+              - pattern-inside: pathlib.Path($P).write_text(...)
+              - pattern-inside: pathlib.Path($P).read_bytes(...)
+              - pattern-inside: pathlib.Path($P).write_bytes(...)
+          - focus-metavariable: $P
+    pattern-sanitizers:
+      - patterns:
+          - pattern-either:
+              - pattern: os.path.basename(...)
+              - pattern: secure_filename(...)
