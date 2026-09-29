@@ -136,5 +136,10 @@ def init_db():
         conn.execute("ALTER TABLE scans ADD COLUMN fingerprint_json TEXT")
     if "incremental_of" not in scan_cols:
         conn.execute("ALTER TABLE scans ADD COLUMN incremental_of TEXT")
+    # Lightweight migration: engine versions for the report honesty
+    # appendix (proposal Part 5 §4.1). JSON: {semgrep, gitleaks,
+    # braimsec_taint_rules}. NULL on scans that predate this logging.
+    if "engines_json" not in scan_cols:
+        conn.execute("ALTER TABLE scans ADD COLUMN engines_json TEXT")
     conn.commit()
     conn.close()
