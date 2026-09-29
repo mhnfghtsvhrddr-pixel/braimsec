@@ -208,7 +208,8 @@ def startup():
 def _new_scan(org_id: str, target_name: str, target_dir: str,
               cleanup_dir, background_tasks: BackgroundTasks,
               webhook_url: str | None = None,
-              webhook_secret: str | None = None):
+              webhook_secret: str | None = None,
+              baseline_scan_id: str | None = None):
     """Create a scan owned by org_id. Consumes one unit of monthly quota.
 
     Raises HTTPException(402) when the org's plan quota is exhausted,
@@ -231,7 +232,8 @@ def _new_scan(org_id: str, target_name: str, target_dir: str,
     db.commit()
     db.close()
     try:
-        enqueue_scan(scan_id, target_dir, cleanup_dir, background_tasks)
+        enqueue_scan(scan_id, target_dir, cleanup_dir, background_tasks,
+                     baseline_scan_id)
     except Exception as e:  # noqa: BLE001 - e.g. broker unreachable
         db = get_db()
         db.execute("UPDATE scans SET status='failed', finished_at=?, error=?"
@@ -245,6 +247,22 @@ def _new_scan(org_id: str, target_name: str, target_dir: str,
     return result
 
 
+def _check_baseline(org_id: str, baseline_scan_id: str) -> None:
+    """Validate a baseline_scan_id for incremental scans (fail fast, no quota)."""
+    from database import get_db
+    db = get_db()
+    row = db.execute("SELECT org_id, status FROM scans WHERE id=?",
+                     (baseline_scan_id,)).fetchone()
+    db.close()
+    if row is None:
+        raise HTTPException(404, "baseline scan not found")
+    if row["org_id"] != org_id:
+        raise HTTPException(403, "baseline scan belongs to another organization")
+    if row["status"] != "done":
+        raise HTTPException(400,
+                            f"baseline scan is not complete (status={row['status']})")
+
+
 @app.post("/api/scans")
 @limiter.limit("60/minute")
 async def create_scan(
@@ -253,6 +271,7 @@ async def create_scan(
     target_path: str | None = Form(None),
     file: UploadFile | None = File(None),
     webhook_url: str | None = Form(None),
+    baseline_scan_id: str | None = Form(None),
 ):
     """Start a scan from a server-local path or an uploaded zip.
 
@@ -262,6 +281,10 @@ async def create_scan(
     Optional ``webhook_url`` (http/https): the worker POSTs a signed JSON
     payload (``X-BraimSec-Signature: sha256=...``) when the scan reaches a
     terminal state. The signing secret is returned once in the response.
+
+    Optional ``baseline_scan_id``: run an incremental (diff-based) rescan
+    against that scan's fingerprint baseline. Requires ``target_path`` —
+    zip uploads are always full scans.
     """
     org_id = request.state.org_id
     allowed, used, quota = quota_status(org_id)
@@ -278,6 +301,10 @@ async def create_scan(
             raise HTTPException(400, "webhook_url must be http(s)")
         webhook_secret = secrets.token_hex(16)
     if file is not None:
+        if baseline_scan_id:
+            raise HTTPException(
+                400, "baseline_scan_id requires target_path: zip uploads"
+                " are always full scans")
         # Enforce the size cap while streaming (Content-Length headers can lie).
         chunks, size = [], 0
         while True:
@@ -307,9 +334,11 @@ async def create_scan(
 
     if target_path:
         target_dir = _resolve_scan_target(target_path)
+        if baseline_scan_id:
+            _check_baseline(org_id, baseline_scan_id)
         return _new_scan(org_id, os.path.basename(target_dir.rstrip("/")) or target_dir,
                          target_dir, None, background_tasks,
-                         webhook_url, webhook_secret)
+                         webhook_url, webhook_secret, baseline_scan_id)
 
     raise HTTPException(400, "Provide target_path or upload a zip file")
 
