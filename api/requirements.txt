@@ -4,3 +4,6 @@ python-multipart
 slowapi
 celery
 redis
+fpdf2
+arabic_reshaper
+python-bidi
