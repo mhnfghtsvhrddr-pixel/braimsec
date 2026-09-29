@@ -134,14 +134,90 @@ def _deliver_webhook(scan_id: str) -> None:
 
 
 @celery_app.task(name="braimsec.run_scan", bind=True, max_retries=2)
-def run_scan(self, scan_id: str, target_dir: str, cleanup_dir: str | None = None):
+def run_scan(self, scan_id: str, target_dir: str, cleanup_dir: str | None = None,
+             baseline_scan_id: str | None = None):
     """Run both engines, store normalized findings. Idempotent on retry."""
-    return _run_scan_impl(self, scan_id, target_dir, cleanup_dir)
+    return _run_scan_impl(self, scan_id, target_dir, cleanup_dir,
+                          baseline_scan_id)
+
+
+def _relpath(target_dir, p):
+    """Normalize an engine-reported path to a relpath under target_dir."""
+    if not p:
+        return p
+    ap = p if os.path.isabs(p) else os.path.join(target_dir, p)
+    return os.path.relpath(ap, target_dir)
+
+
+def _run_incremental(db, scan_id, org_id, target_dir, baseline_scan_id):
+    """Diff-based rescan against a baseline scan's fingerprint.
+
+    Returns (findings, incremental_of). Raises RuntimeError (→ failed scan,
+    no retry) on baseline problems: the baseline must exist, be complete,
+    and belong to the same org.
+    """
+    from incremental import (fingerprint_tree, plan_incremental,
+                             merge_findings, SCANABLE_EXTS)
+    brow = db.execute(
+        "SELECT fingerprint_json, org_id, status FROM scans WHERE id=?",
+        (baseline_scan_id,)).fetchone()
+    if brow is None:
+        raise RuntimeError(f"baseline scan not found: {baseline_scan_id}")
+    if brow["org_id"] != org_id:
+        raise RuntimeError("baseline scan belongs to another organization")
+    if brow["status"] != "done":
+        raise RuntimeError(
+            f"baseline scan is not complete (status={brow['status']})")
+    try:
+        old_fp = json.loads(brow["fingerprint_json"] or "{}")
+    except (json.JSONDecodeError, TypeError):
+        old_fp = {}
+    old_rows = db.execute(
+        "SELECT tool, rule_id, severity, message, file, line, col,"
+        " ai_verdict, ai_confidence, ai_explanation, ai_fix"
+        " FROM findings WHERE scan_id=?", (baseline_scan_id,)).fetchall()
+    # Carried findings keep their AI review: the code did not change, so the
+    # verdict stands — and the AI-review quota is not re-spent on it.
+    old_findings = [{**dict(r),
+                     "file": _relpath(target_dir, r["file"])} for r in old_rows]
+
+    new_fp = fingerprint_tree(target_dir)
+    plan = plan_incremental(old_fp, new_fp, target_dir)
+    if plan["no_change"]:
+        # Fast path: nothing changed — carry every finding, run no engines.
+        return old_findings, baseline_scan_id
+
+    scope_abs = [os.path.join(target_dir, rel)
+                 for rel in plan["scope_files"]
+                 if os.path.isfile(os.path.join(target_dir, rel))]
+    # Semgrep only scans code; gitleaks re-checks every changed file
+    # (a changed manifest could theoretically gain a secret).
+    code_scope = [p for p in scope_abs if p.endswith(SCANABLE_EXTS)]
+    fresh = run_semgrep(target_dir, code_scope) \
+        + run_gitleaks(target_dir, scope_abs)
+    if plan["sca_needed"]:
+        fresh += run_sca(target_dir)
+    # else: manifests unchanged → SCA skipped. A periodic full SCA is still
+    # required to catch newly published CVEs on old packages.
+    for f in fresh:
+        f["file"] = _relpath(target_dir, f["file"])
+    merged = merge_findings(old_findings, fresh, set(plan["scope_files"]))
+    # NB: invalidation covers the whole scope (not just changed files):
+    # import-hop neighbors are rescanned, so their old findings must not
+    # be carried alongside the fresh ones (that would duplicate them).
+    return merged, baseline_scan_id
 
 
 def _run_scan_impl(task_self, scan_id: str, target_dir: str,
-                   cleanup_dir: str | None = None):
-    """Task body as a plain function (testable without Celery machinery)."""
+                   cleanup_dir: str | None = None,
+                   baseline_scan_id: str | None = None):
+    """Task body as a plain function (testable without Celery machinery).
+
+    baseline_scan_id: run incrementally against that scan's fingerprint
+    baseline (diff-based rescan). Requires a persistent target_path —
+    zip uploads are always full scans.
+    """
+    from incremental import fingerprint_tree
     db = get_db()
     will_retry = False
     try:
@@ -150,18 +226,32 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
         db.execute("UPDATE scans SET status='running', started_at=? WHERE id=?",
                    (_now_iso(), scan_id))
         db.commit()
-        findings = run_semgrep(target_dir) + run_gitleaks(target_dir) + run_sca(target_dir)
+        scan_row = db.execute("SELECT org_id FROM scans WHERE id=?",
+                              (scan_id,)).fetchone()
+        org_id = scan_row["org_id"] if scan_row else None
+        incremental_of = None
+        if baseline_scan_id:
+            findings, incremental_of = _run_incremental(
+                db, scan_id, org_id, target_dir, baseline_scan_id)
+        else:
+            findings = run_semgrep(target_dir) + run_gitleaks(target_dir) + run_sca(target_dir)
         for f in findings:
             db.execute(
                 """INSERT INTO findings
-                   (scan_id, tool, rule_id, severity, message, file, line, col)
-                   VALUES (?,?,?,?,?,?,?,?)""",
+                   (scan_id, tool, rule_id, severity, message, file, line, col,
+                    ai_verdict, ai_confidence, ai_explanation, ai_fix)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (scan_id, f["tool"], f["rule_id"], f["severity"],
-                 f["message"], f["file"], f["line"], f["col"]),
+                 f["message"], f["file"], f["line"], f["col"],
+                 f.get("ai_verdict"), f.get("ai_confidence"),
+                 f.get("ai_explanation"), f.get("ai_fix")),
             )
         db.execute(
-            "UPDATE scans SET status='done', finished_at=?, total_findings=? WHERE id=?",
-            (_now_iso(), len(findings), scan_id),
+            "UPDATE scans SET status='done', finished_at=?, total_findings=?,"
+            " fingerprint_json=?, incremental_of=? WHERE id=?",
+            (_now_iso(), len(findings),
+             json.dumps(fingerprint_tree(target_dir)), incremental_of,
+             scan_id),
         )
         db.commit()
     except Exception as e:  # noqa: BLE001 - prototype: record failure
@@ -317,18 +407,19 @@ def _run_ai_review_impl(task_self, scan_id: str):
 
 
 def enqueue_scan(scan_id: str, target_dir: str, cleanup_dir: str | None,
-                 background_tasks=None) -> str:
+                 background_tasks=None, baseline_scan_id: str | None = None) -> str:
     """Route a scan to the durable queue, or inline when unconfigured.
 
     Returns "celery" or "inline" so callers (and tests) can observe routing.
     """
     if queue_enabled():
-        run_scan.delay(scan_id, target_dir, cleanup_dir)
+        run_scan.delay(scan_id, target_dir, cleanup_dir, baseline_scan_id)
         return "celery"
     if background_tasks is not None:
-        background_tasks.add_task(run_scan, scan_id, target_dir, cleanup_dir)
+        background_tasks.add_task(run_scan, scan_id, target_dir, cleanup_dir,
+                                  baseline_scan_id)
     else:
-        run_scan(scan_id, target_dir, cleanup_dir)
+        run_scan(scan_id, target_dir, cleanup_dir, baseline_scan_id)
     return "inline"
 
 
