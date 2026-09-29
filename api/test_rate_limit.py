@@ -7,6 +7,8 @@
 import os
 import sys
 
+import pytest
+
 os.environ["BRAIMSEC_API_KEY"] = "test-key-123"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -15,6 +17,16 @@ from fastapi.testclient import TestClient  # noqa: E402
 import main  # noqa: E402
 
 HEADERS = {"x-api-key": "test-key-123"}
+
+
+@pytest.fixture(autouse=True)
+def _fresh_limiter():
+    """slowapi's in-memory storage is process-global: other test modules
+    (e.g. test_async_queue's e2e posts) would otherwise consume this
+    module's per-key budget and make the assertions order-dependent."""
+    main.limiter._storage.reset()
+    yield
+    main.limiter._storage.reset()
 
 
 def _client():
