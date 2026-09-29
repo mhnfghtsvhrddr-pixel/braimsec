@@ -21,7 +21,7 @@ import zipfile
 from datetime import datetime, timezone
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
@@ -42,9 +42,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "scanner"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "ai"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "reports"))
 from scan_engine import (  # noqa: E402
     to_sarif,
 )
+from builder import ReportError, build_report  # noqa: E402
+from pdf import render_pdf  # noqa: E402
 from sink_audit import (  # noqa: E402
     audit_candidates,
     discover_sinks,
@@ -555,6 +559,85 @@ def scan_sarif(request: Request, scan_id: str):
         "message": f["message"], "file": f["file"],
         "line": f["line"] or 1, "col": f["col"] or 1,
     } for f in findings])
+
+
+@app.get("/api/scans/{scan_id}/report.pdf")
+@limiter.limit("30/minute")
+def scan_report_pdf(request: Request, scan_id: str):
+    """CISO-grade PDF report (proposal Part 5).
+
+    Pure function of stored scan data: no rescan, no LLM calls, no quota
+    consumed. Deterministic per scan; ETag enables client caching.
+    """
+    import hashlib as _hashlib
+    from datetime import datetime, timezone
+
+    db = get_db()
+    scan = db.execute("SELECT * FROM scans WHERE id=? AND org_id=?",
+                      (scan_id, request.state.org_id)).fetchone()
+    if not scan:
+        db.close()
+        raise HTTPException(404, "Scan not found")
+    scan = dict(scan)
+    if scan["status"] != "done":
+        db.close()
+        raise HTTPException(409, "Scan not completed yet")
+    findings = [dict(r) for r in db.execute(
+        "SELECT id, tool, rule_id, severity, message, file, line, col,"
+        " ai_verdict, ai_confidence, ai_explanation,"
+        " fix_diff, fix_explanation, fix_confidence, fix_caveats"
+        " FROM findings WHERE scan_id=?", (scan_id,)).fetchall()]
+    prev_row = db.execute(
+        "SELECT id, finished_at, total_findings FROM scans"
+        " WHERE org_id=? AND target_name=? AND status='done' AND id!=?"
+        " ORDER BY finished_at DESC LIMIT 1",
+        (request.state.org_id, scan["target_name"], scan_id)).fetchone()
+    prev = None
+    if prev_row:
+        prev = dict(prev_row)
+        pc = db.execute(
+            "SELECT severity, COUNT(*) c FROM findings WHERE scan_id=?"
+            " GROUP BY severity", (prev["id"],)).fetchall()
+        prev = {"scan_id": prev["id"], "finished_at": prev["finished_at"],
+                "counts": {r["severity"]: r["c"] for r in pc},
+                "grade": None}
+        # grade of the previous report, recomputed deterministically
+        perr = db.execute(
+            "SELECT COUNT(*) c FROM findings WHERE scan_id=? AND severity='error'"
+            " AND (ai_verdict='vulnerable' OR tool='gitleaks')",
+            (prev["scan_id"],)).fetchone()["c"]
+        prev["grade"] = ("A" if perr == 0 else "B" if perr <= 2
+                         else "C" if perr <= 5 else "D" if perr <= 10
+                         else "F")
+    db.close()
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+    try:
+        report = build_report(scan, findings, prev=prev,
+                              target_dir=scan.get("target_dir"),
+                              generated_at=generated_at)
+        pdf = render_pdf(report)
+    except ReportError as e:
+        raise HTTPException(500, f"report refused: {e}")
+    # ETag over the report content (+ generator version), not the PDF bytes:
+    # the PDF embeds a fresh generation timestamp, but the report itself is
+    # deterministic per (scan, generator version) — that is the cache key
+    # from proposal §4.4.
+    import json as _json
+    from builder import REPORT_VERSION as _RV
+    stable = dict(report)
+    stable["meta"] = {k: v for k, v in report["meta"].items()
+                      if k != "generated_at"}
+    etag = _hashlib.sha256(
+        _json.dumps(stable, sort_keys=True, default=str).encode()
+        + b"|" + _RV.encode()).hexdigest()
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304)
+    return Response(
+        content=pdf, media_type="application/pdf",
+        headers={"ETag": etag,
+                 "Content-Disposition":
+                 f'attachment; filename="braimsec-{scan_id}-report.pdf"'})
 
 
 # ---------------------------------------------------------------------------
