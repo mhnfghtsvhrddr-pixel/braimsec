@@ -1,0 +1,37 @@
+# BraimSec compliance mapping — versioned, conservative.
+#
+# Policy (proposal §4): map ONLY rule -> standard pairs we are confident
+# about. Anything else is "unmapped" — never invent a mapping to make a
+# report look more complete. PCI-DSS and SOC 2 columns exist but stay
+# empty until a mapping earns its place here.
+#
+# Matching: a finding matches `rule` when check_id == rule or
+# check_id endswith rule (semgrep prefixes local rule ids with the file
+# path, e.g. ".../rules.braimsec.taint.ssrf-requests"). A `tool` entry
+# matches every finding from that tool.
+
+version: "1.0.0"
+
+changelog:
+  - "1.0.0 (2026-09-30): initial conservative mapping - BraimSec taint rules + gitleaks only. Registry rules intentionally unmapped."
+
+mappings:
+  - rule: braimsec.taint.ssrf-requests
+    owasp: { code: "A10:2021", title: "Server-Side Request Forgery (SSRF)" }
+    cwe: { id: "CWE-918", title: "Server-Side Request Forgery (SSRF)" }
+
+  - rule: braimsec.taint.ssrf-urllib
+    owasp: { code: "A10:2021", title: "Server-Side Request Forgery (SSRF)" }
+    cwe: { id: "CWE-918", title: "Server-Side Request Forgery (SSRF)" }
+
+  - rule: braimsec.taint.unrestricted-file-upload
+    owasp: { code: "A04:2021", title: "Insecure Design" }
+    cwe: { id: "CWE-434", title: "Unrestricted Upload of File with Dangerous Type" }
+
+  - rule: braimsec.taint.path-traversal-open
+    owasp: { code: "A01:2021", title: "Broken Access Control" }
+    cwe: { id: "CWE-22", title: "Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')" }
+
+  - tool: gitleaks
+    owasp: { code: "A07:2021", title: "Identification and Authentication Failures" }
+    cwe: { id: "CWE-798", title: "Use of Hard-coded Credentials" }
