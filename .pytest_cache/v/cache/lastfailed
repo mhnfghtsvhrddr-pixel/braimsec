@@ -1,5 +1,4 @@
 {
   "scanner/test_incremental.py": true,
-  "api/test_billing.py": true,
-  "api/test_async_queue.py::test_enqueue_routes_to_celery_when_configured": true
+  "api/test_billing.py": true
 }
