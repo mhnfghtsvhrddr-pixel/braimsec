@@ -39,8 +39,15 @@ import nowpayments_pay as nowpay  # noqa: E402
 # Reuse the scan engine prototype
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "scanner"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "ai"))
 from scan_engine import (  # noqa: E402
     to_sarif,
+)
+from sink_audit import (  # noqa: E402
+    audit_candidates,
+    discover_sinks,
+    enabled as sink_audit_enabled,
 )
 
 # Durable queue (Celery + Redis); falls back to inline BackgroundTasks
@@ -211,9 +218,9 @@ def _new_scan(org_id: str, target_name: str, target_dir: str,
     db = get_db()
     db.execute(
         "INSERT INTO scans (id, org_id, target_name, status, created_at,"
-        " webhook_url, webhook_secret) VALUES (?,?,?,?,?,?,?)",
+        " webhook_url, webhook_secret, target_dir) VALUES (?,?,?,?,?,?,?,?)",
         (scan_id, org_id, target_name, "queued", now(),
-         webhook_url, webhook_secret))
+         webhook_url, webhook_secret, target_dir))
     db.commit()
     db.close()
     try:
@@ -353,18 +360,30 @@ def scan_results(request: Request, scan_id: str, severity: str | None = None):
 def start_ai_review(request: Request, scan_id: str, background_tasks: BackgroundTasks):
     org_id = request.state.org_id
     db = get_db()
-    exists = db.execute("SELECT 1 FROM scans WHERE id=? AND org_id=?",
-                        (scan_id, org_id)).fetchone()
-    if not exists:
+    scan = db.execute("SELECT target_dir FROM scans WHERE id=? AND org_id=?",
+                      (scan_id, org_id)).fetchone()
+    if not scan:
         db.close()
         raise HTTPException(404, "Scan not found")
     # AI reviews are the real variable cost: gate on the monthly AI quota.
-    # Reserve one unit per finding still awaiting review.
+    # Reserve one unit per finding still awaiting review...
     pending = db.execute(
         "SELECT COUNT(*) c FROM findings WHERE scan_id=? AND ai_verdict IS NULL",
         (scan_id,)).fetchone()["c"]
     db.close()
-    allowed, used, quota = quota_check(org_id, "ai_review", max(pending, 1))
+    # ...plus the worst case for high-risk sink auditing: one unit per
+    # candidate sink (capped per scan). Discovery is AST-only, no LLM cost.
+    sink_budget = 0
+    sink_status = "disabled" if not sink_audit_enabled() else "skipped_no_sources"
+    target_dir = scan["target_dir"]
+    if sink_audit_enabled() and target_dir and os.path.isdir(target_dir):
+        try:
+            sink_budget = len(audit_candidates(discover_sinks(target_dir)))
+            sink_status = "queued"
+        except Exception:  # noqa: BLE001 - fail-soft: findings review proceeds
+            sink_budget = 0
+    allowed, used, quota = quota_check(org_id, "ai_review",
+                                       max(pending, 1) + sink_budget)
     if not allowed:
         raise HTTPException(
             402,
@@ -375,7 +394,8 @@ def start_ai_review(request: Request, scan_id: str, background_tasks: Background
         enqueue_ai_review(scan_id, background_tasks)
     except Exception:  # noqa: BLE001 - e.g. broker unreachable
         raise HTTPException(503, "Review queue unavailable, try again shortly.")
-    return {"scan_id": scan_id, "ai_review": "queued"}
+    return {"scan_id": scan_id, "ai_review": "queued",
+            "sink_audit": {"status": sink_status, "budget": sink_budget}}
 
 
 @app.get("/api/scans/{scan_id}/sarif")
