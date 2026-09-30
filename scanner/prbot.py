@@ -12,9 +12,18 @@ only if ALL of these hold (proposal §4 amendments):
   3. severity is ``error`` (configurable floor; warnings never comment —
      a bot that spams warnings gets disabled on day one);
   4. the AI gate: ``tool == "gitleaks"`` passes deterministically
-     (a leaked secret is high-confidence by construction), everything
-     else needs ``analyze_finding`` -> ``vulnerable``. On AI failure or
+     (a leaked secret is high-confidence by construction), and so does
+     ``tool == "osv"`` (an exact pinned-version CVE match is
+     high-confidence by construction); everything else needs
+     ``analyze_finding`` -> ``vulnerable``. On AI failure or
      timeout the bot stays SILENT and logs — never comments unreviewed.
+
+SCA on the diff: when the diff touches dependency manifests
+(requirements.txt, package-lock.json, go.mod, Cargo.lock,
+Gemfile.lock), only NEW or version-CHANGED pins are queried against
+OSV — historical vulnerabilities the PR did not introduce never
+comment. One aggregated comment per pin (all its CVE IDs inside).
+Disable with ``--no-sca``; ``SCA_OFFLINE=1`` also skips it.
 
 Enrichment per comment is best-effort: the taint-flow trace (Part 3,
 deterministic) is attached when the rule is a taint rule; a
@@ -65,6 +74,11 @@ try:
         extract_fix_context, generate_fix)
 except Exception:  # noqa: BLE001
     extract_fix_context = generate_fix = None
+
+try:
+    from sca_diff import run_sca_on_diff  # noqa: E402
+except Exception:  # noqa: BLE001 - bot works without diff SCA
+    run_sca_on_diff = None
 
 SEVERITY_RANK = {"note": 0, "warning": 1, "error": 2}
 
@@ -281,9 +295,9 @@ def apply_gates(findings, repo, client, min_severity="error"):
         if SEVERITY_RANK.get(sev, 1) < floor:
             dropped.append((f, f"severity gate: {sev} < {min_severity}"))
             continue
-        if f.get("tool") == "gitleaks":
-            ok.append((f, None))  # deterministic high-confidence
-            continue
+        if f.get("tool") in ("gitleaks", "osv"):
+            ok.append((f, None))  # deterministic high-confidence:
+            continue              # leaked secret / exact-pin CVE match
         ai_res, reason = ai_verdict_for(client, f, repo)
         if ai_res is None:
             dropped.append((f, reason))
@@ -351,6 +365,9 @@ def build_comment(finding, ai_res, repo, client=None):
         meta += (f" · AI verdict: **{ai_res.get('ai_verdict')}** "
                  f"({ai_res.get('ai_confidence')})")
         expl = (ai_res.get("ai_explanation") or "").strip()
+    elif finding.get("tool") == "osv":
+        expl = ("Deterministic: this exact pinned version is listed in the "
+                "OSV vulnerability database. No AI review needed.")
     else:
         expl = "Deterministic high-confidence finding (leaked secret)."
     body = f"{head}\n\n{meta}\n\n{expl}\n\n"
@@ -398,7 +415,8 @@ def post_review(repo_slug, pr_number, token, payload, dry_run=False):
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def run_bot(repo, base, head, ai=True, min_severity="error", client=None):
+def run_bot(repo, base, head, ai=True, min_severity="error", client=None,
+            sca=True):
     """Full pipeline -> {comments, dropped, stats}. No network calls."""
     repo = os.path.realpath(repo)
     diff = git_diff(repo, base, head)
@@ -413,8 +431,21 @@ def run_bot(repo, base, head, ai=True, min_severity="error", client=None):
         findings += run_gitleaks(repo, scope=abs_files)
     stats["raw_findings"] = len(findings)
 
+    # Diff-aware SCA: new/changed pins only. Findings are already scoped
+    # (added lines, absent from base), so they skip is_new_finding but
+    # still flow through dedup + the severity/AI gates below.
+    sca_findings = []
+    if sca and run_sca_on_diff is not None:
+        try:
+            sca_findings = run_sca_on_diff(repo, base, added)
+        except Exception as e:  # noqa: BLE001 - SCA never breaks the bot
+            print(f"[prbot] WARN: diff SCA failed ({type(e).__name__}); "
+                  "continuing without it", file=sys.stderr)
+    stats["sca_findings"] = len(sca_findings)
+
     new_findings = [f for f in findings
                     if is_new_finding(f, added, repo, base)]
+    new_findings += sca_findings
     stats["new_findings"] = len(new_findings)
 
     new_findings, dup_stats = dedupe_by_line(new_findings, repo)
@@ -454,6 +485,8 @@ def main(argv=None):
                     choices=["note", "warning", "error"])
     ap.add_argument("--no-ai", action="store_true",
                     help="skip the AI gate (secrets only can comment)")
+    ap.add_argument("--no-sca", action="store_true",
+                    help="skip diff-aware SCA on dependency manifests")
     ap.add_argument("--post", action="store_true",
                     help="post the review to GitHub (default: dry-run)")
     ap.add_argument("--repo-slug", default=os.environ.get("GITHUB_REPOSITORY", ""),
@@ -465,7 +498,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     result = run_bot(args.repo, args.base, args.head,
-                     ai=not args.no_ai, min_severity=args.min_severity)
+                     ai=not args.no_ai, min_severity=args.min_severity,
+                     sca=not args.no_sca)
 
     summary = (f"BraimSec found {result['stats']['comments']} new "
                f"high-confidence issue(s) in this diff "
