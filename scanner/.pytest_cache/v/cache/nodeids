@@ -1,4 +1,13 @@
 [
+  "test_gha.py::test_broad_permissions_fires",
+  "test_gha.py::test_engine_wires_gha_pack",
+  "test_gha.py::test_pack_has_three_gha_rules",
+  "test_gha.py::test_pinned_and_local_actions_stay_silent",
+  "test_gha.py::test_safe_contexts_stay_silent",
+  "test_gha.py::test_scoped_permissions_stay_silent",
+  "test_gha.py::test_script_injection_fires",
+  "test_gha.py::test_script_injection_head_ref_and_inputs_fire",
+  "test_gha.py::test_unpinned_actions_fire",
   "test_prbot.py::test_added_lines_empty",
   "test_prbot.py::test_added_lines_parse",
   "test_prbot.py::test_build_comment_shape",
