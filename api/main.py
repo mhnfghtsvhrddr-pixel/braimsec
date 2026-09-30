@@ -30,7 +30,8 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
 from database import get_db, init_db
-from audit import log_event, read_events  # noqa: E402
+from audit import (archive_events, list_archives, log_event, read_events,  # noqa: E402
+                   verify_archive)
 
 
 def _audit(request: Request, action: str, resource_type: str = "",
@@ -652,6 +653,61 @@ def get_audit_log(request: Request, limit: int = 50, offset: int = 0,
     require_org_scope(request)
     return read_events(request.state.org_id, limit=limit, offset=offset,
                        action=action)
+
+
+@app.post("/api/audit-log/archive")
+@limiter.limit("10/minute")
+async def archive_audit_log(request: Request):
+    """Archive audit events older than N days (owner only).
+
+    Body: {"older_than_days": 90} (default from BRAIMSEC_AUDIT_RETENTION_DAYS,
+    default 90; minimum 1). Old rows move to a gzipped, sha256-manifested
+    archive file and leave the hot table; the run itself is logged as
+    ``audit_log.archived``. Owner-only: archiving deletes audit history,
+    so it must never be a routine admin action. Project-scoped keys are
+    rejected — the trail covers the whole org.
+    """
+    require_org_scope(request)
+    require_role(request, "owner")
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    raw_days = body.get("older_than_days")
+    if raw_days is None:
+        days = None
+    else:
+        try:
+            days = int(raw_days)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "older_than_days must be an integer")
+    try:
+        return archive_events(request.state.org_id, request.state.actor, days)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/audit-log/archives")
+@limiter.limit("60/minute")
+def list_audit_archives(request: Request):
+    """List the org's audit archive manifests (admin and above)."""
+    require_org_scope(request)
+    require_role(request, "admin")
+    return list_archives(request.state.org_id)
+
+
+@app.get("/api/audit-log/archives/{archive_id}/verify")
+@limiter.limit("60/minute")
+def verify_audit_archive(request: Request, archive_id: str):
+    """Re-hash an archive file against its manifest (admin and above)."""
+    require_org_scope(request)
+    require_role(request, "admin")
+    try:
+        return verify_archive(request.state.org_id, archive_id)
+    except KeyError:
+        raise HTTPException(404, "Archive not found")
 
 
 @app.post("/api/keys")
