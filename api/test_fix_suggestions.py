@@ -252,13 +252,13 @@ def test_endpoint_happy_path_and_persists(seeded, monkeypatch):
     assert "+" + PATCHED_BLOCK in sug["diff"]
     assert sug["generated_at"]
     assert stub.calls == 1
-    # persisted + billed exactly one ai_review unit
+    # persisted + billed two ai_review units (x2 patch-generation weight)
     db = get_db()
     row = db.execute("SELECT fix_generated_at FROM findings WHERE id=?",
                      (finding_id,)).fetchone()
     db.close()
     assert row["fix_generated_at"]
-    assert usage_count(org_id, "ai_review") == 1
+    assert usage_count(org_id, "ai_review") == 2
 
 
 def test_endpoint_cached_second_call_is_free(seeded, monkeypatch):
@@ -272,7 +272,7 @@ def test_endpoint_cached_second_call_is_free(seeded, monkeypatch):
     assert r.status_code == 200
     assert r.json()["cached"] is True
     assert stub2.calls == 0
-    assert usage_count(org_id, "ai_review") == 1
+    assert usage_count(org_id, "ai_review") == 2
 
 
 def test_endpoint_402_when_quota_exhausted(seeded, monkeypatch):
