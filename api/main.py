@@ -323,7 +323,13 @@ async def create_scan(
                     413, f"ZIP exceeds {MAX_ZIP_BYTES // (1024 * 1024)} MB limit")
             chunks.append(chunk)
         workdir = tempfile.mkdtemp(prefix="braimsec-")
-        filename = file.filename or "upload.zip"
+        # Sanitize the client-supplied filename: a value like "../../evil"
+        # would otherwise escape workdir (path traversal on the upload itself).
+        # basename() strips every directory component; "." / ".." / empty
+        # fall back to a safe default.
+        filename = os.path.basename((file.filename or "").strip()) or "upload.zip"
+        if filename in (".", ".."):
+            filename = "upload.zip"
         dest = os.path.join(workdir, filename)
         with open(dest, "wb") as f:
             f.write(b"".join(chunks))
