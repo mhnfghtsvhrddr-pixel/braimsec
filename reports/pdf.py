@@ -174,7 +174,9 @@ def render_pdf(report):
     pdf.ln(6)
     c = exe["counts"]
     _para(pdf, f"{c['error']} errors  |  {c['warning']} warnings  |  "
-               f"{c['note']} notes  |  {exe['confirmed_errors']} confirmed",
+               f"{c['note']} notes  |  {exe['deterministic_errors']} "
+               "deterministic errors"
+               f"  |  {exe['ai_confirmed_errors']} AI-confirmed",
           size=11, align="C")
     pdf.ln(10)
     _kv(pdf, [("Scan", meta["scan_id"]),
@@ -220,7 +222,7 @@ def render_pdf(report):
             if ai["explanation"]:
                 _para(pdf, ai["explanation"], size=10)
         else:
-            _para(pdf, "AI verdict: not reviewed — NOT confirmed.",
+            _para(pdf, "AI verdict: not reviewed.",
                   size=10)
         comp = f["compliance"]
         if comp.get("unmapped"):
