@@ -30,6 +30,8 @@ ACTIONS = frozenset({
     "patch_verify.requested",
     "api_key.created",
     "api_key.revoked",
+    "project.created",
+    "project.deleted",
 })
 
 
