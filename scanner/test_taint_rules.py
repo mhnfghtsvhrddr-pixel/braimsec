@@ -154,7 +154,8 @@ def test_scan_engine_passes_custom_config(monkeypatch):
     cmd = seen["cmd"]
     assert "--config" in cmd
     assert RULES in cmd
-    assert cmd.count("--config") == 2  # auto + braimsec pack
+    assert scan_engine.BRAIMSEC_GHA_RULES in cmd
+    assert cmd.count("--config") == 3  # auto + taint pack + gha pack
 
 
 def test_scan_engine_taint_rules_can_be_disabled(monkeypatch):
@@ -173,7 +174,26 @@ def test_scan_engine_taint_rules_can_be_disabled(monkeypatch):
         with monkeypatch.context() as m:
             m.setattr("json.load", lambda f: {"results": []})
             scan_engine.run_semgrep(d)
-    assert seen["cmd"].count("--config") == 1  # auto only
+    assert seen["cmd"].count("--config") == 2  # auto + gha pack
+
+
+def test_scan_engine_gha_rules_can_be_disabled(monkeypatch):
+    import scan_engine
+    seen = {}
+
+    def fake_run(cmd, timeout=600):
+        seen["cmd"] = cmd
+        class R:  # noqa: D106
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(scan_engine, "_run", fake_run)
+    monkeypatch.setattr(scan_engine, "BRAIMSEC_GHA_RULES", "")
+    with tempfile.TemporaryDirectory() as d:
+        with monkeypatch.context() as m:
+            m.setattr("json.load", lambda f: {"results": []})
+            scan_engine.run_semgrep(d)
+    assert seen["cmd"].count("--config") == 2  # auto + taint pack
 
 
 # ---------------------------------------------------------------------------
