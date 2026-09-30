@@ -220,6 +220,56 @@ def revoke_key(key_id: str, actor: str = "system"):
                   {"key_prefix": row["key_prefix"]})
 
 
+def rotate_key(key_id: str, actor: str = "system") -> tuple[str, str]:
+    """Atomically rotate an API key. Returns (raw_new_key, new_key_id).
+
+    The replacement inherits org, name, role and project_id — rotation
+    never changes privilege. The old key is revoked in the SAME
+    transaction (single commit covers the new row, the revocation, and
+    both audit records), so there is never a moment with zero or two
+    valid keys. The raw replacement is returned once and never stored.
+
+    Raises KeyError if the key does not exist, ValueError if it is
+    already revoked.
+    """
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT org_id, name, role, project_id, key_prefix, revoked"
+            " FROM api_keys WHERE id=?", (key_id,)).fetchone()
+        if not row:
+            raise KeyError(f"no such key: {key_id}")
+        if row["revoked"]:
+            raise ValueError("key is already revoked")
+        raw = "bs_" + secrets.token_urlsafe(32)
+        new_id = "key_" + uuid.uuid4().hex[:12]
+        db.execute(
+            "INSERT INTO api_keys (id, org_id, key_hash, key_prefix, name,"
+            " role, project_id, created_at, revoked)"
+            " VALUES (?,?,?,?,?,?,?,?,0)",
+            (new_id, row["org_id"], _hash_key(raw), raw[:8],
+             row["name"], row["role"], row["project_id"], _now()),
+        )
+        db.execute("UPDATE api_keys SET revoked=1 WHERE id=?", (key_id,))
+        # Same connection/transaction as the key writes (see
+        # audit.log_event's db parameter): atomic with the rotation.
+        log_event(row["org_id"], actor, "api_key.created", "api_key", new_id,
+                  {"name": row["name"], "key_prefix": raw[:8],
+                   "role": row["role"], "project_id": row["project_id"],
+                   "rotation_of": key_id,
+                   "rotation_of_prefix": row["key_prefix"]}, "", db=db)
+        log_event(row["org_id"], actor, "api_key.revoked", "api_key", key_id,
+                  {"key_prefix": row["key_prefix"], "rotated_to": new_id,
+                   "rotated_to_prefix": raw[:8]}, "", db=db)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+    return raw, new_id
+
+
 def verify_key(raw: str):
     """Validate a presented key. Returns {org_id, plan, key_id, key_prefix,
     role, project_id} or None. project_id None = org-wide key."""
