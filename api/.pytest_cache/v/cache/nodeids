@@ -75,5 +75,9 @@
   "test_taint_flow.py::test_no_key_401",
   "test_taint_flow.py::test_other_org_gets_404",
   "test_taint_flow.py::test_sanitized_verdict",
-  "test_taint_flow.py::test_sources_deleted_reports_unavailable"
+  "test_taint_flow.py::test_sources_deleted_reports_unavailable",
+  "test_upload_security.py::test_dotdot_filename_falls_back",
+  "test_upload_security.py::test_non_zip_rejected",
+  "test_upload_security.py::test_normal_upload_still_works",
+  "test_upload_security.py::test_traversal_filename_is_contained"
 ]
