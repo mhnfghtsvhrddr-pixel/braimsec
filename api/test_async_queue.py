@@ -154,24 +154,25 @@ def test_webhook_signed_and_delivered(engines, monkeypatch):
         def __exit__(self, *a):
             return False
 
-    def fake_urlopen(req, timeout=None):
-        captured["req"] = req
-        return FakeResp()
+    def fake_post(url, body, headers, timeout):
+        captured["url"] = url
+        captured["body"] = body
+        captured["headers"] = headers
+        return 200
 
-    monkeypatch.setattr(tasks.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(tasks, "safe_webhook_post", fake_post)
     scan_id = _mk_scan("https://hooks.example.test/x", "s3cr3t")
     tasks._run_scan_impl(FakeSelf(), scan_id, "/tmp", None)
 
-    req = captured["req"]
-    assert req.full_url == "https://hooks.example.test/x"
-    body = req.data
+    assert captured["url"] == "https://hooks.example.test/x"
+    body = captured["body"]
     payload = json.loads(body)
     assert payload["event"] == "scan.completed"
     assert payload["scan_id"] == scan_id
     assert payload["total_findings"] == 2
     expected = hmac.new(b"s3cr3t", body, hashlib.sha256).hexdigest()
-    assert req.headers["X-braimsec-signature"] == f"sha256={expected}"
-    assert req.headers["X-braimsec-event"] == "scan.completed"
+    assert captured["headers"]["X-BraimSec-Signature"] == f"sha256={expected}"
+    assert captured["headers"]["X-BraimSec-Event"] == "scan.completed"
 
 
 def test_webhook_failure_event_on_scan_failure(engines, monkeypatch):
@@ -186,11 +187,11 @@ def test_webhook_failure_event_on_scan_failure(engines, monkeypatch):
         def __exit__(self, *a):
             return False
 
-    def fake_urlopen(req, timeout=None):
-        events.append(json.loads(req.data)["event"])
-        return FakeResp()
+    def fake_post(url, body, headers, timeout):
+        events.append(json.loads(body)["event"])
+        return 200
 
-    monkeypatch.setattr(tasks.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(tasks, "safe_webhook_post", fake_post)
     monkeypatch.setattr(tasks, "run_semgrep",
                         lambda d: (_ for _ in ()).throw(RuntimeError("boom")))
     scan_id = _mk_scan("https://hooks.example.test/x", "s3cr3t")
@@ -200,8 +201,8 @@ def test_webhook_failure_event_on_scan_failure(engines, monkeypatch):
 
 def test_no_webhook_without_url(engines, monkeypatch):
     called = []
-    monkeypatch.setattr(tasks.urllib.request, "urlopen",
-                        lambda req, timeout=None: called.append(req))
+    monkeypatch.setattr(tasks, "safe_webhook_post",
+                        lambda url, body, headers, timeout: called.append(url))
     scan_id = _mk_scan()
     tasks._run_scan_impl(FakeSelf(), scan_id, "/tmp", None)
     assert called == []
