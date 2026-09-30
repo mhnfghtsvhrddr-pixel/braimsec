@@ -61,6 +61,7 @@ from fix_suggestions import (  # noqa: E402
     generate_fix,
     validate_fix,
 )
+from patch_verify import verify_patch  # noqa: E402
 
 # Durable queue (Celery + Redis); falls back to inline BackgroundTasks
 # when BRAIMSEC_BROKER_URL is unset.
@@ -461,9 +462,10 @@ def _fix_payload(row):
 def fix_suggestion(request: Request, finding_id: int):
     """AI-powered fix suggestion for one finding.
 
-    On demand and cached: the first call spends one unit of the monthly
-    ``ai_review`` quota and stores the suggestion on the finding; later
-    calls return the cached suggestion for free.
+    On demand and cached: the first call spends **two** units of the monthly
+    ``ai_review`` quota (proposal §4.3: patch generation is billed at ×2
+    weight) and stores the suggestion on the finding; later calls return the
+    cached suggestion for free.
     """
     org_id = request.state.org_id
     db = get_db()
@@ -479,14 +481,14 @@ def fix_suggestion(request: Request, finding_id: int):
         db.close()
         return {"finding_id": finding_id, "cached": True,
                 "suggestion": _fix_payload(finding)}
-    # One fix = one LLM call = one unit from the same ai_review pool.
-    allowed, used, quota = quota_check(org_id, "ai_review", 1)
+    # One fix = one LLM call = two ai_review units (×2 weight, proposal §4.3).
+    allowed, used, quota = quota_check(org_id, "ai_review", 2)
     if not allowed:
         db.close()
         raise HTTPException(
             402,
-            f"Monthly AI-review quota exceeded ({used}/{quota} used). "
-            "Upgrade your plan to continue.",
+            f"Monthly AI-review quota exceeded ({used}/{quota} used; "
+            "fix generation costs 2 units). Upgrade your plan to continue.",
         )
     client = LLMClient()
     if not client.configured:
@@ -511,13 +513,67 @@ def fix_suggestion(request: Request, finding_id: int):
          gen["fix_caveats"], json.dumps(checks), generated_at, finding_id))
     db.commit()
     db.close()
+    # ×2 billing weight for patch generation: two ledger rows.
     record_usage(org_id, "ai_review", finding["scan_id"], wall_time_ms=wall_ms)
+    record_usage(org_id, "ai_review", finding["scan_id"])
     db2 = get_db()
     row2 = db2.execute(
         "SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
     payload = _fix_payload(dict(row2))
     db2.close()
     return {"finding_id": finding_id, "cached": False, "suggestion": payload}
+
+
+@app.post("/api/findings/{finding_id}/patch-verify")
+@limiter.limit("30/minute")  # deterministic re-scan (~2 semgrep runs)
+def patch_verify_endpoint(request: Request, finding_id: int):
+    """Closed-loop verification of a stored fix suggestion (Proposal Part 1).
+
+    Runs the stored patch through eligibility -> fuzzy apply -> semgrep
+    re-scan and stores the verdict on the finding
+    (``fix_checks["verification"]``). Deterministic: no LLM, no quota
+    consumed. A ``verified`` patch is still framed as a suggestion
+    requiring human review — never a guaranteed fix.
+    """
+    org_id = request.state.org_id
+    db = get_db()
+    row = db.execute(
+        """SELECT f.*, s.target_dir FROM findings f
+           JOIN scans s ON s.id = f.scan_id
+           WHERE f.id = ? AND s.org_id = ?""",
+        (finding_id, org_id)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Finding not found")
+    finding = dict(row)
+    target_dir = finding.pop("target_dir", None)
+    diff = finding.get("fix_diff")
+    if not diff:
+        db.close()
+        raise HTTPException(
+            400, "No fix suggestion stored for this finding — call "
+                 "POST /api/findings/{id}/fix-suggestion first")
+    if not target_dir or not os.path.isdir(target_dir):
+        db.close()
+        raise HTTPException(
+            409, "Scan sources are no longer available "
+                 "(deleted after scan — zero-retention); verification "
+                 "needs the original file")
+    verdict = verify_patch(
+        {"id": finding_id, "tool": finding.get("tool"),
+         "rule_id": finding.get("rule_id"), "file": finding.get("file"),
+         "line": finding.get("line")},
+        target_dir, diff)
+    try:
+        checks = json.loads(finding.get("fix_checks") or "{}")
+    except Exception:  # noqa: BLE001 - corrupted cache entry: treat as empty
+        checks = {}
+    checks["verification"] = verdict
+    db.execute("UPDATE findings SET fix_checks=? WHERE id=?",
+               (json.dumps(checks), finding_id))
+    db.commit()
+    db.close()
+    return {"finding_id": finding_id, "verification": verdict}
 
 
 @app.get("/api/findings/{finding_id}/taint-flow")
