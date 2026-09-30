@@ -41,15 +41,24 @@ def _now():
 
 def log_event(org_id: str, actor: str, action: str,
               resource_type: str = "", resource_id: str = "",
-              detail: dict | None = None, ip: str = "") -> int:
+              detail: dict | None = None, ip: str = "",
+              db=None) -> int:
     """Append one audit record. Returns the row id.
 
     Unknown actions raise ValueError — the action vocabulary is closed
     so dashboards and SIEM exports can rely on it.
+
+    ``db``: optional caller-managed sqlite3 connection. When given, the
+    INSERT joins the caller's transaction (no commit/close here) — use
+    this when the audit record must commit atomically with other writes
+    (a second connection would hit "database is locked"). When omitted,
+    the event is committed on its own connection as before.
     """
     if action not in ACTIONS:
         raise ValueError(f"unknown audit action: {action!r}")
-    db = get_db()
+    own = db is None
+    if own:
+        db = get_db()
     try:
         cur = db.execute(
             """INSERT INTO audit_log
@@ -59,10 +68,12 @@ def log_event(org_id: str, actor: str, action: str,
             (org_id, actor or "", action, resource_type, resource_id,
              json.dumps(detail or {}, ensure_ascii=False), ip or "", _now()),
         )
-        db.commit()
+        if own:
+            db.commit()
         return cur.lastrowid
     finally:
-        db.close()
+        if own:
+            db.close()
 
 
 def read_events(org_id: str, limit: int = 50, offset: int = 0,
