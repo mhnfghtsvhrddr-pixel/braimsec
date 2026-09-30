@@ -36,7 +36,7 @@ def _f(fid, **kw):
 # --- compliance map -------------------------------------------------------
 
 def test_map_versioned_and_conservative():
-    assert REPORT_VERSION == "1.0.0"
+    assert REPORT_VERSION == "1.1.0"
     # dotted check_id (as semgrep emits it) must match
     hit = lookup_compliance(
         "home.hatch.workspace.rules.braimsec.taint.ssrf-requests", "semgrep")
@@ -66,19 +66,52 @@ def test_five_sections_and_ordering():
     assert set(r) == {"meta", "executive", "findings", "honesty",
                       "compliance", "fix_plan"}
     assert [f["finding_id"] for f in r["findings"]] == [2, 1, 3]
-    assert r["executive"]["grade"] == "B"  # 1 confirmed error
-    assert r["executive"]["confirmed_errors"] == 1
+    assert r["executive"]["grade"] == "B"  # 1 deterministic error
+    assert r["executive"]["deterministic_errors"] == 1
+    assert r["executive"]["ai_confirmed_errors"] == 1
+    assert "confirmed_errors" not in r["executive"]  # v1.0 field retired
     assert r["executive"]["delta"]["baseline"].startswith("first scan")
 
 
-def test_grade_f_many_confirmed_errors():
+def test_grade_f_many_deterministic_errors():
     fs = [_f(i, ai_verdict="vulnerable", ai_confidence=0.9)
           for i in range(1, 12)]
     r = build_report(_scan(), fs, generated_at=GEN)
     assert r["executive"]["grade"] == "F"
-    # unreviewed findings never count as confirmed
-    fs2 = [_f(i) for i in range(1, 12)]
-    assert build_report(_scan(), fs2, generated_at=GEN)["executive"]["grade"] == "A"
+    assert r["executive"]["deterministic_errors"] == 11
+    assert r["executive"]["ai_confirmed_errors"] == 11
+
+
+def test_grade_counts_unreviewed_errors():
+    # v1.1 behavior change: the grade no longer depends on AI review.
+    # An engine-reported error counts whether or not the AI looked at it —
+    # otherwise the grade would hinge on AI quota spend and AI false
+    # negatives would inflate it.
+    fs = [_f(i) for i in range(1, 12)]  # ai_verdict=None: never reviewed
+    r = build_report(_scan(), fs, generated_at=GEN)
+    assert r["executive"]["grade"] == "F"
+    assert r["executive"]["deterministic_errors"] == 11
+    assert r["executive"]["ai_confirmed_errors"] == 0
+
+
+def test_ai_rejected_error_still_counts_in_grade():
+    # The core honesty fix: an error the AI rejected ("not_vulnerable" is a
+    # measured ~15% FN bucket on config/secrets) must not vanish from the
+    # posture grade.
+    fs = [_f(1, severity="error", ai_verdict="not_vulnerable",
+             ai_confidence=0.4),
+          _f(2, severity="error", ai_verdict="vulnerable",
+             ai_confidence=0.9)]
+    r = build_report(_scan(), fs, generated_at=GEN)
+    exe = r["executive"]
+    assert exe["deterministic_errors"] == 2
+    assert exe["ai_confirmed_errors"] == 1  # supplementary opinion only
+    assert exe["grade"] == "B"  # 2 deterministic errors
+    assert "AI verdicts" in exe["grade_basis"]
+    # honesty appendix reports both numbers too
+    cov = r["honesty"]["coverage"]
+    assert cov["deterministic_errors"] == 2
+    assert cov["ai_confirmed_errors"] == 1
 
 
 def test_delta_vs_previous():
