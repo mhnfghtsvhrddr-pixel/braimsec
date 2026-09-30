@@ -92,8 +92,8 @@ from billing import (  # noqa: E402
     create_project, delete_project, effective_plan, ensure_owner_org,
     ensure_subscription, get_subscription, list_plans, list_projects,
     provision_key, quota_check, quota_status, record_usage,
-    revoke_key, role_rank, run_expiry, seed_plans, start_trial, usage_count,
-    verify_key,
+    revoke_key, role_rank, rotate_key, run_expiry, seed_plans, start_trial,
+    usage_count, verify_key,
 )
 import nowpayments_pay as nowpay  # noqa: E402
 
@@ -753,6 +753,51 @@ def delete_api_key(request: Request, key_id: str):
         raise HTTPException(404, "Key not found")
     revoke_key(key_id, actor=request.state.actor)
     return {"key_id": key_id, "revoked": True}
+
+
+@app.post("/api/keys/{key_id}/rotate")
+@limiter.limit("30/minute")
+def rotate_api_key(request: Request, key_id: str):
+    """Rotate an API key: atomically issue a replacement, revoke the old.
+
+    A key may always rotate itself (self-service — the replacement
+    inherits org, name, role and project, so no privilege changes hands).
+    Rotating another key requires admin or above; project-scoped keys
+    stay inside their own project. The raw replacement is returned ONCE
+    and never stored. The old key dies in the same transaction, so there
+    is no window with zero or two valid keys. The env-configured master
+    key is not a database row and cannot be rotated here.
+    """
+    key_pid = getattr(request.state, "project_id", None)
+    is_self = key_id == getattr(request.state, "key_id", None)
+    if not is_self:
+        require_role(request, "admin")
+    db = get_db()
+    try:
+        if key_pid:
+            row = db.execute(
+                "SELECT id, revoked FROM api_keys"
+                " WHERE id=? AND org_id=? AND project_id=?",
+                (key_id, request.state.org_id, key_pid)).fetchone()
+        else:
+            row = db.execute(
+                "SELECT id, revoked FROM api_keys WHERE id=? AND org_id=?",
+                (key_id, request.state.org_id)).fetchone()
+    finally:
+        db.close()
+    if not row:
+        raise HTTPException(404, "Key not found")
+    if row["revoked"]:
+        raise HTTPException(400, "Key is already revoked")
+    try:
+        raw, new_id = rotate_key(key_id, actor=request.state.actor)
+    except KeyError:
+        raise HTTPException(404, "Key not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"key": raw, "key_id": new_id, "key_prefix": raw[:8],
+            "rotated_from": key_id,
+            "warning": "Store this key now — it will never be shown again."}
 
 
 @app.post("/api/projects")
