@@ -114,6 +114,19 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_org_time ON audit_log(org_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_org_action ON audit_log(org_id, action);
+CREATE TABLE IF NOT EXISTS audit_archives (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    created_at TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT '',
+    cutoff TEXT NOT NULL,
+    row_count INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    first_id INTEGER,
+    last_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_archives_org ON audit_archives(org_id, created_at DESC);
 """
 
 
