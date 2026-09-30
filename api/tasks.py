@@ -33,6 +33,7 @@ import sys
 import time
 
 from celery import Celery
+from celery.exceptions import SoftTimeLimitExceeded
 
 from ssrf_guard import safe_webhook_post
 
@@ -94,6 +95,17 @@ celery_app.conf.update(
 
 WEBHOOK_TIMEOUT_S = 10
 WEBHOOK_ATTEMPTS = 3
+
+# Soft time limits (seconds, env-tunable) for the Celery tasks.
+# Deliberately NO hard `time_limit`: a hard kill looks like a lost worker,
+# and with task_reject_on_worker_lost=True the message would be requeued
+# forever (poison-message loop). The soft limit raises
+# SoftTimeLimitExceeded *inside* the task, which we catch and record as a
+# failed scan — no retry, no requeue. Individual engine subprocesses are
+# additionally bounded by their own 600s timeout in scan_engine.
+SCAN_SOFT_LIMIT_S = int(os.environ.get("BRAIMSEC_SCAN_SOFT_LIMIT", "1500"))
+AI_REVIEW_SOFT_LIMIT_S = int(os.environ.get("BRAIMSEC_AI_REVIEW_SOFT_LIMIT",
+                                            "1200"))
 
 
 def queue_enabled() -> bool:
@@ -175,7 +187,8 @@ def _deliver_webhook(scan_id: str) -> None:
               row["webhook_url"], WEBHOOK_ATTEMPTS, scan_id)
 
 
-@celery_app.task(name="braimsec.run_scan", bind=True, max_retries=2)
+@celery_app.task(name="braimsec.run_scan", bind=True, max_retries=2,
+                 soft_time_limit=SCAN_SOFT_LIMIT_S)
 def run_scan(self, scan_id: str, target_dir: str, cleanup_dir: str | None = None,
              baseline_scan_id: str | None = None):
     """Run both engines, store normalized findings. Idempotent on retry."""
@@ -299,13 +312,18 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
         _audit_scan_terminal(db, scan_id, "scan.completed",
                              {"total_findings": len(findings)})
     except Exception as e:  # noqa: BLE001 - prototype: record failure
-        if task_self.request.retries >= (task_self.max_retries or 0):
+        # A timed-out scan is not transient: retrying would burn two more
+        # full time-limit windows. Fail it outright.
+        timed_out = isinstance(e, SoftTimeLimitExceeded)
+        if timed_out or task_self.request.retries >= (task_self.max_retries or 0):
+            error = (f"scan exceeded the {SCAN_SOFT_LIMIT_S}s time limit"
+                     if timed_out else str(e))
             db.execute(
                 "UPDATE scans SET status='failed', finished_at=?, error=?"
-                " WHERE id=?", (_now_iso(), str(e), scan_id))
+                " WHERE id=?", (_now_iso(), error, scan_id))
             db.commit()
             _audit_scan_terminal(db, scan_id, "scan.failed",
-                                 {"error": str(e)[:200]})
+                                 {"error": error[:200]})
         else:
             # Transient engine failure (e.g. binary hiccup): retry with backoff,
             # keeping the target dir alive for the next attempt.
@@ -319,7 +337,8 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
         _deliver_webhook(scan_id)
 
 
-@celery_app.task(name="braimsec.run_ai_review", bind=True, max_retries=2)
+@celery_app.task(name="braimsec.run_ai_review", bind=True, max_retries=2,
+                 soft_time_limit=AI_REVIEW_SOFT_LIMIT_S)
 def run_ai_review(self, scan_id: str):
     """LLM second-opinion review of every finding.
 
