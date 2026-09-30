@@ -117,8 +117,21 @@ CREATE INDEX IF NOT EXISTS idx_audit_org_action ON audit_log(org_id, action);
 """
 
 
+# Concurrency: the API server and Celery workers are separate processes
+# writing to the same SQLite file. Rollback-journal mode serializes every
+# writer and blocks readers during writes — under load that surfaces as
+# "database is locked" 500s. WAL mode lets readers proceed during writes
+# and a generous busy timeout lets writers queue instead of failing fast.
+# synchronous stays FULL (the default): with WAL this is crash-safe and
+# still far cheaper than rollback-journal FULL, and the audit trail must
+# never lose a committed record to a power cut.
+WAL_BUSY_TIMEOUT_MS = 30000
+
+
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=WAL_BUSY_TIMEOUT_MS / 1000)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA busy_timeout={WAL_BUSY_TIMEOUT_MS}")
     conn.row_factory = sqlite3.Row
     return conn
 
