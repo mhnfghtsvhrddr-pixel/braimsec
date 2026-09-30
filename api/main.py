@@ -403,9 +403,11 @@ async def create_scan(
         )
     webhook_secret = None
     if webhook_url:
-        from urllib.parse import urlparse
-        if urlparse(webhook_url).scheme not in ("http", "https"):
-            raise HTTPException(400, "webhook_url must be http(s)")
+        from ssrf_guard import validate_webhook_url
+        try:
+            validate_webhook_url(webhook_url)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
         webhook_secret = secrets.token_hex(16)
     if file is not None:
         if baseline_scan_id:
