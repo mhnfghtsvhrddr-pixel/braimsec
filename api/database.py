@@ -53,6 +53,14 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
 CREATE INDEX IF NOT EXISTS idx_api_keys_org ON api_keys(org_id);
+-- Phase 2 (enterprise): projects group scans and scope API keys within an org.
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_projects_org ON projects(org_id);
 -- Phase 1 (subscriptions): plans catalog, subscription lifecycle, usage ledger.
 CREATE TABLE IF NOT EXISTS plans (
     plan_id TEXT PRIMARY KEY,
@@ -167,5 +175,11 @@ def init_db():
     if "role" not in key_cols:
         conn.execute("ALTER TABLE api_keys ADD COLUMN role TEXT NOT NULL DEFAULT 'member'")
         conn.execute("UPDATE api_keys SET role='member' WHERE role IS NULL")
+    # Lightweight migration: projects (enterprise). scans.project_id and
+    # api_keys.project_id are NULL for org-wide (unscoped) rows.
+    if "project_id" not in scan_cols:
+        conn.execute("ALTER TABLE scans ADD COLUMN project_id TEXT")
+    if "project_id" not in key_cols:
+        conn.execute("ALTER TABLE api_keys ADD COLUMN project_id TEXT")
     conn.commit()
     conn.close()
