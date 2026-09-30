@@ -1,4 +1,6 @@
 {
   "test_billing.py": true,
-  "test_subscriptions.py": true
+  "test_subscriptions.py": true,
+  "test_upload_security.py::test_traversal_filename_is_contained": true,
+  "test_upload_security.py::test_dotdot_filename_falls_back": true
 }
