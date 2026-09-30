@@ -29,6 +29,19 @@ PLANS = {
 DEFAULT_PLAN = "free"
 OWNER_ORG_ID = "owner"
 
+# RBAC roles, weakest to strongest.
+#   viewer: read-only (scans, findings, reports, audit log)
+#   member: viewer + create scans + quota-consuming AI actions
+#   admin:  member + manage API keys (provision/revoke member & viewer keys)
+#   owner:  admin + grant owner/admin roles (master env key is always owner)
+ROLES = ("viewer", "member", "admin", "owner")
+_ROLE_RANK = {r: i for i, r in enumerate(ROLES)}
+
+
+def role_rank(role: str) -> int:
+    """Numeric rank for role comparison; unknown roles rank below viewer."""
+    return _ROLE_RANK.get(role, -1)
+
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
@@ -90,8 +103,11 @@ def set_plan(org_id: str, plan: str):
         db.close()
 
 
-def provision_key(org_id: str, name: str = "", actor: str = "system") -> str:
+def provision_key(org_id: str, name: str = "", actor: str = "system",
+                  role: str = "member") -> str:
     """Create an API key for an org. Returns the RAW key — shown once, never stored."""
+    if role not in ROLES:
+        raise ValueError(f"unknown role: {role!r} (expected one of {ROLES})")
     raw = "bs_" + secrets.token_urlsafe(32)
     db = get_db()
     try:
@@ -102,16 +118,16 @@ def provision_key(org_id: str, name: str = "", actor: str = "system") -> str:
             raise KeyError(f"No active org: {org_id}")
         key_id = "key_" + uuid.uuid4().hex[:12]
         db.execute(
-            "INSERT INTO api_keys (id, org_id, key_hash, key_prefix, name,"
-            " created_at, revoked) VALUES (?,?,?,?,?,?,0)",
+            "INSERT INTO api_keys (id, org_id, key_hash, key_prefix, name, role,"
+            " created_at, revoked) VALUES (?,?,?,?,?,?,?,0)",
             (key_id, org_id, _hash_key(raw),
-             raw[:8], name, _now()),
+             raw[:8], name, role, _now()),
         )
         db.commit()
     finally:
         db.close()
     log_event(org_id, actor, "api_key.created", "api_key", key_id,
-              {"name": name, "key_prefix": raw[:8]})
+              {"name": name, "key_prefix": raw[:8], "role": role})
     return raw
 
 
@@ -130,11 +146,11 @@ def revoke_key(key_id: str, actor: str = "system"):
 
 
 def verify_key(raw: str):
-    """Validate a presented key. Returns {org_id, plan, key_id, key_prefix} or None."""
+    """Validate a presented key. Returns {org_id, plan, key_id, key_prefix, role} or None."""
     db = get_db()
     try:
         row = db.execute(
-            """SELECT k.id AS key_id, k.org_id, k.key_prefix, o.plan
+            """SELECT k.id AS key_id, k.org_id, k.key_prefix, k.role, o.plan
                FROM api_keys k JOIN organizations o ON o.id = k.org_id
                WHERE k.key_hash=? AND k.revoked=0 AND o.status='active'""",
             (_hash_key(raw),)).fetchone()
@@ -144,7 +160,8 @@ def verify_key(raw: str):
                    (_now(), row["key_id"]))
         db.commit()
         return {"org_id": row["org_id"], "plan": row["plan"],
-                "key_id": row["key_id"], "key_prefix": row["key_prefix"]}
+                "key_id": row["key_id"], "key_prefix": row["key_prefix"],
+                "role": row["role"] or "member"}
     finally:
         db.close()
 
