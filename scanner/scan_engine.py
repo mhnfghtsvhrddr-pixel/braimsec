@@ -38,6 +38,15 @@ _TAINT_RULES_DEFAULT = os.path.join(
 BRAIMSEC_TAINT_RULES = os.environ.get("BRAIMSEC_TAINT_RULES",
                                       _TAINT_RULES_DEFAULT)
 
+# BraimSec GitHub Actions security rules (script injection / unpinned
+# actions / broad permissions in .github/workflows/*.yml). Loaded alongside
+# `--config auto` like the taint pack. Env override for tests:
+# BRAIMSEC_GHA_RULES=path (empty string disables the pack).
+_GHA_RULES_DEFAULT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "rules", "braimsec-gha.yaml")
+BRAIMSEC_GHA_RULES = os.environ.get("BRAIMSEC_GHA_RULES",
+                                    _GHA_RULES_DEFAULT)
+
 ENGINE_NAME = "BraimSec Scanner"
 ENGINE_VERSION = "0.1.0"
 
@@ -78,6 +87,8 @@ def run_semgrep(target, scope=None):
     cmd = [SEMGREP_BIN, "--config", "auto"]
     if BRAIMSEC_TAINT_RULES and os.path.isfile(BRAIMSEC_TAINT_RULES):
         cmd += ["--config", BRAIMSEC_TAINT_RULES]
+    if BRAIMSEC_GHA_RULES and os.path.isfile(BRAIMSEC_GHA_RULES):
+        cmd += ["--config", BRAIMSEC_GHA_RULES]
     targets = list(scope) if scope else [target]
     cmd += ["--json", "-o", out_path] + targets
     try:
