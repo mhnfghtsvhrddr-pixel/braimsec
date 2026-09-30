@@ -963,9 +963,9 @@ def scan_report_pdf(request: Request, scan_id: str):
                 "counts": {r["severity"]: r["c"] for r in pc},
                 "grade": None}
         # grade of the previous report, recomputed deterministically
+        # (v1.1 semantics: engine-reported errors only, no AI gate)
         perr = db.execute(
-            "SELECT COUNT(*) c FROM findings WHERE scan_id=? AND severity='error'"
-            " AND (ai_verdict='vulnerable' OR tool='gitleaks')",
+            "SELECT COUNT(*) c FROM findings WHERE scan_id=? AND severity='error'",
             (prev["scan_id"],)).fetchone()["c"]
         prev["grade"] = ("A" if perr == 0 else "B" if perr <= 2
                          else "C" if perr <= 5 else "D" if perr <= 10
