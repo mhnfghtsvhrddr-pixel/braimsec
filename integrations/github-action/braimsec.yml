@@ -1,8 +1,10 @@
 name: BraimSec PR Review
 
 # Reviews the PR *diff* only. Comments inline on new, high-confidence
-# findings (error severity + AI verdict "vulnerable", or leaked secrets).
-# Warnings never comment. Nothing unreviewed by the AI ever comments.
+# findings (error severity + AI verdict "vulnerable", leaked secrets,
+# or known CVEs in newly-added/changed dependencies).
+# Warnings never comment. Nothing unreviewed by the AI ever comments
+# (secrets and exact CVE matches are deterministic by construction).
 on:
   pull_request:
     types: [opened, synchronize, reopened]
