@@ -255,19 +255,24 @@ def parse_cargo_lock(path, rel):
             lines = f.readlines()
     except OSError:
         return packages
-    name, version, start = None, None, 0
+    # NOTE: the reported line is the `version =` line, not the `[[package]]`
+    # header — a version bump shows the version line as added in a diff,
+    # which is what diff-aware consumers (prbot SCA) anchor comments on.
+    name, version, ver_line = None, None, 0
     for i, raw in enumerate(lines, 1):
         line = raw.strip()
         if line == "[[package]]":
             if name and version:
-                packages.append(Package(name, version, "crates.io", rel, start))
-            name, version, start = None, None, i
+                packages.append(Package(name, version, "crates.io", rel,
+                                        ver_line))
+            name, version, ver_line = None, None, 0
         elif line.startswith("name = "):
             name = line.split("=", 1)[1].strip().strip('"')
         elif line.startswith("version = ") and name and not version:
             version = line.split("=", 1)[1].strip().strip('"')
+            ver_line = i
     if name and version:
-        packages.append(Package(name, version, "crates.io", rel, start))
+        packages.append(Package(name, version, "crates.io", rel, ver_line))
     return packages
 
 
