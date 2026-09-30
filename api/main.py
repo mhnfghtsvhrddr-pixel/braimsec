@@ -12,13 +12,14 @@ Endpoints:
 """
 import os
 import json
+import logging
 import secrets
 import sys
 import tempfile
 import time
 import uuid
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -125,7 +126,10 @@ from patch_verify import verify_patch  # noqa: E402
 # Durable queue (Celery + Redis); falls back to inline BackgroundTasks
 # when BRAIMSEC_BROKER_URL is unset.
 from tasks import (celery_app, enqueue_ai_review, enqueue_scan,
-                   queue_enabled)  # noqa: E402
+                   queue_enabled, SCAN_SOFT_LIMIT_S)  # noqa: E402
+
+
+log = logging.getLogger(__name__)
 
 
 def now():
@@ -277,12 +281,80 @@ def _resolve_scan_target(target_path: str) -> str:
     return real
 
 
+# Orphaned-scan recovery. A scan left in 'running'/'queued' across an API
+# restart means its worker died (crash, OOM-kill, deploy) and will never
+# report back — without recovery the client polls forever on a scan that
+# can never complete. On every API startup such scans are failed honestly
+# instead.
+#
+# Grace periods (not timeouts — the worker's own soft time limit already
+# bounds a healthy scan):
+# - 'running': the worker's full time budget + margin. A live worker can
+#   never exceed SCAN_SOFT_LIMIT_S in 'running' (the soft limit fails the
+#   scan from inside the task), so anything older had its worker die.
+# - 'queued': 24h. A healthy durable queue delivers in seconds; after a
+#   day nobody is coming for the scan.
+ORPHAN_RUNNING_GRACE_S = SCAN_SOFT_LIMIT_S + 900
+ORPHAN_QUEUED_GRACE_S = 86400
+
+
+def _recover_orphaned_scans() -> int:
+    """Fail scans whose worker died mid-flight. Returns the count recovered.
+
+    Audit-logged per scan (actor 'system', action 'scan.failed') and
+    fail-closed like the rest of main.py: a recovery that silently drops
+    its audit records would be worse than a loud boot failure.
+    Quota stays consumed — consistent with genuinely-failed scans: the
+    attempt, not the outcome, is what the quota meters.
+    """
+    cutoff_running = (datetime.now(timezone.utc)
+                      - timedelta(seconds=ORPHAN_RUNNING_GRACE_S)).isoformat()
+    cutoff_queued = (datetime.now(timezone.utc)
+                     - timedelta(seconds=ORPHAN_QUEUED_GRACE_S)).isoformat()
+    db = get_db()
+    try:
+        rows = db.execute(
+            "SELECT id, org_id, status FROM scans WHERE"
+            " (status='running' AND COALESCE(started_at, created_at) < ?)"
+            " OR (status='queued' AND created_at < ?)",
+            (cutoff_running, cutoff_queued),
+        ).fetchall()
+        for r in rows:
+            error = (
+                f"worker lost: scan was '{r['status']}' with no completion "
+                f"signal (recovered on API startup after grace period); "
+                f"no findings were stored"
+            )
+            db.execute(
+                "UPDATE scans SET status='failed', finished_at=?, error=?"
+                " WHERE id=?",
+                (now(), error, r["id"]),
+            )
+            # Same connection/transaction: a second connection here would
+            # hit "database is locked" while the UPDATE holds the write
+            # lock, and splitting them would break atomicity.
+            log_event(r["org_id"], "system", "scan.failed", "scan", r["id"],
+                      {"reason": "orphan_recovery",
+                       "previous_status": r["status"]}, "", db=db)
+        db.commit()
+        if rows:
+            log.warning("orphan recovery: failed %d worker-lost scan(s)",
+                        len(rows))
+        return len(rows)
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @app.on_event("startup")
 def startup():
     init_db()
     seed_plans()
     ensure_owner_org()
     ensure_subscription(OWNER_ORG_ID)
+    _recover_orphaned_scans()
 
 
 def _new_scan(org_id: str, target_name: str, target_dir: str,
