@@ -88,6 +88,23 @@ CREATE TABLE IF NOT EXISTS usage_ledger (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_usage_org_period ON usage_ledger(org_id, period, kind);
+-- Phase 2 (enterprise): immutable audit trail. Who did what, when, from
+-- where. Append-only by convention: no UPDATE/DELETE statements exist for
+-- this table anywhere in the codebase. actor is an API key prefix or
+-- 'owner'/'system' — the full secret never enters the log.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    actor TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL,
+    resource_type TEXT NOT NULL DEFAULT '',
+    resource_id TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '{}',
+    ip TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_org_time ON audit_log(org_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_org_action ON audit_log(org_id, action);
 """
 
 
