@@ -31,9 +31,10 @@ import os
 import shutil
 import sys
 import time
-import urllib.request
 
 from celery import Celery
+
+from ssrf_guard import safe_webhook_post
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "scanner"))
@@ -154,19 +155,18 @@ def _deliver_webhook(scan_id: str) -> None:
     body = json.dumps(payload, separators=(",", ":")).encode()
     sig = hmac.new(row["webhook_secret"].encode(), body,
                    hashlib.sha256).hexdigest()
-    req = urllib.request.Request(
-        row["webhook_url"], data=body,
-        headers={"Content-Type": "application/json",
-                 "X-BraimSec-Event": event,
-                 "X-BraimSec-Signature": f"sha256={sig}"},
-        method="POST")
+    headers = {"Content-Type": "application/json",
+               "X-BraimSec-Event": event,
+               "X-BraimSec-Signature": f"sha256={sig}"}
     for attempt in range(1, WEBHOOK_ATTEMPTS + 1):
         try:
-            with urllib.request.urlopen(req, timeout=WEBHOOK_TIMEOUT_S) as resp:
-                if 200 <= resp.status < 300:
-                    return
-                log.warning("webhook %s -> %s (attempt %d)",
-                            row["webhook_url"], resp.status, attempt)
+            # SSRF-guarded: pinned IP, no redirects, blocked ranges refused.
+            status = safe_webhook_post(row["webhook_url"], body, headers,
+                                       WEBHOOK_TIMEOUT_S)
+            if 200 <= status < 300:
+                return
+            log.warning("webhook %s -> %s (attempt %d)",
+                        row["webhook_url"], status, attempt)
         except Exception as e:  # noqa: BLE001 - best effort by design
             log.warning("webhook %s failed (attempt %d): %s",
                         row["webhook_url"], attempt, e)
