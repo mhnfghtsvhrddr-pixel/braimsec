@@ -124,7 +124,8 @@ from patch_verify import verify_patch  # noqa: E402
 
 # Durable queue (Celery + Redis); falls back to inline BackgroundTasks
 # when BRAIMSEC_BROKER_URL is unset.
-from tasks import enqueue_ai_review, enqueue_scan  # noqa: E402
+from tasks import (celery_app, enqueue_ai_review, enqueue_scan,
+                   queue_enabled)  # noqa: E402
 
 
 def now():
@@ -172,7 +173,8 @@ async def api_key_gate(request: Request, call_next):
     /api/webhooks/nowpayments is public (NOWPayments IPN; secured by HMAC).
     """
     public_paths = ("/api/plans", "/api/checkout/crypto",
-                    "/api/checkout/status", "/api/webhooks/nowpayments")
+                    "/api/checkout/status", "/api/webhooks/nowpayments",
+                    "/api/health")
     if request.url.path.startswith("/api/") and request.url.path not in public_paths:
         presented = request.headers.get("x-api-key", "")
         org = None
@@ -1007,6 +1009,39 @@ def scan_report_pdf(request: Request, scan_id: str):
 def api_plans():
     """Public plan catalog. Prices are placeholders until customer interviews."""
     return list_plans()
+
+
+@app.get("/api/health")
+@limiter.limit("60/minute")
+def api_health(request: Request):
+    """Public liveness/readiness probe for load balancers and monitors.
+
+    No auth by design (probes can't carry API keys); reveals only component
+    statuses, never secrets. 200 = all components healthy, 503 otherwise.
+    """
+    checks = {}
+    try:
+        db = get_db()
+        db.execute("SELECT 1").fetchone()
+        db.close()
+        checks["database"] = "ok"
+    except Exception as e:  # noqa: BLE001 - health must report, not raise
+        checks["database"] = f"error: {type(e).__name__}"
+    if queue_enabled():
+        try:
+            conn = celery_app.broker_connection()
+            conn.ensure_connection(max_retries=1)
+            conn.release()
+            checks["broker"] = "ok"
+        except Exception as e:  # noqa: BLE001 - health must report, not raise
+            checks["broker"] = f"error: {type(e).__name__}"
+    else:
+        checks["broker"] = "inline-mode"
+    healthy = all(v == "ok" or v == "inline-mode" for v in checks.values())
+    return JSONResponse(
+        {"status": "ok" if healthy else "degraded", "checks": checks},
+        status_code=200 if healthy else 503,
+    )
 
 
 # ---------------------------------------------------------------------------
