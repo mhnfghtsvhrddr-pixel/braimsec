@@ -43,6 +43,76 @@ def role_rank(role: str) -> int:
     return _ROLE_RANK.get(role, -1)
 
 
+def create_project(org_id: str, name: str, actor: str = "system") -> str:
+    """Create a project inside an org. Returns the project id."""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("project name is required")
+    pid = "proj_" + uuid.uuid4().hex[:12]
+    db = get_db()
+    try:
+        org = db.execute(
+            "SELECT id FROM organizations WHERE id=? AND status='active'",
+            (org_id,)).fetchone()
+        if not org:
+            raise KeyError(f"No active org: {org_id}")
+        db.execute("INSERT INTO projects (id, org_id, name, created_at)"
+                   " VALUES (?,?,?,?)", (pid, org_id, name[:80], _now()))
+        db.commit()
+    finally:
+        db.close()
+    log_event(org_id, actor, "project.created", "project", pid, {"name": name[:80]})
+    return pid
+
+
+def list_projects(org_id: str) -> list[dict]:
+    db = get_db()
+    try:
+        rows = db.execute("SELECT id, name, created_at FROM projects"
+                          " WHERE org_id=? ORDER BY created_at",
+                          (org_id,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        db.close()
+
+
+def delete_project(org_id: str, project_id: str, actor: str = "system"):
+    """Delete an empty project. Refuses when scans or active keys still
+    reference it — deleting those implicitly would orphan audit history."""
+    db = get_db()
+    try:
+        row = db.execute("SELECT id FROM projects WHERE id=? AND org_id=?",
+                         (project_id, org_id)).fetchone()
+        if not row:
+            raise KeyError(f"No such project: {project_id}")
+        n_scans = db.execute("SELECT COUNT(*) c FROM scans"
+                             " WHERE org_id=? AND project_id=?",
+                             (org_id, project_id)).fetchone()["c"]
+        if n_scans:
+            raise ValueError(f"Project has {n_scans} scan(s); move or delete them first")
+        n_keys = db.execute("SELECT COUNT(*) c FROM api_keys"
+                            " WHERE org_id=? AND project_id=? AND revoked=0",
+                            (org_id, project_id)).fetchone()["c"]
+        if n_keys:
+            raise ValueError(f"Project has {n_keys} active key(s); revoke them first")
+        db.execute("DELETE FROM projects WHERE id=?", (project_id,))
+        db.commit()
+    finally:
+        db.close()
+    log_event(org_id, actor, "project.deleted", "project", project_id, {})
+
+
+def _check_project(db, org_id: str, project_id: str | None) -> str | None:
+    """Validate a project id belongs to the org. Returns it or None."""
+    if not project_id:
+        return None
+    row = db.execute("SELECT id FROM projects WHERE id=? AND org_id=?",
+                     (project_id, org_id)).fetchone()
+    if not row:
+        raise KeyError(f"No such project in this org: {project_id}")
+    return project_id
+
+
 def _now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -104,8 +174,11 @@ def set_plan(org_id: str, plan: str):
 
 
 def provision_key(org_id: str, name: str = "", actor: str = "system",
-                  role: str = "member") -> str:
-    """Create an API key for an org. Returns the RAW key — shown once, never stored."""
+                  role: str = "member", project_id: str | None = None) -> str:
+    """Create an API key for an org. Returns the RAW key — shown once, never stored.
+
+    project_id scopes the key to one project (None = org-wide).
+    """
     if role not in ROLES:
         raise ValueError(f"unknown role: {role!r} (expected one of {ROLES})")
     raw = "bs_" + secrets.token_urlsafe(32)
@@ -116,18 +189,20 @@ def provision_key(org_id: str, name: str = "", actor: str = "system",
             (org_id,)).fetchone()
         if not org:
             raise KeyError(f"No active org: {org_id}")
+        project_id = _check_project(db, org_id, project_id)
         key_id = "key_" + uuid.uuid4().hex[:12]
         db.execute(
             "INSERT INTO api_keys (id, org_id, key_hash, key_prefix, name, role,"
-            " created_at, revoked) VALUES (?,?,?,?,?,?,?,0)",
+            " project_id, created_at, revoked) VALUES (?,?,?,?,?,?,?,?,0)",
             (key_id, org_id, _hash_key(raw),
-             raw[:8], name, role, _now()),
+             raw[:8], name, role, project_id, _now()),
         )
         db.commit()
     finally:
         db.close()
     log_event(org_id, actor, "api_key.created", "api_key", key_id,
-              {"name": name, "key_prefix": raw[:8], "role": role})
+              {"name": name, "key_prefix": raw[:8], "role": role,
+               "project_id": project_id})
     return raw
 
 
@@ -146,11 +221,13 @@ def revoke_key(key_id: str, actor: str = "system"):
 
 
 def verify_key(raw: str):
-    """Validate a presented key. Returns {org_id, plan, key_id, key_prefix, role} or None."""
+    """Validate a presented key. Returns {org_id, plan, key_id, key_prefix,
+    role, project_id} or None. project_id None = org-wide key."""
     db = get_db()
     try:
         row = db.execute(
-            """SELECT k.id AS key_id, k.org_id, k.key_prefix, k.role, o.plan
+            """SELECT k.id AS key_id, k.org_id, k.key_prefix, k.role,
+                      k.project_id, o.plan
                FROM api_keys k JOIN organizations o ON o.id = k.org_id
                WHERE k.key_hash=? AND k.revoked=0 AND o.status='active'""",
             (_hash_key(raw),)).fetchone()
@@ -161,7 +238,8 @@ def verify_key(raw: str):
         db.commit()
         return {"org_id": row["org_id"], "plan": row["plan"],
                 "key_id": row["key_id"], "key_prefix": row["key_prefix"],
-                "role": row["role"] or "member"}
+                "role": row["role"] or "member",
+                "project_id": row["project_id"]}
     finally:
         db.close()
 
