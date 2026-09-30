@@ -59,10 +59,38 @@ def require_role(request: Request, minimum: str):
         raise HTTPException(
             403, f"Requires '{minimum}' role or higher (this key: '{role}')")
     return role
+
+
+def require_org_scope(request: Request):
+    """Org-level surfaces (billing, audit trail) reject project-scoped keys.
+
+    A key scoped to project P must not see the org's billing or the
+    audit trail of other projects.
+    """
+    if getattr(request.state, "project_id", None):
+        raise HTTPException(
+            403, "Project-scoped keys cannot access org-level resources")
+
+
+def _scan_scope(request: Request, alias: str = "s"):
+    """SQL predicate + params restricting scans to the caller's visibility.
+
+    Org-wide keys see the whole org; project-scoped keys see only their
+    own project's scans (including unscoped legacy scans? No — a scoped
+    key sees ONLY its project; legacy NULL-project scans stay visible
+    to org-wide keys only).
+    """
+    pid = getattr(request.state, "project_id", None)
+    prefix = f"{alias}." if alias else ""
+    if pid:
+        return f"{prefix}org_id=? AND {prefix}project_id=?", \
+            [request.state.org_id, pid]
+    return f"{prefix}org_id=?", [request.state.org_id]
 from billing import (  # noqa: E402
     OWNER_ORG_ID, ROLES, cancel_subscription, consume_scan, create_org,
-    effective_plan, ensure_owner_org, ensure_subscription, get_subscription,
-    list_plans, provision_key, quota_check, quota_status, record_usage,
+    create_project, delete_project, effective_plan, ensure_owner_org,
+    ensure_subscription, get_subscription, list_plans, list_projects,
+    provision_key, quota_check, quota_status, record_usage,
     revoke_key, role_rank, run_expiry, seed_plans, start_trial, usage_count,
     verify_key,
 )
@@ -168,6 +196,9 @@ async def api_key_gate(request: Request, call_next):
         request.state.actor = actor
         request.state.role = role
         request.state.key_id = (org or {}).get("key_id")  # None for master key
+        # Project scope: None = org-wide key; otherwise the key only sees
+        # its own project's data.
+        request.state.project_id = (org or {}).get("project_id")
     return await call_next(request)
 
 
@@ -256,7 +287,8 @@ def _new_scan(org_id: str, target_name: str, target_dir: str,
               cleanup_dir, background_tasks: BackgroundTasks,
               webhook_url: str | None = None,
               webhook_secret: str | None = None,
-              baseline_scan_id: str | None = None):
+              baseline_scan_id: str | None = None,
+              project_id: str | None = None):
     """Create a scan owned by org_id. Consumes one unit of monthly quota.
 
     Raises HTTPException(402) when the org's plan quota is exhausted,
@@ -273,9 +305,10 @@ def _new_scan(org_id: str, target_name: str, target_dir: str,
     db = get_db()
     db.execute(
         "INSERT INTO scans (id, org_id, target_name, status, created_at,"
-        " webhook_url, webhook_secret, target_dir) VALUES (?,?,?,?,?,?,?,?)",
+        " webhook_url, webhook_secret, target_dir, project_id)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
         (scan_id, org_id, target_name, "queued", now(),
-         webhook_url, webhook_secret, target_dir))
+         webhook_url, webhook_secret, target_dir, project_id))
     db.commit()
     db.close()
     try:
@@ -294,17 +327,21 @@ def _new_scan(org_id: str, target_name: str, target_dir: str,
     return result
 
 
-def _check_baseline(org_id: str, baseline_scan_id: str) -> None:
+def _check_baseline(request: Request, baseline_scan_id: str) -> None:
     """Validate a baseline_scan_id for incremental scans (fail fast, no quota)."""
     from database import get_db
+    org_id = request.state.org_id
+    pid = getattr(request.state, "project_id", None)
     db = get_db()
-    row = db.execute("SELECT org_id, status FROM scans WHERE id=?",
+    row = db.execute("SELECT org_id, project_id, status FROM scans WHERE id=?",
                      (baseline_scan_id,)).fetchone()
     db.close()
     if row is None:
         raise HTTPException(404, "baseline scan not found")
     if row["org_id"] != org_id:
         raise HTTPException(403, "baseline scan belongs to another organization")
+    if pid and row["project_id"] != pid:
+        raise HTTPException(403, "baseline scan belongs to another project")
     if row["status"] != "done":
         raise HTTPException(400,
                             f"baseline scan is not complete (status={row['status']})")
@@ -319,6 +356,7 @@ async def create_scan(
     file: UploadFile | None = File(None),
     webhook_url: str | None = Form(None),
     baseline_scan_id: str | None = Form(None),
+    project_id: str | None = Form(None),
 ):
     """Start a scan from a server-local path or an uploaded zip.
 
@@ -332,9 +370,30 @@ async def create_scan(
     Optional ``baseline_scan_id``: run an incremental (diff-based) rescan
     against that scan's fingerprint baseline. Requires ``target_path`` —
     zip uploads are always full scans.
+
+    Optional ``project_id``: file the scan under a project. A
+    project-scoped key is always filed under its own project.
     """
     require_role(request, "member")  # scans consume quota: not for viewers
     org_id = request.state.org_id
+    # Resolve the scan's project: scoped keys are pinned to their own
+    # project; org-wide keys may name one (must belong to the org).
+    key_pid = getattr(request.state, "project_id", None)
+    if key_pid:
+        if project_id and project_id != key_pid:
+            raise HTTPException(
+                403, "This key is scoped to its own project and cannot"
+                     " file scans elsewhere")
+        project_id = key_pid
+    elif project_id:
+        db = get_db()
+        try:
+            ok = db.execute("SELECT 1 FROM projects WHERE id=? AND org_id=?",
+                            (project_id, org_id)).fetchone()
+        finally:
+            db.close()
+        if not ok:
+            raise HTTPException(400, "Unknown project_id for this org")
     allowed, used, quota = quota_status(org_id)
     if not allowed:
         raise HTTPException(
@@ -384,21 +443,23 @@ async def create_scan(
         else:
             raise HTTPException(400, "Uploaded file must be a zip archive")
         result = _new_scan(org_id, filename, target_dir, workdir,
-                           background_tasks, webhook_url, webhook_secret)
+                           background_tasks, webhook_url, webhook_secret,
+                           project_id=project_id)
         _audit(request, "scan.created", "scan", result["scan_id"],
-               {"target": filename, "via": "upload"})
+               {"target": filename, "via": "upload", "project_id": project_id})
         return result
 
     if target_path:
         target_dir = _resolve_scan_target(target_path)
         if baseline_scan_id:
-            _check_baseline(org_id, baseline_scan_id)
+            _check_baseline(request, baseline_scan_id)
         result = _new_scan(org_id, os.path.basename(target_dir.rstrip("/")) or target_dir,
                            target_dir, None, background_tasks,
-                           webhook_url, webhook_secret, baseline_scan_id)
+                           webhook_url, webhook_secret, baseline_scan_id,
+                           project_id=project_id)
         _audit(request, "scan.created", "scan", result["scan_id"],
                {"target": target_dir, "via": "target_path",
-                "baseline": bool(baseline_scan_id)})
+                "baseline": bool(baseline_scan_id), "project_id": project_id})
         return result
 
     raise HTTPException(400, "Provide target_path or upload a zip file")
@@ -408,9 +469,10 @@ async def create_scan(
 def list_scans(request: Request):
     # Org-scoped: a customer only ever sees their own scans.
     db = get_db()
+    pred, params = _scan_scope(request, "")
     rows = db.execute(
-        "SELECT * FROM scans WHERE org_id=? ORDER BY created_at DESC",
-        (request.state.org_id,)).fetchall()
+        f"SELECT * FROM scans WHERE {pred} ORDER BY created_at DESC",
+        params).fetchall()
     db.close()
     return [dict(r) for r in rows]
 
@@ -418,8 +480,9 @@ def list_scans(request: Request):
 @app.get("/api/scans/{scan_id}")
 def scan_status(request: Request, scan_id: str):
     db = get_db()
-    row = db.execute("SELECT * FROM scans WHERE id=? AND org_id=?",
-                     (scan_id, request.state.org_id)).fetchone()
+    pred, params = _scan_scope(request, "")
+    row = db.execute(f"SELECT * FROM scans WHERE id=? AND {pred}",
+                     (scan_id, *params)).fetchone()
     if not row:
         db.close()
         raise HTTPException(404, "Scan not found")
@@ -435,8 +498,9 @@ def scan_status(request: Request, scan_id: str):
 @app.get("/api/scans/{scan_id}/results")
 def scan_results(request: Request, scan_id: str, severity: str | None = None):
     db = get_db()
-    exists = db.execute("SELECT 1 FROM scans WHERE id=? AND org_id=?",
-                        (scan_id, request.state.org_id)).fetchone()
+    pred, params = _scan_scope(request, "")
+    exists = db.execute(f"SELECT 1 FROM scans WHERE id=? AND {pred}",
+                        (scan_id, *params)).fetchone()
     if not exists:
         db.close()
         raise HTTPException(404, "Scan not found")
@@ -459,8 +523,9 @@ def start_ai_review(request: Request, scan_id: str, background_tasks: Background
     require_role(request, "member")  # LLM calls cost money: not for viewers
     org_id = request.state.org_id
     db = get_db()
-    scan = db.execute("SELECT target_dir FROM scans WHERE id=? AND org_id=?",
-                      (scan_id, org_id)).fetchone()
+    pred, params = _scan_scope(request, "")
+    scan = db.execute(f"SELECT target_dir FROM scans WHERE id=? AND {pred}",
+                      (scan_id, *params)).fetchone()
     if not scan:
         db.close()
         raise HTTPException(404, "Scan not found")
@@ -505,8 +570,10 @@ def get_audit_log(request: Request, limit: int = 50, offset: int = 0,
     """Enterprise audit trail: newest-first records for the caller's org.
 
     Org-scoped — a customer only ever sees their own trail. Optional
-    ``action`` filter (e.g. ``scan.created``).
+    ``action`` filter (e.g. ``scan.created``). Project-scoped keys are
+    rejected: the trail covers the whole org.
     """
+    require_org_scope(request)
     return read_events(request.state.org_id, limit=limit, offset=offset,
                        action=action)
 
@@ -516,10 +583,12 @@ def get_audit_log(request: Request, limit: int = 50, offset: int = 0,
 async def create_api_key(request: Request):
     """Provision a new API key for the caller's org (admin and above).
 
-    Body: {"name": "...", "role": "viewer|member|admin|owner"}.
+    Body: {"name": "...", "role": "viewer|member|admin|owner",
+           "project_id": "..." (optional)}.
     Only an 'owner' key may grant 'admin' or 'owner' — an admin can only
-    mint viewer/member keys. Returns the raw key ONCE; it is never
-    stored and cannot be retrieved again.
+    mint viewer/member keys. A project-scoped key may only mint keys
+    inside its own project (no scope escape). Returns the raw key ONCE;
+    it is never stored and cannot be retrieved again.
     """
     require_role(request, "admin")
     try:
@@ -532,23 +601,51 @@ async def create_api_key(request: Request):
         raise HTTPException(400, f"Unknown role {role!r} (expected one of {ROLES})")
     if role_rank(role) >= role_rank("admin") and request.state.role != "owner":
         raise HTTPException(403, "Only an 'owner' key can grant 'admin'/'owner' roles")
-    raw = provision_key(request.state.org_id, name,
-                        actor=request.state.actor, role=role)
+    key_pid = getattr(request.state, "project_id", None)
+    project_id = body.get("project_id")
+    if key_pid:
+        # Scoped key: pinned to its own project, no org-wide minting.
+        # Explicit rejection (not silent re-scoping): the caller asked
+        # for something this key must never create.
+        if project_id != key_pid:
+            raise HTTPException(
+                403, "This key is scoped to its own project: pass its "
+                     "project_id explicitly, org-wide minting is forbidden")
+        project_id = key_pid
+    try:
+        raw = provision_key(request.state.org_id, name,
+                            actor=request.state.actor, role=role,
+                            project_id=project_id)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(400, str(e))
     return {"key": raw, "key_prefix": raw[:8], "name": name, "role": role,
+            "project_id": project_id,
             "warning": "Store this key now — it will never be shown again."}
 
 
 @app.get("/api/keys")
 @limiter.limit("60/minute")
 def list_api_keys(request: Request):
-    """List the org's API keys (admin and above). Hashes are never exposed."""
+    """List the org's API keys (admin and above). Hashes are never exposed.
+
+    A project-scoped key sees only its own project's keys.
+    """
     require_role(request, "admin")
+    key_pid = getattr(request.state, "project_id", None)
     db = get_db()
     try:
-        rows = db.execute(
-            """SELECT id, key_prefix, name, role, created_at, last_used_at,
-                      revoked FROM api_keys WHERE org_id=? ORDER BY created_at""",
-            (request.state.org_id,)).fetchall()
+        if key_pid:
+            rows = db.execute(
+                """SELECT id, key_prefix, name, role, project_id, created_at,
+                          last_used_at, revoked FROM api_keys
+                   WHERE org_id=? AND project_id=? ORDER BY created_at""",
+                (request.state.org_id, key_pid)).fetchall()
+        else:
+            rows = db.execute(
+                """SELECT id, key_prefix, name, role, project_id, created_at,
+                          last_used_at, revoked FROM api_keys
+                   WHERE org_id=? ORDER BY created_at""",
+                (request.state.org_id,)).fetchall()
         return [dict(r) for r in rows]
     finally:
         db.close()
@@ -557,20 +654,82 @@ def list_api_keys(request: Request):
 @app.delete("/api/keys/{key_id}")
 @limiter.limit("30/minute")
 def delete_api_key(request: Request, key_id: str):
-    """Revoke an API key (admin and above). Cannot revoke the key in use."""
+    """Revoke an API key (admin and above). Cannot revoke the key in use.
+
+    A project-scoped key can only revoke keys inside its own project.
+    """
     require_role(request, "admin")
     if key_id == getattr(request.state, "key_id", None):
         raise HTTPException(400, "Cannot revoke the key you are calling with")
+    key_pid = getattr(request.state, "project_id", None)
     db = get_db()
     try:
-        row = db.execute("SELECT id FROM api_keys WHERE id=? AND org_id=?",
-                         (key_id, request.state.org_id)).fetchone()
+        if key_pid:
+            row = db.execute(
+                "SELECT id FROM api_keys WHERE id=? AND org_id=? AND project_id=?",
+                (key_id, request.state.org_id, key_pid)).fetchone()
+        else:
+            row = db.execute("SELECT id FROM api_keys WHERE id=? AND org_id=?",
+                             (key_id, request.state.org_id)).fetchone()
     finally:
         db.close()
     if not row:
         raise HTTPException(404, "Key not found")
     revoke_key(key_id, actor=request.state.actor)
     return {"key_id": key_id, "revoked": True}
+
+
+@app.post("/api/projects")
+@limiter.limit("30/minute")
+async def create_project_endpoint(request: Request):
+    """Create a project inside the caller's org (admin and above).
+
+    A project-scoped key cannot create projects — projects are an
+    org-level construct.
+    """
+    require_role(request, "admin")
+    require_org_scope(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    try:
+        pid = create_project(request.state.org_id, body.get("name", ""),
+                             actor=request.state.actor)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"project_id": pid, "name": (body.get("name") or "").strip()[:80]}
+
+
+@app.get("/api/projects")
+@limiter.limit("60/minute")
+def list_projects_endpoint(request: Request):
+    """List the caller's projects. A project-scoped key sees only its own."""
+    pid = getattr(request.state, "project_id", None)
+    projects = list_projects(request.state.org_id)
+    if pid:
+        projects = [p for p in projects if p["id"] == pid]
+    return projects
+
+
+@app.delete("/api/projects/{project_id}")
+@limiter.limit("30/minute")
+def delete_project_endpoint(request: Request, project_id: str):
+    """Delete an empty project (admin and above, org scope).
+
+    Refuses while scans or active keys still reference the project —
+    nothing is orphaned implicitly.
+    """
+    require_role(request, "admin")
+    require_org_scope(request)
+    try:
+        delete_project(request.state.org_id, project_id,
+                       actor=request.state.actor)
+    except KeyError:
+        raise HTTPException(404, "Project not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"project_id": project_id, "deleted": True}
 
 
 def _fix_payload(row):
@@ -602,10 +761,11 @@ def fix_suggestion(request: Request, finding_id: int):
     require_role(request, "member")  # generation costs 2 AI units
     org_id = request.state.org_id
     db = get_db()
+    pred, params = _scan_scope(request, "s")
     row = db.execute(
-        """SELECT f.* FROM findings f JOIN scans s ON s.id = f.scan_id
-           WHERE f.id = ? AND s.org_id = ?""",
-        (finding_id, org_id)).fetchone()
+        f"""SELECT f.* FROM findings f JOIN scans s ON s.id = f.scan_id
+           WHERE f.id = ? AND {pred}""",
+        (finding_id, *params)).fetchone()
     if not row:
         db.close()
         raise HTTPException(404, "Finding not found")
@@ -673,11 +833,12 @@ def patch_verify_endpoint(request: Request, finding_id: int):
     require_role(request, "member")
     org_id = request.state.org_id
     db = get_db()
+    pred, params = _scan_scope(request, "s")
     row = db.execute(
-        """SELECT f.*, s.target_dir FROM findings f
+        f"""SELECT f.*, s.target_dir FROM findings f
            JOIN scans s ON s.id = f.scan_id
-           WHERE f.id = ? AND s.org_id = ?""",
-        (finding_id, org_id)).fetchone()
+           WHERE f.id = ? AND {pred}""",
+        (finding_id, *params)).fetchone()
     if not row:
         db.close()
         raise HTTPException(404, "Finding not found")
@@ -727,11 +888,12 @@ def taint_flow(request: Request, finding_id: int):
     """
     org_id = request.state.org_id
     db = get_db()
+    pred, params = _scan_scope(request, "s")
     row = db.execute(
-        """SELECT f.*, s.target_dir FROM findings f
+        f"""SELECT f.*, s.target_dir FROM findings f
            JOIN scans s ON s.id = f.scan_id
-           WHERE f.id = ? AND s.org_id = ?""",
-        (finding_id, org_id)).fetchone()
+           WHERE f.id = ? AND {pred}""",
+        (finding_id, *params)).fetchone()
     db.close()
     if not row:
         raise HTTPException(404, "Finding not found")
@@ -767,8 +929,9 @@ def scan_report_pdf(request: Request, scan_id: str):
     from datetime import datetime, timezone
 
     db = get_db()
-    scan = db.execute("SELECT * FROM scans WHERE id=? AND org_id=?",
-                      (scan_id, request.state.org_id)).fetchone()
+    pred, params = _scan_scope(request, "")
+    scan = db.execute(f"SELECT * FROM scans WHERE id=? AND {pred}",
+                      (scan_id, *params)).fetchone()
     if not scan:
         db.close()
         raise HTTPException(404, "Scan not found")
@@ -999,6 +1162,7 @@ async def nowpayments_ipn(request: Request):
 @app.get("/api/subscription")
 def api_subscription(request: Request):
     """The caller's org subscription: plan, status, period, quotas in force."""
+    require_org_scope(request)
     sub = get_subscription(request.state.org_id)
     plan = effective_plan(request.state.org_id)
     return {
@@ -1023,6 +1187,7 @@ def api_subscription(request: Request):
 @app.get("/api/usage")
 def api_usage(request: Request):
     """Current month's consumption vs quota. Quotas never roll over."""
+    require_org_scope(request)
     org_id = request.state.org_id
     out = {}
     for kind, label in (("scan", "scans"), ("ai_review", "ai_reviews")):
