@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     key_hash TEXT NOT NULL UNIQUE,
     key_prefix TEXT NOT NULL,
     name TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'member',
     created_at TEXT NOT NULL,
     last_used_at TEXT,
     revoked INTEGER NOT NULL DEFAULT 0
@@ -158,5 +159,13 @@ def init_db():
     # braimsec_taint_rules}. NULL on scans that predate this logging.
     if "engines_json" not in scan_cols:
         conn.execute("ALTER TABLE scans ADD COLUMN engines_json TEXT")
+    # Lightweight migration: RBAC roles on API keys (enterprise).
+    # viewer < member < admin < owner. Existing keys keep full historical
+    # behavior as 'member' (scan + AI, no key management — which had no
+    # HTTP surface before this migration anyway).
+    key_cols = {r["name"] for r in conn.execute("PRAGMA table_info(api_keys)")}
+    if "role" not in key_cols:
+        conn.execute("ALTER TABLE api_keys ADD COLUMN role TEXT NOT NULL DEFAULT 'member'")
+        conn.execute("UPDATE api_keys SET role='member' WHERE role IS NULL")
     conn.commit()
     conn.close()
