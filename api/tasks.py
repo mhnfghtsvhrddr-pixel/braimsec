@@ -41,7 +41,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "ai"))
 
 from database import get_db  # noqa: E402
+from audit import log_event  # noqa: E402
 from billing import quota_check, record_usage  # noqa: E402
+
+
+def _audit_scan_terminal(db, scan_id: str, action: str, detail: dict):
+    """Audit-log a scan reaching a terminal state (worker context).
+
+    Actor is 'system': the worker, not a key holder, closed the scan.
+    Best-effort — a logging failure must not mask the scan outcome.
+    """
+    try:
+        row = db.execute("SELECT org_id FROM scans WHERE id=?",
+                         (scan_id,)).fetchone()
+        if row:
+            log_event(row["org_id"], "system", action, "scan", scan_id, detail)
+    except Exception:  # noqa: BLE001 - audit must not break scan completion
+        pass
 from scan_engine import run_gitleaks, run_semgrep, run_sca  # noqa: E402
 from ai_layer import LLMClient, analyze_finding, read_snippet  # noqa: E402
 from sink_audit import (  # noqa: E402
@@ -280,12 +296,16 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
              json.dumps(_engine_versions()), scan_id),
         )
         db.commit()
+        _audit_scan_terminal(db, scan_id, "scan.completed",
+                             {"total_findings": len(findings)})
     except Exception as e:  # noqa: BLE001 - prototype: record failure
         if task_self.request.retries >= (task_self.max_retries or 0):
             db.execute(
                 "UPDATE scans SET status='failed', finished_at=?, error=?"
                 " WHERE id=?", (_now_iso(), str(e), scan_id))
             db.commit()
+            _audit_scan_terminal(db, scan_id, "scan.failed",
+                                 {"error": str(e)[:200]})
         else:
             # Transient engine failure (e.g. binary hiccup): retry with backoff,
             # keeping the target dir alive for the next attempt.
