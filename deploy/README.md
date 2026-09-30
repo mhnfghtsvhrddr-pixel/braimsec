@@ -17,8 +17,10 @@ CX22 (2 vCPU / 4 GB RAM / 40 GB SSD). SQLite lives on a named Docker volume
 
 1. **Server**: Hetzner CX22, Ubuntu 24.04, Falkenstein. SSH as root.
 2. **Stage 1 — smoke test on IP**: `SITE_ADDRESS=http://<server-ip>`,
-   `docker compose up -d --build`, then `GET /api/plans` must return 200 and a
-   small scan must complete end-to-end (queued → done, engines produce findings).
+   `docker compose up -d --build`, then `GET /api/health` must return 200
+   with `"status": "ok"` (it checks the DB and the Redis broker), `GET
+   /api/plans` must return 200, and a small scan must complete end-to-end
+   (queued → done, engines produce findings).
 3. **Stage 2 — production domain**: point `api.braimsec.world` (A record) at the
    server IP, set `SITE_ADDRESS=api.braimsec.world`, `docker compose up -d`
    (Caddy fetches the TLS certificate automatically).
