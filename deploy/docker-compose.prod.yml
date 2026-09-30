@@ -1,0 +1,76 @@
+# BraimSec production stack (Hetzner CX22)
+#
+#   caddy  ->  api (uvicorn)  ->  redis  <-  worker (celery)
+#
+# api and worker share ONE image and ONE data volume: the worker MUST see the
+# same filesystem (scan targets) and the same BRAIMSEC_DB as the API.
+#
+# Usage (on the server, inside deploy/):
+#   cp .env.example .env   # then fill SITE_ADDRESS (+ secrets when needed)
+#   docker compose -f docker-compose.prod.yml up -d --build
+
+name: braimsec
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.prod
+    restart: unless-stopped
+    depends_on:
+      - redis
+    env_file:
+      - .env
+    environment:
+      BRAIMSEC_BROKER_URL: redis://redis:6379/0
+      BRAIMSEC_DB: /data/braimsec.db
+      BRAIMSEC_SCAN_ROOT: /data/scans
+      PORT: 8000
+    volumes:
+      - braimsec-data:/data
+    expose:
+      - "8000"
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.prod
+    restart: unless-stopped
+    depends_on:
+      - redis
+    env_file:
+      - .env
+    working_dir: /app/api
+    environment:
+      BRAIMSEC_BROKER_URL: redis://redis:6379/0
+      BRAIMSEC_DB: /data/braimsec.db
+      BRAIMSEC_SCAN_ROOT: /data/scans
+    volumes:
+      - braimsec-data:/data
+    command: ["celery", "-A", "tasks", "worker", "--loglevel=info", "--concurrency=2"]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  redis-data:
+  braimsec-data:
+  caddy-data:
+  caddy-config:
