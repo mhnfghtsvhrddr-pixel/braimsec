@@ -40,14 +40,19 @@ except Exception:  # noqa: BLE001
     def _is_taint_rule(rule_id):  # fallback if taintflow import fails
         return bool(rule_id) and "braimsec.taint." in rule_id
 
-REPORT_VERSION = "1.0.0"
+REPORT_VERSION = "1.1.0"
 MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "compliance_map.yaml")
 
 SEVERITY_RANK = {"note": 0, "warning": 1, "error": 2}
 
-# Posture grade from CONFIRMED error count (v1 heuristic, documented):
-# confirmed = AI verdict "vulnerable" or a deterministic secret (gitleaks).
+# Posture grade from DETERMINISTIC error count (v1.1 heuristic, documented):
+# the grade counts engine-reported error-severity findings and never depends
+# on AI verdicts. Rationale: the AI reviewer has a measured ~15% false-negative
+# rate on config/secrets holdout, and gating the grade on AI opinions would
+# (a) inflate the grade whenever the AI misses a real vulnerability, and
+# (b) make the grade depend on whether the customer paid for AI review.
+# AI confirmations are reported separately as supplementary opinion.
 GRADE_BANDS = [(0, "A"), (2, "B"), (5, "C"), (10, "D")]
 
 KNOWN_LIMITATIONS = [
@@ -55,8 +60,9 @@ KNOWN_LIMITATIONS = [
     "cross-file propagation is not traced.",
     "The report is a point-in-time snapshot of stored scan data — it does "
     "not re-scan and does not reflect code changed after the scan finished.",
-    "AI verdicts are opinions with confidence scores, not proofs; "
-    "unreviewed findings are NOT confirmed.",
+    "The posture grade is deterministic: it counts engine-reported "
+    "error-severity findings only. AI verdicts are opinions with confidence "
+    "scores, not proofs, and are reported separately — never as grade inputs.",
     "Compliance mappings are conservative by design: unmapped findings are "
     "reported as unmapped, never force-fitted to a standard.",
 ]
@@ -112,13 +118,19 @@ def lookup_compliance(rule_id, tool):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _confirmed(f):
-    return f.get("ai_verdict") == "vulnerable" or f.get("tool") == "gitleaks"
+def _is_error(f):
+    """Engine-reported error severity — the deterministic grade input."""
+    return f.get("severity") == "error"
 
 
-def _grade(confirmed_errors):
+def _ai_confirmed(f):
+    """AI opinion only — supplementary signal, never a grade input."""
+    return f.get("ai_verdict") == "vulnerable"
+
+
+def _grade(deterministic_errors):
     for cap, g in GRADE_BANDS:
-        if confirmed_errors <= cap:
+        if deterministic_errors <= cap:
             return g
     return "F"
 
@@ -165,8 +177,9 @@ def build_report(scan, findings, prev=None, target_dir=None,
     for f in findings:
         counts[f.get("severity") or "warning"] = \
             counts.get(f.get("severity") or "warning", 0) + 1
-    confirmed_errors = sum(1 for f in findings
-                           if f.get("severity") == "error" and _confirmed(f))
+    det_errors = sum(1 for f in findings if _is_error(f))
+    ai_confirmed_errors = sum(1 for f in findings
+                              if _is_error(f) and _ai_confirmed(f))
 
     # --- 1. executive ----------------------------------------------------
     top3 = []
@@ -185,17 +198,19 @@ def build_report(scan, findings, prev=None, target_dir=None,
                  "warning": counts["warning"] - prev["counts"].get("warning", 0),
                  "note": counts["note"] - prev["counts"].get("note", 0),
                  "grade": {"prev": prev.get("grade"),
-                           "now": _grade(confirmed_errors)},
+                           "now": _grade(det_errors)},
                  "provenance": "deterministic"}
     else:
         delta = {"baseline": "first scan of this target — no previous report",
                  "provenance": "deterministic"}
     executive = {
-        "grade": _grade(confirmed_errors),
-        "grade_basis": (f"{confirmed_errors} confirmed error(s); confirmed = "
-                        "AI verdict 'vulnerable' or deterministic secret"),
+        "grade": _grade(det_errors),
+        "grade_basis": (f"{det_errors} deterministic error(s); the grade "
+                        "counts engine-reported errors only — AI verdicts "
+                        "are supplementary opinion, not grade inputs"),
         "counts": counts,
-        "confirmed_errors": confirmed_errors,
+        "deterministic_errors": det_errors,
+        "ai_confirmed_errors": ai_confirmed_errors,
         "total_findings": len(findings),
         "delta": delta,
         "top_risks": top3,
@@ -257,8 +272,8 @@ def build_report(scan, findings, prev=None, target_dir=None,
     if ai_reviewed < len(findings):
         not_covered.append(
             f"AI review: {ai_reviewed}/{len(findings)} findings reviewed — "
-            "unreviewed findings are NOT confirmed and are excluded from "
-            "the grade")
+            "unreviewed findings are still counted in the deterministic "
+            "grade; AI confirmation is supplementary opinion only")
     else:
         not_covered.append(f"AI review: all {len(findings)} findings reviewed")
     taint_total = sum(1 for f in findings
@@ -280,7 +295,8 @@ def build_report(scan, findings, prev=None, target_dir=None,
                                for n in ("semgrep", "gitleaks",
                                          "braimsec-taint-rules")],
         "coverage": {"total": len(findings), "ai_reviewed": ai_reviewed,
-                     "confirmed": sum(1 for f in findings if _confirmed(f)),
+                     "deterministic_errors": det_errors,
+                     "ai_confirmed_errors": ai_confirmed_errors,
                      "with_fix": with_fix, "sca_findings": sca_n,
                      "taint_traced": traced},
         "not_covered": not_covered,
