@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from audit import log_event  # noqa: E402
 from database import get_db, init_db  # noqa: E402
 
 PLANS = {
@@ -89,7 +90,7 @@ def set_plan(org_id: str, plan: str):
         db.close()
 
 
-def provision_key(org_id: str, name: str = "") -> str:
+def provision_key(org_id: str, name: str = "", actor: str = "system") -> str:
     """Create an API key for an org. Returns the RAW key — shown once, never stored."""
     raw = "bs_" + secrets.token_urlsafe(32)
     db = get_db()
@@ -99,33 +100,41 @@ def provision_key(org_id: str, name: str = "") -> str:
             (org_id,)).fetchone()
         if not org:
             raise KeyError(f"No active org: {org_id}")
+        key_id = "key_" + uuid.uuid4().hex[:12]
         db.execute(
             "INSERT INTO api_keys (id, org_id, key_hash, key_prefix, name,"
             " created_at, revoked) VALUES (?,?,?,?,?,?,0)",
-            ("key_" + uuid.uuid4().hex[:12], org_id, _hash_key(raw),
+            (key_id, org_id, _hash_key(raw),
              raw[:8], name, _now()),
         )
         db.commit()
     finally:
         db.close()
+    log_event(org_id, actor, "api_key.created", "api_key", key_id,
+              {"name": name, "key_prefix": raw[:8]})
     return raw
 
 
-def revoke_key(key_id: str):
+def revoke_key(key_id: str, actor: str = "system"):
     db = get_db()
     try:
+        row = db.execute("SELECT org_id, key_prefix FROM api_keys WHERE id=?",
+                         (key_id,)).fetchone()
         db.execute("UPDATE api_keys SET revoked=1 WHERE id=?", (key_id,))
         db.commit()
     finally:
         db.close()
+    if row:
+        log_event(row["org_id"], actor, "api_key.revoked", "api_key", key_id,
+                  {"key_prefix": row["key_prefix"]})
 
 
 def verify_key(raw: str):
-    """Validate a presented key. Returns {org_id, plan, key_id} or None."""
+    """Validate a presented key. Returns {org_id, plan, key_id, key_prefix} or None."""
     db = get_db()
     try:
         row = db.execute(
-            """SELECT k.id AS key_id, k.org_id, o.plan
+            """SELECT k.id AS key_id, k.org_id, k.key_prefix, o.plan
                FROM api_keys k JOIN organizations o ON o.id = k.org_id
                WHERE k.key_hash=? AND k.revoked=0 AND o.status='active'""",
             (_hash_key(raw),)).fetchone()
@@ -134,7 +143,8 @@ def verify_key(raw: str):
         db.execute("UPDATE api_keys SET last_used_at=? WHERE id=?",
                    (_now(), row["key_id"]))
         db.commit()
-        return {"org_id": row["org_id"], "plan": row["plan"], "key_id": row["key_id"]}
+        return {"org_id": row["org_id"], "plan": row["plan"],
+                "key_id": row["key_id"], "key_prefix": row["key_prefix"]}
     finally:
         db.close()
 
