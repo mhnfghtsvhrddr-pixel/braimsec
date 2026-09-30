@@ -47,11 +47,24 @@ def _audit(request: Request, action: str, resource_type: str = "",
         ip = ""
     log_event(request.state.org_id, getattr(request.state, "actor", ""),
               action, resource_type, str(resource_id), detail or {}, ip)
+
+
+def require_role(request: Request, minimum: str):
+    """Enforce RBAC: the caller's key role must rank at or above ``minimum``.
+
+    Raises 403 otherwise. Roles: viewer < member < admin < owner.
+    """
+    role = getattr(request.state, "role", "viewer")
+    if role_rank(role) < role_rank(minimum):
+        raise HTTPException(
+            403, f"Requires '{minimum}' role or higher (this key: '{role}')")
+    return role
 from billing import (  # noqa: E402
-    OWNER_ORG_ID, cancel_subscription, consume_scan, create_org, effective_plan,
-    ensure_owner_org, ensure_subscription, get_subscription, list_plans,
-    provision_key, quota_check, quota_status, record_usage, run_expiry,
-    seed_plans, start_trial, usage_count, verify_key,
+    OWNER_ORG_ID, ROLES, cancel_subscription, consume_scan, create_org,
+    effective_plan, ensure_owner_org, ensure_subscription, get_subscription,
+    list_plans, provision_key, quota_check, quota_status, record_usage,
+    revoke_key, role_rank, run_expiry, seed_plans, start_trial, usage_count,
+    verify_key,
 )
 import nowpayments_pay as nowpay  # noqa: E402
 
@@ -136,13 +149,16 @@ async def api_key_gate(request: Request, call_next):
         presented = request.headers.get("x-api-key", "")
         org = None
         actor = ""
+        role = "viewer"
         if presented:
             if secrets.compare_digest(presented, API_KEY):
                 org = {"org_id": OWNER_ORG_ID, "plan": "team"}
                 actor = "owner"
+                role = "owner"
             else:
                 org = verify_key(presented)
                 actor = (org or {}).get("key_prefix", "")
+                role = (org or {}).get("role", "viewer")
         if not org:
             return JSONResponse(
                 {"detail": "Invalid or missing X-API-Key header"}, status_code=401
@@ -150,6 +166,8 @@ async def api_key_gate(request: Request, call_next):
         request.state.org_id = org["org_id"]
         request.state.plan = org["plan"]
         request.state.actor = actor
+        request.state.role = role
+        request.state.key_id = (org or {}).get("key_id")  # None for master key
     return await call_next(request)
 
 
@@ -315,6 +333,7 @@ async def create_scan(
     against that scan's fingerprint baseline. Requires ``target_path`` —
     zip uploads are always full scans.
     """
+    require_role(request, "member")  # scans consume quota: not for viewers
     org_id = request.state.org_id
     allowed, used, quota = quota_status(org_id)
     if not allowed:
@@ -437,6 +456,7 @@ def scan_results(request: Request, scan_id: str, severity: str | None = None):
 @app.post("/api/scans/{scan_id}/ai-review")
 @limiter.limit("30/minute")  # LLM calls are expensive — stricter budget
 def start_ai_review(request: Request, scan_id: str, background_tasks: BackgroundTasks):
+    require_role(request, "member")  # LLM calls cost money: not for viewers
     org_id = request.state.org_id
     db = get_db()
     scan = db.execute("SELECT target_dir FROM scans WHERE id=? AND org_id=?",
@@ -491,6 +511,68 @@ def get_audit_log(request: Request, limit: int = 50, offset: int = 0,
                        action=action)
 
 
+@app.post("/api/keys")
+@limiter.limit("30/minute")
+async def create_api_key(request: Request):
+    """Provision a new API key for the caller's org (admin and above).
+
+    Body: {"name": "...", "role": "viewer|member|admin|owner"}.
+    Only an 'owner' key may grant 'admin' or 'owner' — an admin can only
+    mint viewer/member keys. Returns the raw key ONCE; it is never
+    stored and cannot be retrieved again.
+    """
+    require_role(request, "admin")
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    name = (body.get("name") or "").strip()[:80]
+    role = (body.get("role") or "member").strip()
+    if role not in ROLES:
+        raise HTTPException(400, f"Unknown role {role!r} (expected one of {ROLES})")
+    if role_rank(role) >= role_rank("admin") and request.state.role != "owner":
+        raise HTTPException(403, "Only an 'owner' key can grant 'admin'/'owner' roles")
+    raw = provision_key(request.state.org_id, name,
+                        actor=request.state.actor, role=role)
+    return {"key": raw, "key_prefix": raw[:8], "name": name, "role": role,
+            "warning": "Store this key now — it will never be shown again."}
+
+
+@app.get("/api/keys")
+@limiter.limit("60/minute")
+def list_api_keys(request: Request):
+    """List the org's API keys (admin and above). Hashes are never exposed."""
+    require_role(request, "admin")
+    db = get_db()
+    try:
+        rows = db.execute(
+            """SELECT id, key_prefix, name, role, created_at, last_used_at,
+                      revoked FROM api_keys WHERE org_id=? ORDER BY created_at""",
+            (request.state.org_id,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        db.close()
+
+
+@app.delete("/api/keys/{key_id}")
+@limiter.limit("30/minute")
+def delete_api_key(request: Request, key_id: str):
+    """Revoke an API key (admin and above). Cannot revoke the key in use."""
+    require_role(request, "admin")
+    if key_id == getattr(request.state, "key_id", None):
+        raise HTTPException(400, "Cannot revoke the key you are calling with")
+    db = get_db()
+    try:
+        row = db.execute("SELECT id FROM api_keys WHERE id=? AND org_id=?",
+                         (key_id, request.state.org_id)).fetchone()
+    finally:
+        db.close()
+    if not row:
+        raise HTTPException(404, "Key not found")
+    revoke_key(key_id, actor=request.state.actor)
+    return {"key_id": key_id, "revoked": True}
+
+
 def _fix_payload(row):
     """Serialize the cached AI fix-suggestion columns of a finding row."""
     try:
@@ -517,6 +599,7 @@ def fix_suggestion(request: Request, finding_id: int):
     weight) and stores the suggestion on the finding; later calls return the
     cached suggestion for free.
     """
+    require_role(request, "member")  # generation costs 2 AI units
     org_id = request.state.org_id
     db = get_db()
     row = db.execute(
@@ -587,6 +670,7 @@ def patch_verify_endpoint(request: Request, finding_id: int):
     consumed. A ``verified`` patch is still framed as a suggestion
     requiring human review — never a guaranteed fix.
     """
+    require_role(request, "member")
     org_id = request.state.org_id
     db = get_db()
     row = db.execute(
