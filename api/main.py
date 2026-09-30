@@ -29,6 +29,24 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
 from database import get_db, init_db
+from audit import log_event, read_events  # noqa: E402
+
+
+def _audit(request: Request, action: str, resource_type: str = "",
+           resource_id: str = "", detail: dict | None = None):
+    """Write one audit-trail record for the caller's org and API key.
+
+    Fail-closed: if the audit write fails, the API action fails too.
+    An enterprise audit trail that silently drops records is worse than
+    a 500 — a CISO must be able to trust that every recorded action
+    really happened and every action really got recorded.
+    """
+    try:
+        ip = request.client.host if request.client else ""
+    except Exception:  # noqa: BLE001 - defensive: client info is best-effort
+        ip = ""
+    log_event(request.state.org_id, getattr(request.state, "actor", ""),
+              action, resource_type, str(resource_id), detail or {}, ip)
 from billing import (  # noqa: E402
     OWNER_ORG_ID, cancel_subscription, consume_scan, create_org, effective_plan,
     ensure_owner_org, ensure_subscription, get_subscription, list_plans,
@@ -105,8 +123,9 @@ async def api_key_gate(request: Request, call_next):
     Two key types:
     - the master key (BRAIMSEC_API_KEY env): maps to the built-in 'owner' org.
     - per-customer keys (api_keys table, hashed): map to their org + plan.
-    Sets request.state.org_id / request.state.plan for downstream handlers.
-
+    Sets request.state.org_id / request.state.plan for downstream handlers,
+    plus request.state.actor (API key prefix, or 'owner' for the master key)
+    for the audit trail. The full key secret never leaves this middleware.
     /api/plans is public (pricing catalog for the marketing page).
     /api/checkout/crypto is public (new-customer crypto checkout; rate-limited).
     /api/webhooks/nowpayments is public (NOWPayments IPN; secured by HMAC).
@@ -116,17 +135,21 @@ async def api_key_gate(request: Request, call_next):
     if request.url.path.startswith("/api/") and request.url.path not in public_paths:
         presented = request.headers.get("x-api-key", "")
         org = None
+        actor = ""
         if presented:
             if secrets.compare_digest(presented, API_KEY):
                 org = {"org_id": OWNER_ORG_ID, "plan": "team"}
+                actor = "owner"
             else:
                 org = verify_key(presented)
+                actor = (org or {}).get("key_prefix", "")
         if not org:
             return JSONResponse(
                 {"detail": "Invalid or missing X-API-Key header"}, status_code=401
             )
         request.state.org_id = org["org_id"]
         request.state.plan = org["plan"]
+        request.state.actor = actor
     return await call_next(request)
 
 
@@ -341,16 +364,23 @@ async def create_scan(
             target_dir = extract_dir
         else:
             raise HTTPException(400, "Uploaded file must be a zip archive")
-        return _new_scan(org_id, filename, target_dir, workdir, background_tasks,
-                         webhook_url, webhook_secret)
+        result = _new_scan(org_id, filename, target_dir, workdir,
+                           background_tasks, webhook_url, webhook_secret)
+        _audit(request, "scan.created", "scan", result["scan_id"],
+               {"target": filename, "via": "upload"})
+        return result
 
     if target_path:
         target_dir = _resolve_scan_target(target_path)
         if baseline_scan_id:
             _check_baseline(org_id, baseline_scan_id)
-        return _new_scan(org_id, os.path.basename(target_dir.rstrip("/")) or target_dir,
-                         target_dir, None, background_tasks,
-                         webhook_url, webhook_secret, baseline_scan_id)
+        result = _new_scan(org_id, os.path.basename(target_dir.rstrip("/")) or target_dir,
+                           target_dir, None, background_tasks,
+                           webhook_url, webhook_secret, baseline_scan_id)
+        _audit(request, "scan.created", "scan", result["scan_id"],
+               {"target": target_dir, "via": "target_path",
+                "baseline": bool(baseline_scan_id)})
+        return result
 
     raise HTTPException(400, "Provide target_path or upload a zip file")
 
@@ -443,8 +473,22 @@ def start_ai_review(request: Request, scan_id: str, background_tasks: Background
         enqueue_ai_review(scan_id, background_tasks)
     except Exception:  # noqa: BLE001 - e.g. broker unreachable
         raise HTTPException(503, "Review queue unavailable, try again shortly.")
+    _audit(request, "ai_review.requested", "scan", scan_id,
+           {"pending_findings": pending, "sink_budget": sink_budget})
     return {"scan_id": scan_id, "ai_review": "queued",
             "sink_audit": {"status": sink_status, "budget": sink_budget}}
+
+
+@app.get("/api/audit-log")
+def get_audit_log(request: Request, limit: int = 50, offset: int = 0,
+                  action: str | None = None):
+    """Enterprise audit trail: newest-first records for the caller's org.
+
+    Org-scoped — a customer only ever sees their own trail. Optional
+    ``action`` filter (e.g. ``scan.created``).
+    """
+    return read_events(request.state.org_id, limit=limit, offset=offset,
+                       action=action)
 
 
 def _fix_payload(row):
@@ -527,6 +571,8 @@ def fix_suggestion(request: Request, finding_id: int):
         "SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
     payload = _fix_payload(dict(row2))
     db2.close()
+    _audit(request, "fix_suggestion.requested", "finding", finding_id,
+           {"scan_id": finding["scan_id"]})
     return {"finding_id": finding_id, "cached": False, "suggestion": payload}
 
 
@@ -579,6 +625,8 @@ def patch_verify_endpoint(request: Request, finding_id: int):
                (json.dumps(checks), finding_id))
     db.commit()
     db.close()
+    _audit(request, "patch_verify.requested", "finding", finding_id,
+           {"verdict": verdict.get("verified") if isinstance(verdict, dict) else None})
     return {"finding_id": finding_id, "verification": verdict}
 
 
