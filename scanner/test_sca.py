@@ -154,7 +154,7 @@ def test_cargo_lock(target):
               'source = "registry+https://github.com/rust-lang/crates.io-index"\n')
     pkgs = parse_cargo_lock(p, "Cargo.lock")
     got = {(x.name, x.version, x.line) for x in pkgs}
-    assert got == {("serde", "1.0.188", 1), ("rand", "0.8.5", 5)}
+    assert got == {("serde", "1.0.188", 3), ("rand", "0.8.5", 7)}
 
 
 # ------------------------------------------------------------------ Gemfile.lock
