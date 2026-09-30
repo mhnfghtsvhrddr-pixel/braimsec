@@ -1,0 +1,45 @@
+# BraimSec production image (Hetzner CX22)
+#
+# Full image shared by the API and the Celery worker.
+# Includes the scan engines (semgrep + gitleaks) and ALL python packages
+# (api/, scanner/, ai/, reports/, dashboard/).
+#
+# NOTE: api/main.py and api/tasks.py import scanner/ai/reports via sys.path,
+# so copying api/ alone (like the old Dockerfile did) crashes on boot.
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# --- Python deps (API) + semgrep engine ---
+# semgrep pinned to the version our custom rules and evals were validated against.
+COPY api/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt "semgrep==1.178.0"
+
+# --- gitleaks engine (pinned to the tested version) ---
+RUN curl -sSL -o /tmp/gitleaks.tar.gz \
+        https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz \
+    && tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
+    && rm /tmp/gitleaks.tar.gz \
+    && gitleaks version
+
+# --- Application code (every package the API imports) ---
+COPY api/ ./api/
+COPY scanner/ ./scanner/
+COPY ai/ ./ai/
+COPY reports/ ./reports/
+COPY dashboard/ ./dashboard/
+
+WORKDIR /app/api
+EXPOSE 8000
+
+# Overridden per-service in docker-compose (uvicorn api vs celery worker).
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
