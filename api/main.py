@@ -620,6 +620,96 @@ def scan_results(request: Request, scan_id: str, severity: str | None = None,
     return [dict(r) for r in rows]
 
 
+@app.get("/api/trends")
+@limiter.limit("60/minute")
+def scan_trends(request: Request, days: int = 90,
+                project_id: str | None = None):
+    """Vulnerability trends over time for the caller's completed scans.
+
+    One point per completed scan, chronological. ``new``/``fixed`` are
+    computed against the immediately previous completed scan in the same
+    scope, using the stable finding identity (tool|rule_id|file|message —
+    line/column insensitive, same as the alerting path). ``days=0`` means
+    all time. Viewers may read; project-scoped keys see only their own
+    project.
+    """
+    from scheduler import finding_fingerprint  # noqa: E402
+    if days < 0:
+        raise HTTPException(400, "days: >= 0 (0 = all time)")
+    key_pid = getattr(request.state, "project_id", None)
+    if key_pid and project_id and project_id != key_pid:
+        raise HTTPException(
+            403, "Project-scoped keys cannot query other projects")
+    db = get_db()
+    eff_project = key_pid or project_id
+    if eff_project and not key_pid:
+        prow = db.execute(
+            "SELECT id FROM projects WHERE id=? AND org_id=?",
+            (eff_project, request.state.org_id)).fetchone()
+        if not prow:
+            db.close()
+            raise HTTPException(404, "Project not found")
+    pred, params = _scan_scope(request, "s")
+    q = (f"SELECT s.id, s.target_name, s.project_id, s.created_at FROM scans s"
+         f" WHERE {pred} AND s.status='done'")
+    if eff_project and not key_pid:
+        q += " AND s.project_id=?"
+        params.append(eff_project)
+    q += " ORDER BY s.created_at ASC"
+    rows = db.execute(q, params).fetchall()
+    if days > 0:
+        cutoff = (datetime.now(timezone.utc) -
+                  timedelta(days=days)).isoformat()
+        rows = [r for r in rows if (r["created_at"] or "") >= cutoff]
+    points = []
+    prev_fps: set[str] = set()
+    for r in rows:
+        fr = db.execute(
+            "SELECT tool, rule_id, severity, message, file FROM findings"
+            " WHERE scan_id=?", (r["id"],)).fetchall()
+        by_sev: dict[str, int] = {}
+        fps: set[str] = set()
+        for f in fr:
+            sev = f["severity"] or "note"
+            by_sev[sev] = by_sev.get(sev, 0) + 1
+            fps.add(finding_fingerprint(f["tool"], f["rule_id"],
+                                        f["file"], f["message"]))
+        total = len(fr)
+        for canon in ("error", "warning", "note"):
+            by_sev.setdefault(canon, 0)
+        points.append({
+            "scan_id": r["id"],
+            "target_name": r["target_name"],
+            "project_id": r["project_id"],
+            "created_at": r["created_at"],
+            "total": total,
+            "by_severity": by_sev,
+            "new": len(fps - prev_fps),
+            "fixed": len(prev_fps - fps),
+        })
+        prev_fps = fps
+    db.close()
+    if len(points) >= 2:
+        delta = points[-1]["total"] - points[-2]["total"]
+        trend = ("improving" if delta < 0
+                 else "worsening" if delta > 0 else "stable")
+    else:
+        delta = 0
+        trend = "insufficient"
+    return {
+        "points": points,
+        "summary": {
+            "scans": len(points),
+            "period_days": days,
+            "project_id": eff_project,
+            "latest_total": points[-1]["total"] if points else 0,
+            "previous_total": points[-2]["total"] if len(points) > 1 else None,
+            "delta": delta,
+            "trend": trend,
+        },
+    }
+
+
 @app.post("/api/scans/{scan_id}/ai-review")
 @limiter.limit("30/minute")  # LLM calls are expensive — stricter budget
 def start_ai_review(request: Request, scan_id: str, background_tasks: BackgroundTasks):
