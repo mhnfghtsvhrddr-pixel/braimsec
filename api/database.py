@@ -127,8 +127,7 @@ CREATE TABLE IF NOT EXISTS audit_archives (
     last_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_archives_org ON audit_archives(org_id, created_at DESC);
--- Scheduled scans + new-findings alerts (webhooks only; email deliberately
--- out of scope). A schedule re-scans a server-local target_path on a
+-- Scheduled scans + new-findings alerts (webhooks + email). A schedule re-scans a server-local target_path on a
 -- daily/weekly cadence; each run incrementalizes against the previous
 -- scheduled scan. last_error surfaces the latest driver failure in the UI.
 CREATE TABLE IF NOT EXISTS schedules (
@@ -185,6 +184,8 @@ CREATE TABLE IF NOT EXISTS notifications (
     severity TEXT NOT NULL,
     new_count INTEGER NOT NULL DEFAULT 0,
     webhook_url TEXT NOT NULL DEFAULT '',
+    channel TEXT NOT NULL DEFAULT 'webhook',
+    recipient TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'pending',
     attempts INTEGER NOT NULL DEFAULT 0,
     response_code INTEGER,
@@ -192,6 +193,19 @@ CREATE TABLE IF NOT EXISTS notifications (
     payload TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
 );
+-- Email alert recipients: per-org addresses for new-findings alerts.
+-- The list itself is the switch: no enabled rows => no email alerts.
+-- (channel='email' rows in notifications carry the address in recipient.)
+CREATE TABLE IF NOT EXISTS alert_emails (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    email TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_emails_org_email
+    ON alert_emails(org_id, email);
+CREATE INDEX IF NOT EXISTS idx_alert_emails_org ON alert_emails(org_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_sched ON notifications(schedule_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_org ON notifications(org_id, created_at DESC);
 -- idx_notifications_vcs is created post-migration in init_db(): the column
@@ -363,5 +377,18 @@ def init_db():
     # column does not exist yet on pre-VCS databases when it runs).
     conn.execute("CREATE INDEX IF NOT EXISTS idx_notifications_vcs"
                  " ON notifications(vcs_repo_id, created_at DESC)")
+    # Migration: email alerts. notifications gains channel ('webhook' or
+    # 'email') and recipient (the address for email rows). Plain ADD COLUMN
+    # with defaults backfills old rows, so no table rebuild is needed.
+    # alert_emails itself is covered by CREATE TABLE IF NOT EXISTS in the
+    # SCHEMA script (runs on every init_db).
+    notif_cols2 = {r["name"]
+                   for r in conn.execute("PRAGMA table_info(notifications)")}
+    if "channel" not in notif_cols2:
+        conn.execute("ALTER TABLE notifications ADD COLUMN"
+                     " channel TEXT NOT NULL DEFAULT 'webhook'")
+    if "recipient" not in notif_cols2:
+        conn.execute("ALTER TABLE notifications ADD COLUMN"
+                     " recipient TEXT NOT NULL DEFAULT ''")
     conn.commit()
     conn.close()
