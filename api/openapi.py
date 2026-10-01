@@ -1147,8 +1147,11 @@ _doc("GET", "/api/notifications",
      tag="Alerts",
      summary="Alert delivery log",
      description=("Newest-first alert deliveries for the org. Optional "
-                  "filters: schedule_id, vcs_repo_id, report_schedule_id. "
-                  "limit clamped to 1..200. Viewer+, org scope."),
+                  "filters: schedule_id, vcs_repo_id, report_schedule_id, "
+                  "channel (webhook|email|telegram|slack|teams), event "
+                  "(schedule.alert|schedule.failed|vcs.alert|vcs.failed), "
+                  "status (sent|failed|skipped). Unknown filter values -> "
+                  "400. limit clamped to 1..200. Viewer+, org scope."),
      auth="key", min_role="viewer", org_scope=True, rate_limit="60/minute",
      params=[
          _param("schedule_id", "query", "string",
@@ -1157,6 +1160,15 @@ _doc("GET", "/api/notifications",
                 example="v_1a2b3c4d"),
          _param("report_schedule_id", "query", "string",
                 "Filter by report schedule.", False, example="rs_1a2b3c4d"),
+         _param("channel", "query", "string",
+                "Filter by channel: webhook|email|telegram|slack|teams.",
+                False, example="telegram"),
+         _param("event", "query", "string",
+                "Filter by event: schedule.alert|schedule.failed|vcs.alert|"
+                "vcs.failed.", False, example="schedule.alert"),
+         _param("status", "query", "string",
+                "Filter by status: sent|failed|skipped.", False,
+                example="failed"),
          _param("limit", "query", "integer", "Max rows (1..200).", False,
                 example=50),
      ],
@@ -1166,6 +1178,7 @@ _doc("GET", "/api/notifications",
                       [{"id": 7, "channel": "webhook", "recipient": "https://"
                         "hooks.example/x", "status": "delivered",
                         "created_at": "2026-10-01T12:00:00+00:00"}]),
+         "400": _err400("Unknown channel/event/status filter value"),
          "401": _err401(),
          "403": _err403(),
          "422": _err422(),
