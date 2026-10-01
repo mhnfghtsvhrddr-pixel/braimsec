@@ -659,7 +659,7 @@ def test_ingest_end_to_end_with_alert(ctx, _mock_engines, monkeypatch):
     captured = []
     monkeypatch.setattr(
         vcs, "send_alert",
-        lambda url, payload: captured.append((url, payload)) or (True, 1, 200, None))
+        lambda url, payload, org_id=None: captured.append((url, payload)) or (True, 1, 200, None))
 
     findings_now = []
 
@@ -764,7 +764,7 @@ def test_vcs_alert_first_run_is_silent(ctx, monkeypatch):
     captured = []
     monkeypatch.setattr(
         vcs, "send_alert",
-        lambda url, payload: captured.append(payload) or (True, 1, 200, None))
+        lambda url, payload, org_id=None: captured.append(payload) or (True, 1, 200, None))
     db = get_db()
     rid, _, _ = _mk_repo(db, ctx["org"])
     sn = "vscan_first_" + _uid()
@@ -785,7 +785,7 @@ def test_vcs_alert_respects_threshold_and_suppression(ctx, monkeypatch):
     captured = []
     monkeypatch.setattr(
         vcs, "send_alert",
-        lambda url, payload: captured.append(payload) or (True, 1, 200, None))
+        lambda url, payload, org_id=None: captured.append(payload) or (True, 1, 200, None))
     db = get_db()
     rid, _, _ = _mk_repo(db, ctx["org"], severity="error")  # errors only
     old = [{"tool": "semgrep", "rule_id": "r.a", "severity": "warning",
@@ -826,7 +826,7 @@ def test_vcs_failed_scan_alerts_loudly(ctx, monkeypatch):
     captured = []
     monkeypatch.setattr(
         vcs, "send_alert",
-        lambda url, payload: captured.append(payload) or (True, 1, 200, None))
+        lambda url, payload, org_id=None: captured.append(payload) or (True, 1, 200, None))
     db = get_db()
     rid, _, _ = _mk_repo(db, ctx["org"])
     sb = "vscan_bad_" + _uid()
