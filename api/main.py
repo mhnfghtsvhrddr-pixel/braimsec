@@ -107,6 +107,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "reports"))
 from sarif import SarifError, build_sarif, validate_sarif  # noqa: E402
+from scan_badge import build_badge_svg  # noqa: E402
 from builder import ReportError, build_report, compliance_map, lookup_compliance  # noqa: E402
 from pdf import render_pdf  # noqa: E402
 from executive import build_executive_report  # noqa: E402
@@ -189,7 +190,11 @@ async def api_key_gate(request: Request, call_next):
                     "/api/webhooks/github", "/api/webhooks/gitlab",
                     "/api/openapi.json",
                     "/api/health")
-    if request.url.path.startswith("/api/") and request.url.path not in public_paths:
+    path = request.url.path
+    # The scan badge is public by design (README embedding): it exposes only
+    # aggregate severity counts, never scan metadata (see scan_badge.py).
+    is_badge = (path.startswith("/api/scans/") and path.endswith("/badge.svg"))
+    if path.startswith("/api/") and path not in public_paths and not is_badge:
         presented = request.headers.get("x-api-key", "")
         org = None
         actor = ""
@@ -2450,6 +2455,37 @@ def scan_sarif(request: Request, scan_id: str):
         content=body, media_type="application/sarif+json",
         headers={"Content-Disposition":
                  f'attachment; filename="braimsec-{scan_id}.sarif"'})
+
+
+@app.get("/api/scans/{scan_id}/badge.svg")
+@limiter.limit("60/minute")
+def scan_badge(request: Request, scan_id: str):
+    """Public shields.io-style status badge (SVG).
+
+    Embed in a README: ``<img src="https://<host>/api/scans/<id>/badge.svg">``.
+    No authentication — the badge exposes only *aggregate* severity counts
+    (never file names, messages, targets or org data); scan ids are
+    unguessable (12 hex chars). Unknown scan -> 404, not a badge.
+    Deterministic: same scan state always yields the same SVG bytes.
+    """
+    db = get_db()
+    row = db.execute("SELECT id, status FROM scans WHERE id=?",
+                     (scan_id,)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Scan not found")
+    counts = {}
+    if row["status"] == "done":
+        for r in db.execute(
+                "SELECT severity, COUNT(*) c FROM findings WHERE scan_id=? "
+                "GROUP BY severity", (scan_id,)):
+            counts[r["severity"]] = r["c"]
+    db.close()
+    svg = build_badge_svg(row["status"], counts)
+    return Response(
+        content=svg.encode("utf-8"), media_type="image/svg+xml",
+        headers={"Cache-Control": "no-store",
+                 "X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/api/scans/{scan_id}/report.pdf")
