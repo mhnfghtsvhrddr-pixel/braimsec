@@ -382,6 +382,24 @@ def _send_slack_alerts(db, *, org_id: str, schedule_id: str | None,
         return {"slacked": False, "reason": "dispatch crashed"}
 
 
+def _send_teams_alerts(db, *, org_id: str, schedule_id: str | None,
+                       vcs_repo_id: str | None, scan_id: str, event: str,
+                       severity: str, new_count: int, heading: str,
+                       subheading: str, findings: list[dict]) -> dict:
+    """Teams twin of a webhook alert (deferred import keeps the worker's
+    import graph light). Never raises: alerting must never break scans."""
+    try:
+        from teams_alerts import dispatch_teams_alerts  # noqa: E402
+        return dispatch_teams_alerts(
+            db, org_id=org_id, schedule_id=schedule_id,
+            vcs_repo_id=vcs_repo_id, scan_id=scan_id, event=event,
+            severity=severity, new_count=new_count, heading=heading,
+            subheading=subheading, findings=findings)
+    except Exception:  # noqa: BLE001 - best-effort by design
+        log.exception("teams alert dispatch crashed for %s", scan_id)
+        return {"teamsed": False, "reason": "dispatch crashed"}
+
+
 def _scan_findings(db, scan_id: str) -> list[dict]:
     return [dict(r) for r in db.execute(
         "SELECT tool, rule_id, severity, message, file, line "
@@ -472,6 +490,14 @@ def evaluate_schedule_alerts(scan_id: str) -> dict:
             heading=f"فحص مجدول: {sched['name']}",
             subheading=f"الهدف: {scan['target_name']}",
             findings=_email_row(new_findings))
+        teams_out = _send_teams_alerts(
+            db, org_id=sched["org_id"], schedule_id=sched["id"],
+            vcs_repo_id=None, scan_id=scan_id, event="schedule.alert",
+            severity=payload["highest_severity"],
+            new_count=len(new_findings),
+            heading=f"فحص مجدول: {sched['name']}",
+            subheading=f"الهدف: {scan['target_name']}",
+            findings=_email_row(new_findings))
         if webhook_url:
             ok, attempts, code, err = send_alert(webhook_url, payload)
             db.execute(
@@ -491,10 +517,13 @@ def evaluate_schedule_alerts(scan_id: str) -> dict:
         emailed = bool(email_out.get("emailed"))
         telegrammed = bool(telegram_out.get("telegrammed"))
         slacked = bool(slack_out.get("slacked"))
-        return {"alerted": bool(ok) or emailed or telegrammed or slacked,
+        teamsed = bool(teams_out.get("teamsed"))
+        return {"alerted": bool(ok) or emailed or telegrammed or slacked
+                or teamsed,
                 "new_count": len(new_findings),
                 "attempts": attempts, "error": err, "email": email_out,
-                "telegram": telegram_out, "slack": slack_out}
+                "telegram": telegram_out, "slack": slack_out,
+                "teams": teams_out}
     finally:
         db.close()
 
@@ -538,6 +567,14 @@ def _alert_failure(db, sched: dict, scan: dict) -> dict:
         subheading=(f"الهدف: {scan['target_name']} — "
                     f"{(scan['error'] or 'unknown error')[:200]}"),
         findings=[])
+    teams_out = _send_teams_alerts(
+        db, org_id=sched["org_id"], schedule_id=sched["id"],
+        vcs_repo_id=None, scan_id=scan["id"], event="schedule.failed",
+        severity="error", new_count=0,
+        heading=f"فحص مجدول: {sched['name']}",
+        subheading=(f"الهدف: {scan['target_name']} — "
+                    f"{(scan['error'] or 'unknown error')[:200]}"),
+        findings=[])
     if webhook_url:
         ok, attempts, code, err = send_alert(webhook_url, payload)
         db.execute(
@@ -555,7 +592,9 @@ def _alert_failure(db, sched: dict, scan: dict) -> dict:
     emailed = bool(email_out.get("emailed"))
     telegrammed = bool(telegram_out.get("telegrammed"))
     slacked = bool(slack_out.get("slacked"))
-    return {"alerted": bool(ok) or emailed or telegrammed or slacked,
+    teamsed = bool(teams_out.get("teamsed"))
+    return {"alerted": bool(ok) or emailed or telegrammed or slacked
+            or teamsed,
             "event": "schedule.failed",
             "error": err, "email": email_out, "telegram": telegram_out,
-            "slack": slack_out}
+            "slack": slack_out, "teams": teams_out}
