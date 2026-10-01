@@ -107,6 +107,14 @@
   .verdict { font-size: 0.78rem; padding: 0.2rem 0.6rem; border-radius: 6px; white-space: nowrap; }
   .v-true_positive { background: rgba(248,81,73,.15); color: var(--red); }
   .v-false_positive { background: rgba(63,185,80,.15); color: var(--green); }
+  .triage { font-size: 0.75rem; padding: 0.15rem 0.55rem; border-radius: 999px; white-space: nowrap; }
+  .t-open { background: rgba(88,166,255,.15); color: var(--blue); }
+  .t-in_progress { background: rgba(210,153,34,.15); color: var(--amber); }
+  .t-false_positive { background: rgba(63,185,80,.15); color: var(--green); }
+  .t-fixed { background: rgba(63,185,80,.28); color: var(--green); font-weight: bold; }
+  .t-accepted_risk { background: rgba(248,81,73,.15); color: var(--red); }
+  .sel-small { background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.2rem 0.35rem; font-size: 0.74rem; max-width: 9.5rem; margin-top: 0.25rem; }
+  .triage-cell { display: flex; flex-direction: column; gap: 0.15rem; min-width: 8.5rem; }
   .v-needs_review { background: rgba(210,153,34,.15); color: var(--amber); }
   .v-skipped { background: rgba(139,148,158,.12); color: var(--muted); }
   .v-error { background: rgba(248,81,73,.15); color: var(--red); }
@@ -254,6 +262,18 @@
       <button class="filter-btn" data-sev="warning" onclick="setFilter('warning')">🟡 متوسطة</button>
       <button class="filter-btn" data-sev="note" onclick="setFilter('note')">🔵 منخفضة</button>
     </div>
+    <div class="filters" id="triage-filters">
+      <span style="color:var(--muted);font-size:0.85rem">الفرز:</span>
+      <button class="filter-btn tfilter active" data-ts="" onclick="setTriageFilter('')">الكل</button>
+      <button class="filter-btn tfilter" data-ts="open" onclick="setTriageFilter('open')">🆕 مفتوحة</button>
+      <button class="filter-btn tfilter" data-ts="in_progress" onclick="setTriageFilter('in_progress')">🔧 قيد المعالجة</button>
+      <button class="filter-btn tfilter" data-ts="false_positive" onclick="setTriageFilter('false_positive')">✅ إنذار كاذب</button>
+      <button class="filter-btn tfilter" data-ts="fixed" onclick="setTriageFilter('fixed')">✔ مُصلحة</button>
+      <button class="filter-btn tfilter" data-ts="accepted_risk" onclick="setTriageFilter('accepted_risk')">⚠️ مقبولة المخاطر</button>
+      <select id="assignee-filter" class="sel-small" onchange="setAssigneeFilter(this.value)" title="تصفية حسب العضو المُسنَد">
+        <option value="">👥 كل الأعضاء</option>
+      </select>
+    </div>
     <div id="findings-wrap"></div>
   </section>
 
@@ -394,6 +414,7 @@
 <script>
 const API = "/api";
 let currentScan = null, currentScanStatus = "", currentFilter = "", pollTimer = null;
+let currentTriage = "", currentAssignee = "", teamMembers = [];
 
 const SEV_AR = { error: "حرجة", warning: "متوسطة", note: "منخفضة" };
 const STATUS_AR = { queued: "في الانتظار", running: "جارٍ الفحص", done: "مكتمل", failed: "فشل" };
@@ -402,6 +423,10 @@ const ROLE_AR = { viewer: "مشاهد", member: "عضو", admin: "مدير", own
 const VERDICT_AR = {
   true_positive: "ثغرة مؤكدة", false_positive: "إنذار كاذب",
   needs_review: "يحتاج مراجعة", skipped: "بدون مراجعة", error: "خطأ"
+};
+const TRIAGE_AR = {
+  open: "مفتوحة", in_progress: "قيد المعالجة", false_positive: "إنذار كاذب",
+  fixed: "مُصلحة", accepted_risk: "مقبولة المخاطر"
 };
 
 async function api(path, opts) {
@@ -461,10 +486,12 @@ function showErr(elId, e) {
 }
 
 async function openDetail(id) {
-  currentScan = id; currentFilter = "";
+  currentScan = id; currentFilter = ""; currentTriage = ""; currentAssignee = "";
   document.querySelectorAll(".filter-btn").forEach(b => b.classList.toggle("active", b.dataset.sev === ""));
+  document.querySelectorAll(".tfilter").forEach(b => b.classList.toggle("active", b.dataset.ts === ""));
   document.getElementById("view-scans").hidden = true;
   document.getElementById("view-detail").hidden = false;
+  await loadTeam();
   await refreshDetail();
   clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
@@ -506,26 +533,71 @@ function verdictBadge(f) {
   return `<span class="verdict ${cls}" title="${esc(f.ai_explanation || "")}">${esc(lbl)}${conf}</span>`;
 }
 
+async function loadTeam() {
+  teamMembers = await api("/team").catch(() => []);
+  const sel = document.getElementById("assignee-filter");
+  sel.innerHTML = `<option value="">👥 كل الأعضاء</option>` + teamMembers.map(m =>
+    `<option value="${esc(m.id)}">${esc(m.name || m.key_prefix)} (${ROLE_AR[m.role] || m.role})</option>`).join("");
+}
+
 async function loadFindings() {
-  const q = currentFilter ? `?severity=${currentFilter}` : "";
-  const rows = await api(`/scans/${currentScan}/results${q}`).catch(() => []);
+  const qp = new URLSearchParams();
+  if (currentFilter) qp.set("severity", currentFilter);
+  if (currentTriage) qp.set("triage_status", currentTriage);
+  if (currentAssignee) qp.set("assigned_to", currentAssignee);
+  const qs = qp.toString() ? `?${qp}` : "";
+  const rows = await api(`/scans/${currentScan}/results${qs}`).catch(() => []);
   const el = document.getElementById("findings-wrap");
   if (!rows.length) { el.innerHTML = `<div class="empty"><p>لا توجد نتائج بهذا التصنيف 🎉</p></div>`; return; }
   el.innerHTML = `<table><thead><tr>
-      <th>الخطورة</th><th>الأداة / القاعدة</th><th>الموقع</th><th>حكم الذكاء الاصطناعي</th><th>الوصف</th><th></th>
+      <th>الخطورة</th><th>الأداة / القاعدة</th><th>الموقع</th><th>حكم الذكاء الاصطناعي</th><th>الفرز</th><th>الوصف</th><th></th>
     </tr></thead><tbody>` + rows.map(f => {
     const loc = (f.file ? esc(String(f.file).split("/").pop()) : "—") + (f.line != null ? `:${f.line}` : "");
     const fixBtn = `<button class="btn-small" onclick="askFix(${f.id}, ${f.has_fix ? 1 : 0})">${f.has_fix ? "👁 عرض الاقتراح" : "🤖 اقتراح إصلاح"}</button>`;
+    const tri = f.triage_status || "open";
+    const triOpts = Object.keys(TRIAGE_AR).map(s =>
+      `<option value="${s}"${s === tri ? " selected" : ""}>${TRIAGE_AR[s]}</option>`).join("");
+    const asg = f.triage_assignee || "";
+    const asgOpts = `<option value="">—</option>` + teamMembers.map(m =>
+      `<option value="${esc(m.id)}"${m.id === asg ? " selected" : ""}>${esc(m.name || m.key_prefix)}</option>`).join("");
     return `
     <tr>
       <td><span class="sev sev-${f.severity}">${SEV_AR[f.severity] || esc(f.severity)}</span></td>
       <td><code>${esc(f.tool)}/${esc(String(f.rule_id || "").split(".").pop())}</code></td>
       <td><code dir="ltr">${loc}</code></td>
       <td>${verdictBadge(f)}</td>
+      <td><div class="triage-cell">
+        <span class="triage t-${tri}">${TRIAGE_AR[tri] || esc(tri)}</span>
+        <select class="sel-small" title="حالة الفرز" onchange="setFindingTriage(${f.id},'status',this.value)">${triOpts}</select>
+        <select class="sel-small" title="إسناد لعضو" onchange="setFindingTriage(${f.id},'assigned_to',this.value||null)">${asgOpts}</select>
+      </div></td>
       <td class="msg">${esc((f.message || "").slice(0, 140))}</td>
       <td>${fixBtn}</td>
     </tr>`;
   }).join("") + `</tbody></table>`;
+}
+
+async function setFindingTriage(id, field, value) {
+  const body = {}; body[field] = value;
+  try {
+    await api(`/findings/${id}/triage`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+  } catch (e) { alert("تعذّر حفظ الفرز: " + e.message); }
+  await loadFindings();
+}
+
+function setTriageFilter(s) {
+  currentTriage = s;
+  document.querySelectorAll(".tfilter").forEach(b => b.classList.toggle("active", b.dataset.ts === s));
+  loadFindings();
+}
+
+function setAssigneeFilter(v) {
+  currentAssignee = v;
+  loadFindings();
 }
 
 function setFilter(sev) {
