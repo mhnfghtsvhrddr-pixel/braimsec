@@ -46,6 +46,10 @@ services:
       - ${HOST_DATA_DIR:-/data/braimsec}:${HOST_DATA_DIR:-/data/braimsec}
     expose:
       - "8000"
+    # Loopback only: lets deploy.sh smoke-test the API directly while
+    # public traffic goes through Caddy (ports 80/443).
+    ports:
+      - "127.0.0.1:8000:8000"
 
   worker:
     build:
@@ -80,6 +84,10 @@ services:
     restart: unless-stopped
     depends_on:
       - api
+    env_file:
+      - .env
+    # The Caddyfile reads {$SITE_ADDRESS} from this container's environment.
+    # Without this, the site address would be empty and Caddy refuses to start.
     ports:
       - "80:80"
       - "443:443"
