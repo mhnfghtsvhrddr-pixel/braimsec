@@ -1,6 +1,7 @@
-# BraimSec Caddyfile (templated by deploy.sh)
+# BraimSec Caddyfile
 #
-# {$SITE_ADDRESS} is rendered from $SITE_ADDRESS in .env:
+# {$SITE_ADDRESS} is read from the caddy container's environment (passed via
+# env_file: .env in docker-compose.prod.yml):
 #   stage 1 (smoke test):  http://<server-ip>      -> plain HTTP, no TLS
 #   stage 2 (production):  api.braimsec.world      -> automatic Let's Encrypt TLS
 
