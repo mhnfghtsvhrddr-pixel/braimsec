@@ -354,7 +354,7 @@ def test_alert_on_new_findings(ctx, monkeypatch):
     captured = []
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: captured.append((url, payload)) or (True, 1, 200, None))
+        lambda url, payload, org_id=None: captured.append((url, payload)) or (True, 1, 200, None))
     db = get_db()
     old = [{"tool": "semgrep", "rule_id": "r.a", "severity": "warning",
             "message": "old issue", "file": "a.py", "line": 1}]
@@ -386,7 +386,7 @@ def test_alert_respects_threshold(ctx, monkeypatch):
     captured = []
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: captured.append(payload) or (True, 1, 200, None))
+        lambda url, payload, org_id=None: captured.append(payload) or (True, 1, 200, None))
     db = get_db()
     old = []
     new = [{"tool": "semgrep", "rule_id": "r.a", "severity": "note",
@@ -409,7 +409,7 @@ def test_first_run_is_silent_baseline(ctx, monkeypatch):
     captured = []
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: captured.append(payload) or (True, 1, 200, None))
+        lambda url, payload, org_id=None: captured.append(payload) or (True, 1, 200, None))
     db = get_db()
     new = [{"tool": "semgrep", "rule_id": "r.a", "severity": "error",
             "message": "everything is new", "file": "a.py", "line": 1}]
@@ -427,7 +427,7 @@ def test_failed_scan_alerts(ctx, monkeypatch):
     captured = []
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: captured.append(payload) or (True, 1, 200, None))
+        lambda url, payload, org_id=None: captured.append(payload) or (True, 1, 200, None))
     db = get_db()
     sb = "scan_bad_" + _uid()
     db.execute(
@@ -447,7 +447,7 @@ def test_moved_finding_is_not_new(ctx, monkeypatch):
     captured = []
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: captured.append(payload) or (True, 1, 200, None))
+        lambda url, payload, org_id=None: captured.append(payload) or (True, 1, 200, None))
     db = get_db()
     old = [{"tool": "semgrep", "rule_id": "r.a", "severity": "error",
             "message": "same bug", "file": "a.py", "line": 10}]
@@ -471,7 +471,7 @@ def test_inline_end_to_end_alert(ctx, target, monkeypatch):
     captured = []
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: captured.append((url, payload)) or (True, 1, 200, None))
+        lambda url, payload, org_id=None: captured.append((url, payload)) or (True, 1, 200, None))
     findings_now = []
 
     # Isolate from earlier tests: the DB file is shared, and their
@@ -567,7 +567,7 @@ def test_notifications_log_endpoint(ctx, monkeypatch):
     captured = []
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: captured.append(payload) or (True, 1, 200, None))
+        lambda url, payload, org_id=None: captured.append(payload) or (True, 1, 200, None))
     db = get_db()
     so, sn = "scan_lo_" + _uid(), "scan_ln_" + _uid()
     _mk_scan(db, ctx["org"], so, "done", [])
