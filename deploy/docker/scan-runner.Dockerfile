@@ -56,6 +56,11 @@ RUN SEMGREP_SEND_METRICS=off /opt/engines/bin/semgrep --validate \
 COPY scanner/ /opt/scanner/
 COPY scanner/rules/ /opt/rules-braimsec/
 COPY deploy/docker/runner-entrypoint.py /opt/runner-entrypoint.py
+# Validate BraimSec's own packs as well: one broken custom rule aborts the
+# whole scan (fail closed), so a bad pack must never ship either. This runs
+# at build time because --validate needs the network.
+RUN SEMGREP_SEND_METRICS=off /opt/engines/bin/semgrep --validate \
+        --config /opt/rules-braimsec
 ENV SEMGREP_BIN=/opt/engines/bin/semgrep \
     GITLEAKS_BIN=/opt/engines/bin/gitleaks
 ENTRYPOINT ["python3", "/opt/runner-entrypoint.py"]
