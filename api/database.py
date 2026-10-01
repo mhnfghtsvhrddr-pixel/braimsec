@@ -265,6 +265,28 @@ CREATE TABLE IF NOT EXISTS teams_webhooks (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_teams_webhooks_org_hash
     ON teams_webhooks(org_id, url_hash);
 CREATE INDEX IF NOT EXISTS idx_teams_webhooks_org ON teams_webhooks(org_id);
+-- TLS certificate expiry monitoring: per-org hostnames probed by the beat
+-- worker (~daily). last_status: never|ok|expiring|error. last_alerted_at
+-- drives the anti-spam repeat window (see cert_monitor.py).
+CREATE TABLE IF NOT EXISTS cert_domains (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    hostname TEXT NOT NULL,
+    port INTEGER NOT NULL DEFAULT 443,
+    warn_days INTEGER NOT NULL DEFAULT 14,
+    webhook_url TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_checked_at TEXT,
+    last_expires_at TEXT,
+    last_days_left INTEGER,
+    last_status TEXT NOT NULL DEFAULT 'never',
+    last_error TEXT,
+    last_alerted_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cert_domains_org_host
+    ON cert_domains(org_id, hostname, port);
+CREATE INDEX IF NOT EXISTS idx_cert_domains_org ON cert_domains(org_id);
 -- Per-org HMAC signing secrets for outgoing alert webhooks. The secret is
 -- generated server-side, Fernet-encrypted at rest, and shown to the org
 -- owner exactly once at rotation time (never returned by the API again).
