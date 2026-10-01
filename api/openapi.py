@@ -258,6 +258,34 @@ _doc("GET", "/api/scans/{scan_id}/results",
          "429": _err429(),
      })
 
+_doc("GET", "/api/scans/{scan_id}/results.csv",
+     tag="Scans",
+     summary="Scan findings as CSV",
+     description=("CSV export of one scan's findings — auditor-friendly. Same "
+                  "visibility as GET /api/scans/{id}/results (org-scoped, "
+                  "viewers may read). RFC 4180 quoting keeps messages with "
+                  "commas/quotes/newlines intact. Downloads as "
+                  "braimsec-<scan_id>-results.csv."),
+     auth="key", min_role="viewer", org_scope=False, rate_limit="30/minute",
+     params=[
+         _param("scan_id", "path", "string", "Scan id.", True,
+                example="a1b2c3d4e5f6"),
+         _param("severity", "query", "string",
+                "Filter by severity.", False, example="error",
+                enum=["error", "warning", "note"]),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("CSV bytes.",
+                      {"note": "binary text/csv; Content-Disposition: "
+                               "attachment; filename="
+                               "\"braimsec-<scan_id>-results.csv\""},
+                      content_type="text/csv"),
+         "401": _err401(),
+         "404": _err404(),
+         "429": _err429(),
+     })
+
 _doc("GET", "/api/trends",
      tag="Scans",
      summary="Vulnerability trends",
