@@ -357,6 +357,38 @@
       </div>
       <div id="email-wrap" style="margin-top: 0.6rem;"></div>
     </div>
+    <h3 style="margin: 1.6rem 0 1rem;">💬 قنوات المراسلة الفورية</h3>
+    <p style="color: var(--muted); font-size: 0.9rem; margin: 0 0 1rem;">تنبيه فوري عند النتائج الجديدة أو فشل الفحص — تُدار لكل منظمة على حدة.</p>
+    <div class="scan-card" style="flex-direction: column; align-items: stretch;">
+      <h4 style="margin: 0 0 0.4rem;">✈️ تيليجرام</h4>
+      <div id="tg-status" class="meta"></div>
+      <div class="row" style="margin-top: 0.6rem;">
+        <input id="tg-chat-new" placeholder="Chat ID (مثال: -1001234567890)" dir="ltr" style="flex: 1;">
+        <input id="tg-label-new" placeholder="تسمية (اختياري)" style="flex: 1;">
+        <button class="btn" onclick="addTelegramChat()">+ إضافة</button>
+      </div>
+      <div id="tg-wrap" style="margin-top: 0.6rem;"></div>
+    </div>
+    <div class="scan-card" style="flex-direction: column; align-items: stretch; margin-top: 1rem;">
+      <h4 style="margin: 0 0 0.4rem;">💬 Slack</h4>
+      <div class="meta">أنشئ Incoming Webhook من Slack (التطبيقات ← Incoming Webhooks) والصقه هنا — يُشفَّر عند الحفظ ولا يُعرض أبداً.</div>
+      <div class="row" style="margin-top: 0.6rem;">
+        <input id="slack-url-new" placeholder="https://hooks.slack.com/services/…" dir="ltr" style="flex: 2;">
+        <input id="slack-label-new" placeholder="#القناة (اختياري)" style="flex: 1;">
+        <button class="btn" onclick="addSlackWebhook()">+ إضافة</button>
+      </div>
+      <div id="slack-wrap" style="margin-top: 0.6rem;"></div>
+    </div>
+    <div class="scan-card" style="flex-direction: column; align-items: stretch; margin-top: 1rem;">
+      <h4 style="margin: 0 0 0.4rem;">👔 Microsoft Teams</h4>
+      <div class="meta">أنشئ Incoming Webhook من قناة Teams (Connectors) أو من Power Automate والصقه هنا — يُشفَّر عند الحفظ ولا يُعرض أبداً.</div>
+      <div class="row" style="margin-top: 0.6rem;">
+        <input id="teams-url-new" placeholder="https://…office.com/webhook/… أو …logic.azure.com/…" dir="ltr" style="flex: 2;">
+        <input id="teams-label-new" placeholder="تسمية (اختياري)" style="flex: 1;">
+        <button class="btn" onclick="addTeamsWebhook()">+ إضافة</button>
+      </div>
+      <div id="teams-wrap" style="margin-top: 0.6rem;"></div>
+    </div>
     <h3 style="margin: 1.6rem 0 1rem;">🔔 سجل التنبيهات</h3>
     <div id="notif-wrap"></div>
   </section>
@@ -747,7 +779,7 @@ function showView(name) {
   clearInterval(pollTimer);
   if (name === "scans") loadScans();
   if (name === "trends") loadTrends();
-  if (name === "sched") { loadSchedules(); loadAlertEmails(); loadNotifications(); }
+  if (name === "sched") { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); }
   if (name === "reports") loadReportSchedules();
   if (name === "vcs") loadVcsRepos();
   if (name === "billing") loadBilling();
@@ -1418,6 +1450,119 @@ async function deleteAlertEmail(id) {
   loadAlertEmails();
 }
 
+/* ---------- قنوات المراسلة الفورية (تيليجرام / Slack / Teams) ---------- */
+async function loadAlertChannels() {
+  await Promise.all([loadTelegramChats(), loadSlackWebhooks(), loadTeamsWebhooks()]);
+}
+
+async function loadTelegramChats() {
+  let data;
+  try { data = await api("/telegram-chats"); }
+  catch (e) {
+    document.getElementById("tg-wrap").innerHTML =
+      `<div class="empty"><p>تعذر التحميل: ${esc(e.message)}</p></div>`;
+    return;
+  }
+  document.getElementById("tg-status").innerHTML = data.telegram_configured
+    ? `✅ بوت تيليجرام مهيأ — أرسل <code dir="ltr">/start</code> للبوت ثم سجّل الـChat ID هنا.`
+    : `⚠️ بوت تيليجرام <b>غير مهيأ</b> — اضبط <code dir="ltr">BRAIMSEC_TELEGRAM_BOT_TOKEN</code> على السيرفر (ستُسجَّل التنبيهات كـ«متخطاة» حتى ذلك الحين).`;
+  const el = document.getElementById("tg-wrap");
+  if (!data.chats.length) {
+    el.innerHTML = `<div class="empty"><p>لا محادثات بعد — سجّل Chat ID ليصل التنبيه إلى تيليجرام.</p></div>`;
+    return;
+  }
+  el.innerHTML = data.chats.map(c => `
+    <div class="scan-card">
+      <div class="name" dir="ltr" style="text-align: left;">${esc(c.chat_id)}${c.label ? ` <span class="meta">— ${esc(c.label)}</span>` : ""}</div>
+      <div class="left"><button class="btn-ghost" onclick="deleteTelegramChat(${c.id})">حذف</button></div>
+    </div>`).join("");
+}
+
+async function addTelegramChat() {
+  const chatId = document.getElementById("tg-chat-new").value.trim();
+  const label = document.getElementById("tg-label-new").value.trim();
+  if (!chatId) return;
+  try {
+    await api("/telegram-chats", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: chatId, label }) });
+    document.getElementById("tg-chat-new").value = "";
+    document.getElementById("tg-label-new").value = "";
+    loadTelegramChats();
+  } catch (e) { alert("تعذر الإضافة: " + e.message); }
+}
+
+async function deleteTelegramChat(id) {
+  if (!confirm("حذف هذه المحادثة من تنبيهات تيليجرام؟")) return;
+  await api(`/telegram-chats/${id}`, { method: "DELETE" });
+  loadTelegramChats();
+}
+
+function webhookRowHtml(w, delFn) {
+  return `
+    <div class="scan-card">
+      <div>
+        <div class="name">${esc(w.label || "بدون تسمية")}</div>
+        <div class="meta" dir="ltr" style="text-align: left;">${esc(w.webhook_url_masked || "")}</div>
+      </div>
+      <div class="left"><button class="btn-ghost" onclick="${delFn}(${w.id})">حذف</button></div>
+    </div>`;
+}
+
+async function loadSlackWebhooks() {
+  const el = document.getElementById("slack-wrap");
+  let data;
+  try { data = await api("/slack-webhooks"); }
+  catch (e) { el.innerHTML = `<div class="empty"><p>تعذر التحميل: ${esc(e.message)}</p></div>`; return; }
+  el.innerHTML = data.webhooks.length
+    ? data.webhooks.map(w => webhookRowHtml(w, "deleteSlackWebhook")).join("")
+    : `<div class="empty"><p>لا webhooks بعد.</p></div>`;
+}
+
+async function addSlackWebhook() {
+  const url = document.getElementById("slack-url-new").value.trim();
+  const label = document.getElementById("slack-label-new").value.trim();
+  if (!url) return;
+  try {
+    await api("/slack-webhooks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ webhook_url: url, label }) });
+    document.getElementById("slack-url-new").value = "";
+    document.getElementById("slack-label-new").value = "";
+    loadSlackWebhooks();
+  } catch (e) { alert("تعذر الإضافة: " + e.message); }
+}
+
+async function deleteSlackWebhook(id) {
+  if (!confirm("حذف هذا الـwebhook من تنبيهات Slack؟")) return;
+  await api(`/slack-webhooks/${id}`, { method: "DELETE" });
+  loadSlackWebhooks();
+}
+
+async function loadTeamsWebhooks() {
+  const el = document.getElementById("teams-wrap");
+  let data;
+  try { data = await api("/teams-webhooks"); }
+  catch (e) { el.innerHTML = `<div class="empty"><p>تعذر التحميل: ${esc(e.message)}</p></div>`; return; }
+  el.innerHTML = data.webhooks.length
+    ? data.webhooks.map(w => webhookRowHtml(w, "deleteTeamsWebhook")).join("")
+    : `<div class="empty"><p>لا webhooks بعد.</p></div>`;
+}
+
+async function addTeamsWebhook() {
+  const url = document.getElementById("teams-url-new").value.trim();
+  const label = document.getElementById("teams-label-new").value.trim();
+  if (!url) return;
+  try {
+    await api("/teams-webhooks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ webhook_url: url, label }) });
+    document.getElementById("teams-url-new").value = "";
+    document.getElementById("teams-label-new").value = "";
+    loadTeamsWebhooks();
+  } catch (e) { alert("تعذر الإضافة: " + e.message); }
+}
+
+async function deleteTeamsWebhook(id) {
+  if (!confirm("حذف هذا الـwebhook من تنبيهات Teams؟")) return;
+  await api(`/teams-webhooks/${id}`, { method: "DELETE" });
+  loadTeamsWebhooks();
+}
+
 async function loadNotifications() {
   let rows;
   try { rows = await api("/notifications?limit=30"); }
@@ -1910,7 +2055,7 @@ function obRenderSummary() {
 loadScans();
 setInterval(() => {
   if (!document.getElementById("view-scans").hidden && document.getElementById("view-detail").hidden) loadScans();
-  if (!document.getElementById("view-sched").hidden) { loadSchedules(); loadAlertEmails(); loadNotifications(); }
+  if (!document.getElementById("view-sched").hidden) { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); }
 }, 5000);
 </script>
 </body>
