@@ -1855,7 +1855,7 @@ def list_notifications(request: Request, schedule_id: str | None = None,
     limit = max(1, min(limit, 200))
     _channels = {"webhook", "email", "telegram", "slack", "teams"}
     _events = {"schedule.alert", "schedule.failed", "vcs.alert", "vcs.failed",
-               "cert.expiry"}
+               "cert.expiry", "uptime.down", "uptime.recovered"}
     _statuses = {"sent", "failed", "skipped"}
     if channel is not None and channel not in _channels:
         raise HTTPException(400, f"Unknown channel (one of: "
@@ -2053,6 +2053,166 @@ async def check_cert_domain_now(request: Request, domain_id: int):
         state = check_domain(db, dict(row))
         row = dict(db.execute("SELECT * FROM cert_domains WHERE id=?",
                               (domain_id,)).fetchone())
+        row["_live"] = state
+        return row
+    finally:
+        db.close()
+
+
+# HTTP(S) uptime monitoring (per-org). Targets are probed by the beat
+# worker (each at most every check_interval_s); a down alert fires after 2
+# consecutive failures and a recovered alert on the first success after a
+# down alert. Both fan out to every channel the org configured.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/uptime-targets")
+@limiter.limit("60/minute")
+async def list_uptime_targets(request: Request):
+    """List uptime targets with their last check state (viewer+)."""
+    require_org_scope(request)
+    from uptime_monitor import list_targets  # noqa: E402
+    db = get_db()
+    try:
+        return list_targets(db, request.state.org_id)
+    finally:
+        db.close()
+
+
+@app.post("/api/uptime-targets")
+@limiter.limit("10/minute")
+async def add_uptime_target(request: Request):
+    """Register a URL for uptime monitoring (member+).
+
+    The target is probed immediately so the caller sees its live state.
+    """
+    require_role(request, "member")
+    from uptime_monitor import add_target, check_target  # noqa: E402
+    body = await request.json()
+    db = get_db()
+    try:
+        try:
+            es = body.get("expected_status")
+            es = int(es) if es is not None else None
+            row = add_target(
+                db, request.state.org_id, body.get("hostname", ""),
+                int(body.get("port", 443)), body.get("path", "/") or "/",
+                bool(body.get("use_https", True)), es,
+                body.get("keyword", "") or "",
+                int(body.get("check_interval_s", 300)),
+                body.get("webhook_url", "") or "")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "uptime_target.added",
+                  detail={"target_id": row["id"],
+                          "hostname": row["hostname"],
+                          "path": row["path"]},
+                  db=db)
+        db.commit()
+        state = check_target(db, row)
+        row = dict(db.execute("SELECT * FROM uptime_targets WHERE id=?",
+                              (row["id"],)).fetchone())
+        row["_live"] = state
+        return row
+    finally:
+        db.close()
+
+
+@app.patch("/api/uptime-targets/{target_id}")
+@limiter.limit("30/minute")
+async def update_uptime_target(request: Request, target_id: int):
+    """Update keyword / expected_status / interval / webhook_url / enabled."""
+    require_role(request, "member")
+    body = await request.json()
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM uptime_targets WHERE id=? AND org_id=?",
+                         (target_id, request.state.org_id)).fetchone()
+        if row is None:
+            raise HTTPException(404, "target not found")
+        sets, args = [], []
+        if "keyword" in body:
+            kw = body["keyword"] or ""
+            if len(kw) > 200:
+                raise HTTPException(400, "keyword too long (max 200)")
+            sets.append("keyword=?")
+            args.append(kw)
+        if "expected_status" in body:
+            es = body["expected_status"]
+            if es is not None and not (100 <= int(es) <= 599):
+                raise HTTPException(400, "expected_status must be 100..599")
+            sets.append("expected_status=?")
+            args.append(es)
+        if "check_interval_s" in body:
+            iv = int(body["check_interval_s"])
+            if not (60 <= iv <= 3600):
+                raise HTTPException(400, "check_interval_s must be 60..3600")
+            sets.append("check_interval_s=?")
+            args.append(iv)
+        if "webhook_url" in body:
+            sets.append("webhook_url=?")
+            args.append(body["webhook_url"] or "")
+        if "enabled" in body:
+            sets.append("enabled=?")
+            args.append(1 if body["enabled"] else 0)
+        if not sets:
+            raise HTTPException(400, "nothing to update")
+        args.append(target_id)
+        db.execute(f"UPDATE uptime_targets SET {', '.join(sets)} WHERE id=?",
+                   args)
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "uptime_target.updated",
+                  detail={"target_id": target_id,
+                          "fields": [s.split("=")[0] for s in sets]},
+                  db=db)
+        db.commit()
+        return dict(db.execute("SELECT * FROM uptime_targets WHERE id=?",
+                               (target_id,)).fetchone())
+    finally:
+        db.close()
+
+
+@app.delete("/api/uptime-targets/{target_id}")
+@limiter.limit("30/minute")
+async def delete_uptime_target(request: Request, target_id: int):
+    """Stop monitoring a target (member+)."""
+    require_role(request, "member")
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM uptime_targets WHERE id=? AND org_id=?",
+                         (target_id, request.state.org_id)).fetchone()
+        if row is None:
+            raise HTTPException(404, "target not found")
+        db.execute("DELETE FROM uptime_targets WHERE id=?", (target_id,))
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "uptime_target.removed",
+                  detail={"target_id": target_id,
+                          "hostname": row["hostname"]},
+                  db=db)
+        db.commit()
+        return {"deleted": target_id}
+    finally:
+        db.close()
+
+
+@app.post("/api/uptime-targets/{target_id}/check")
+@limiter.limit("10/minute")
+async def check_uptime_target_now(request: Request, target_id: int):
+    """Probe a target right now (member+). Alerts fire per the rules."""
+    require_role(request, "member")
+    from uptime_monitor import check_target  # noqa: E402
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM uptime_targets WHERE id=? AND org_id=?",
+                         (target_id, request.state.org_id)).fetchone()
+        if row is None:
+            raise HTTPException(404, "target not found")
+        state = check_target(db, dict(row))
+        row = dict(db.execute("SELECT * FROM uptime_targets WHERE id=?",
+                              (target_id,)).fetchone())
         row["_live"] = state
         return row
     finally:
