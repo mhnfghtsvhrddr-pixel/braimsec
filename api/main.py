@@ -106,9 +106,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "ai"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "reports"))
-from scan_engine import (  # noqa: E402
-    to_sarif,
-)
+from sarif import SarifError, build_sarif, validate_sarif  # noqa: E402
 from builder import ReportError, build_report, compliance_map, lookup_compliance  # noqa: E402
 from pdf import render_pdf  # noqa: E402
 from executive import build_executive_report  # noqa: E402
@@ -2216,13 +2214,36 @@ async def triage_bulk(request: Request):
 
 
 @app.get("/api/scans/{scan_id}/sarif")
+@limiter.limit("30/minute")
 def scan_sarif(request: Request, scan_id: str):
+    """SARIF 2.1.0 export of a scan's findings.
+
+    Served as ``application/sarif+json`` with a Content-Disposition so it
+    downloads as ``braimsec-<scan_id>.sarif``. Drop the file into GitHub
+    code scanning via ``github/codeql-action/upload-sarif`` (see
+    reports/SARIF.md) or any other SARIF 2.1.0 consumer.
+
+    RBAC + per-org isolation are enforced by scan_results (404 for a
+    missing scan or one belonging to another org). The document is a pure,
+    deterministic function of the stored findings — no rescan, no LLM.
+    """
     findings = scan_results(request, scan_id)
-    return to_sarif([{
-        "tool": f["tool"], "rule_id": f["rule_id"], "severity": f["severity"],
-        "message": f["message"], "file": f["file"],
-        "line": f["line"] or 1, "col": f["col"] or 1,
-    } for f in findings])
+    doc = build_sarif(
+        [{
+            "tool": f["tool"], "rule_id": f["rule_id"],
+            "severity": f["severity"], "message": f["message"],
+            "file": f["file"], "line": f["line"] or 1, "col": f["col"] or 1,
+        } for f in findings],
+        scan_id=scan_id)
+    try:
+        validate_sarif(doc)
+    except SarifError as e:
+        raise HTTPException(500, f"sarif build refused: {e}")
+    body = json.dumps(doc, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return Response(
+        content=body, media_type="application/sarif+json",
+        headers={"Content-Disposition":
+                 f'attachment; filename="braimsec-{scan_id}.sarif"'})
 
 
 @app.get("/api/scans/{scan_id}/report.pdf")
