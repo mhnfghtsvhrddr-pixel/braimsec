@@ -43,8 +43,8 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from database import get_db
-from scheduler import (SEVERITY_ORDER, _scan_findings, _suppressed_fps,
-                       finding_fingerprint, send_alert)
+from scheduler import (SEVERITY_ORDER, _scan_findings, _send_email_alerts,
+                       _suppressed_fps, finding_fingerprint, send_alert)
 from ssrf_guard import _resolve_checked  # noqa: F401  (fail-closed DNS check)
 
 log = logging.getLogger("braimsec.vcs")
@@ -483,18 +483,31 @@ def _alert_vcs_failure(db, repo: dict, scan: dict) -> dict:
         "error": (scan["error"] or "")[:500],
     }
     payload["content"] = payload["text"]
-    ok, attempts, code, err = send_alert(repo["webhook_url"], payload)
-    db.execute(
-        "INSERT INTO notifications (org_id, schedule_id, vcs_repo_id, scan_id,"
-        " event, severity, new_count, webhook_url, status, attempts,"
-        " response_code, error, payload, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (repo["org_id"], None, repo["id"], scan["id"], "vcs.failed",
-         "error", 0, repo["webhook_url"], "sent" if ok else "failed",
-         attempts, code, err, json.dumps(payload, ensure_ascii=False),
-         _now_iso()))
-    db.commit()
-    return {"alerted": ok, "event": "vcs.failed", "error": err}
+    webhook_url = repo["webhook_url"] or ""
+    email_out = _send_email_alerts(
+        db, org_id=repo["org_id"], schedule_id=None, vcs_repo_id=repo["id"],
+        scan_id=scan["id"], event="vcs.failed", severity="error",
+        new_count=0, heading=f"المستودع {repo['full_name']}",
+        subheading=(f"فرع {repo['branch']} — "
+                    f"{(scan['error'] or 'unknown error')[:200]}"),
+        findings=[])
+    if webhook_url:
+        ok, attempts, code, err = send_alert(webhook_url, payload)
+        db.execute(
+            "INSERT INTO notifications (org_id, schedule_id, vcs_repo_id, scan_id,"
+            " event, severity, new_count, webhook_url, channel, status, attempts,"
+            " response_code, error, payload, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (repo["org_id"], None, repo["id"], scan["id"], "vcs.failed",
+             "error", 0, webhook_url, "webhook", "sent" if ok else "failed",
+             attempts, code, err, json.dumps(payload, ensure_ascii=False),
+             _now_iso()))
+        db.commit()
+    else:
+        ok, err = False, None
+    emailed = bool(email_out.get("emailed"))
+    return {"alerted": bool(ok) or emailed, "event": "vcs.failed",
+            "error": err, "email": email_out}
 
 
 def evaluate_vcs_alerts(scan_id: str) -> dict:
@@ -541,19 +554,37 @@ def evaluate_vcs_alerts(scan_id: str) -> dict:
         if not new_findings:
             return {"alerted": False, "reason": "no new findings >= threshold"}
         payload = build_vcs_alert_payload(repo, scan, new_findings)
-        ok, attempts, code, err = send_alert(repo["webhook_url"], payload)
-        db.execute(
-            "INSERT INTO notifications (org_id, schedule_id, vcs_repo_id,"
-            " scan_id, event, severity, new_count, webhook_url, status,"
-            " attempts, response_code, error, payload, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (repo["org_id"], None, repo["id"], scan_id, "vcs.alert",
-             payload["highest_severity"], len(new_findings),
-             repo["webhook_url"], "sent" if ok else "failed", attempts,
-             code, err, json.dumps(payload, ensure_ascii=False),
-             _now_iso()))
-        db.commit()
-        return {"alerted": ok, "new_count": len(new_findings),
-                "attempts": attempts, "error": err}
+        webhook_url = repo["webhook_url"] or ""
+        email_out = _send_email_alerts(
+            db, org_id=repo["org_id"], schedule_id=None, vcs_repo_id=repo["id"],
+            scan_id=scan_id, event="vcs.alert",
+            severity=payload["highest_severity"],
+            new_count=len(new_findings),
+            heading=f"المستودع {repo['full_name']}",
+            subheading=(f"فرع {repo['branch']} — "
+                        f"commit {(scan.get('commit_sha') or '')[:8]}"),
+            findings=[{"severity": f["severity"], "rule_id": f["rule_id"],
+                       "file": f["file"], "line": f["line"],
+                       "message": f["message"]} for f in new_findings])
+        if webhook_url:
+            ok, attempts, code, err = send_alert(webhook_url, payload)
+            db.execute(
+                "INSERT INTO notifications (org_id, schedule_id, vcs_repo_id,"
+                " scan_id, event, severity, new_count, webhook_url, channel,"
+                " status, attempts, response_code, error, payload, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (repo["org_id"], None, repo["id"], scan_id, "vcs.alert",
+                 payload["highest_severity"], len(new_findings),
+                 webhook_url, "webhook", "sent" if ok else "failed", attempts,
+                 code, err, json.dumps(payload, ensure_ascii=False),
+                 _now_iso()))
+            db.commit()
+        else:
+            # Email-only repo: no webhook configured, nothing to send/record.
+            ok, attempts, err = False, 0, None
+        emailed = bool(email_out.get("emailed"))
+        return {"alerted": bool(ok) or emailed,
+                "new_count": len(new_findings), "attempts": attempts,
+                "error": err, "email": email_out}
     finally:
         db.close()
