@@ -575,6 +575,26 @@ _doc("GET", "/api/scans/{scan_id}/sarif",
          "500": _err500("sarif build refused: no findings"),
      })
 
+_doc("GET", "/api/scans/{scan_id}/badge.svg",
+     tag="Reports",
+     summary="Scan status badge (SVG)",
+     description=("Public shields.io-style status badge for README embedding: "
+                  "`<img src=\"https://<host>/api/scans/<id>/badge.svg\">`. "
+                  "No authentication — exposes only aggregate severity counts "
+                  "(never file names, messages, targets or org data). Unknown "
+                  "scan -> 404, not a badge. Deterministic per scan state."),
+     auth="public", min_role=None, org_scope=False, rate_limit="60/minute",
+     params=[_param("scan_id", "path", "string", "Scan id.", True,
+                   example="a1b2c3d4e5f6")],
+     request_body=None,
+     responses={
+         "200": _resp("SVG badge bytes.",
+                      {"note": "binary image/svg+xml; Cache-Control: no-store"},
+                      content_type="image/svg+xml"),
+         "404": _err404(),
+         "429": _err429(),
+     })
+
 _doc("GET", "/api/scans/{scan_id}/report.pdf",
      tag="Reports",
      summary="Scan PDF report",
