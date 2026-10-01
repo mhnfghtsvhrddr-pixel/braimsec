@@ -1,0 +1,210 @@
+# BraimSec Terraform rules (v1) — precision-first, not holdout-tuned.
+#
+# Why these exist: the frozen registry snapshot (`--config auto` vendored at
+# image build time) covers generic Terraform hygiene, but these six rules
+# encode BraimSec's precision-first specifications for the highest-signal
+# AWS misconfigurations our customers ask about: security groups open to the
+# world, public S3 ACLs, and unencrypted storage (RDS/EBS) chosen explicitly.
+#
+# Design philosophy (precision-first, honest) — same as braimsec-inject.yaml:
+# - Every rule matches an EXPLICIT insecure setting (0.0.0.0/0, public-read,
+#   `= false`, `= 0`). We never flag the ABSENCE of a setting: absence is
+#   not proof of insecurity (e.g. S3 encryption is commonly configured via
+#   the separate aws_s3_bucket_server_side_encryption_configuration
+#   resource; a "no encryption block" rule would false-positive on every
+#   modern codebase).
+# - Ingress is covered in both HCL spellings: inline `ingress {}` blocks in
+#   aws_security_group and standalone aws_security_group_rule resources.
+# - Rule IDs are namespaced `braimsec.terraform.*`, matching the
+#   `braimsec.inject.*` / `braimsec.dockerfile.*` conventions.
+#
+# Verified with Semgrep 1.178.0 on paired vuln/safe repros (see
+# scanner/test_iac_rules.py): every rule fires on its true-positive sample
+# and stays silent on clean code (0 FP on the test corpus).
+
+rules:
+- id: braimsec.terraform.sg-inline-open-to-world
+  languages:
+  - terraform
+  message: Security group ingress open to 0.0.0.0/0 on a sensitive port (or all
+    ports). Restrict cidr_blocks to known ranges.
+  metadata:
+    category: security
+    confidence: HIGH
+    cwe: 'CWE-732: Incorrect Permission Assignment for Critical Resource'
+    impact: HIGH
+    owasp: A01:2021 - Broken Access Control
+  # NOTE: single-nested pattern-either only — a doubly-nested either
+  # (either inside either) silently fails to unify ranges in terraform
+  # (verified against semgrep 1.178.0). The all-ports branch keeps every
+  # condition inside ONE ingress block pattern so from/to/cidr can never
+  # match across two different ingress blocks (no cross-block FP).
+  patterns:
+  - pattern-inside: |
+      resource "aws_security_group" $SG {
+        ...
+      }
+  - pattern-either:
+    - patterns:
+      - pattern: |
+          ingress {
+            ...
+            cidr_blocks = [..., "0.0.0.0/0", ...]
+            ...
+          }
+      # sensitive ports: 22 ssh, 3389 rdp, 3306 mysql, 5432 pg,
+      # 6379 redis, 27017 mongo, 9200 elasticsearch
+      - pattern: from_port = $P
+      - metavariable-regex:
+          metavariable: $P
+          regex: ^(22|3389|3306|5432|6379|27017|9200)$
+    - patterns:
+      - pattern: |
+          ingress {
+            ...
+            from_port = 0
+            ...
+            to_port = 0
+            ...
+            cidr_blocks = [..., "0.0.0.0/0", ...]
+            ...
+          }
+  severity: ERROR
+
+- id: braimsec.terraform.sg-rule-open-to-world
+  languages:
+  - terraform
+  message: Standalone security group rule open to 0.0.0.0/0 on a sensitive port
+    (or all ports). Restrict cidr_blocks to known ranges.
+  metadata:
+    category: security
+    confidence: HIGH
+    cwe: 'CWE-732: Incorrect Permission Assignment for Critical Resource'
+    impact: HIGH
+    owasp: A01:2021 - Broken Access Control
+  # NOTE: each branch is a SINGLE block pattern. Two statement-level
+  # patterns (e.g. `from_port = ...` plus `cidr_blocks = ...`) in one flat
+  # conjunction never unify ranges in terraform (verified on 1.178.0), so
+  # everything lives inside one resource block pattern. The `...` gaps make
+  # the match attribute-order independent (verified: cidr-first files match).
+  # `type = "ingress"` excludes egress rules by construction.
+  patterns:
+  - pattern-either:
+    - patterns:
+      - pattern: |
+          resource "aws_security_group_rule" $R {
+            ...
+            type = "ingress"
+            ...
+            from_port = $P
+            ...
+            cidr_blocks = [..., "0.0.0.0/0", ...]
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $P
+          regex: ^(22|3389|3306|5432|6379|27017|9200)$
+    - patterns:
+      - pattern: |
+          resource "aws_security_group_rule" $R {
+            ...
+            type = "ingress"
+            ...
+            from_port = 0
+            ...
+            to_port = 0
+            ...
+            cidr_blocks = [..., "0.0.0.0/0", ...]
+            ...
+          }
+  severity: ERROR
+
+- id: braimsec.terraform.s3-public-acl
+  languages:
+  - terraform
+  message: S3 bucket with a public ACL (public-read / public-read-write /
+    authenticated-read). Use a private ACL with explicit bucket policies.
+  metadata:
+    category: security
+    confidence: HIGH
+    cwe: 'CWE-732: Incorrect Permission Assignment for Critical Resource'
+    impact: HIGH
+    owasp: A01:2021 - Broken Access Control
+  patterns:
+  - pattern-either:
+    - patterns:
+      - pattern-inside: |
+          resource "aws_s3_bucket" $B {
+            ...
+          }
+      - pattern-either:
+        - pattern: acl = "public-read"
+        - pattern: acl = "public-read-write"
+        - pattern: acl = "authenticated-read"
+    - patterns:
+      - pattern-inside: |
+          resource "aws_s3_bucket_acl" $A {
+            ...
+          }
+      - pattern-either:
+        - pattern: acl = "public-read"
+        - pattern: acl = "public-read-write"
+        - pattern: acl = "authenticated-read"
+  severity: ERROR
+
+- id: braimsec.terraform.rds-no-encryption
+  languages:
+  - terraform
+  message: RDS instance with storage_encrypted = false — data at rest is stored
+    in cleartext. Set storage_encrypted = true.
+  metadata:
+    category: security
+    confidence: HIGH
+    cwe: 'CWE-311: Missing Encryption of Sensitive Data'
+    impact: HIGH
+    owasp: A02:2021 - Cryptographic Failures
+  patterns:
+  - pattern-inside: |
+      resource "aws_db_instance" $DB {
+        ...
+      }
+  - pattern: storage_encrypted = false
+  severity: ERROR
+
+- id: braimsec.terraform.rds-no-backup
+  languages:
+  - terraform
+  message: RDS instance with backup_retention_period = 0 — automated backups are
+    disabled and point-in-time recovery is impossible.
+  metadata:
+    category: security
+    confidence: HIGH
+    cwe: 'CWE-754: Improper Check for Unusual or Exceptional Conditions'
+    impact: MEDIUM
+    owasp: A05:2021 - Security Misconfiguration
+  patterns:
+  - pattern-inside: |
+      resource "aws_db_instance" $DB {
+        ...
+      }
+  - pattern: backup_retention_period = 0
+  severity: WARNING
+
+- id: braimsec.terraform.ebs-no-encryption
+  languages:
+  - terraform
+  message: EBS volume with encrypted = false — volume data is stored unencrypted.
+    Set encrypted = true.
+  metadata:
+    category: security
+    confidence: HIGH
+    cwe: 'CWE-311: Missing Encryption of Sensitive Data'
+    impact: HIGH
+    owasp: A02:2021 - Cryptographic Failures
+  patterns:
+  - pattern-inside: |
+      resource "aws_ebs_volume" $V {
+        ...
+      }
+  - pattern: encrypted = false
+  severity: ERROR
