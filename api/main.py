@@ -1768,7 +1768,9 @@ async def gitlab_webhook(request: Request, background_tasks: BackgroundTasks):
 @app.get("/api/notifications")
 @limiter.limit("60/minute")
 def list_notifications(request: Request, schedule_id: str | None = None,
-                       vcs_repo_id: str | None = None, limit: int = 50):
+                       vcs_repo_id: str | None = None,
+                       report_schedule_id: str | None = None,
+                       limit: int = 50):
     """Alert delivery log (viewer+, org scope). Newest first."""
     require_org_scope(request)
     limit = max(1, min(limit, 200))
@@ -1783,6 +1785,11 @@ def list_notifications(request: Request, schedule_id: str | None = None,
             "SELECT * FROM notifications WHERE org_id=? AND vcs_repo_id=?"
             " ORDER BY id DESC LIMIT ?",
             (request.state.org_id, vcs_repo_id, limit)).fetchall()
+    elif report_schedule_id:
+        rows = db.execute(
+            "SELECT * FROM notifications WHERE org_id=?"
+            " AND report_schedule_id=? ORDER BY id DESC LIMIT ?",
+            (request.state.org_id, report_schedule_id, limit)).fetchall()
     else:
         rows = db.execute(
             "SELECT * FROM notifications WHERE org_id=?"
@@ -2549,66 +2556,29 @@ async def executive_report_pdf(request: Request):
     if key_pid and project_id and project_id != key_pid:
         raise HTTPException(
             403, "Project-scoped keys cannot query other projects")
-    db = get_db()
-    org_row = db.execute("SELECT name FROM organizations WHERE id=?",
-                         (request.state.org_id,)).fetchone()
-    org_name = org_row["name"] if org_row else request.state.org_id
     eff_project = key_pid or project_id
-    project_name = None
-    if eff_project:
-        prow = db.execute(
-            "SELECT name FROM projects WHERE id=? AND org_id=?",
-            (eff_project, request.state.org_id)).fetchone()
-        if not prow:
-            db.close()
-            raise HTTPException(404, "Project not found")
-        project_name = prow["name"]
-    pred, params = _scan_scope(request, "s")
-    q = (f"SELECT s.id, s.target_name, s.finished_at, s.created_at,"
-         f" s.total_findings FROM scans s"
-         f" WHERE {pred} AND s.status='done'")
-    if eff_project and not key_pid:
-        q += " AND s.project_id=?"
-        params.append(eff_project)
-    q += " ORDER BY s.created_at ASC"
-    rows = db.execute(q, params).fetchall()
-    if days > 0:
-        cutoff = (datetime.now(timezone.utc) -
-                  timedelta(days=days)).isoformat()
-        rows = [r for r in rows if (r["created_at"] or "") >= cutoff]
-    if not rows:
+    # Shared with the scheduled-report driver (api/scheduled_reports.py):
+    # one scope-collection path for on-demand and scheduled reports.
+    from scheduled_reports import collect_report_inputs  # noqa: E402
+    db = get_db()
+    try:
+        inputs = collect_report_inputs(db, request.state.org_id,
+                                       eff_project, days)
+    except KeyError:
+        db.close()
+        raise HTTPException(404, "Project not found")
+    except ReportError:
         db.close()
         raise HTTPException(404, "No completed scans in scope")
-    scans = [dict(r) for r in rows]
-    latest = scans[-1]
-    latest_findings = [dict(r) for r in db.execute(
-        "SELECT tool, rule_id, severity, message, file, line"
-        " FROM findings WHERE scan_id=?", (latest["id"],)).fetchall()]
-    prev_counts = None
-    if len(scans) >= 2:
-        pc = db.execute(
-            "SELECT severity, COUNT(*) c FROM findings WHERE scan_id=?"
-            " GROUP BY severity", (scans[-2]["id"],)).fetchall()
-        prev_counts = {r["severity"]: r["c"] for r in pc}
-    soc2_m = iso_m = 0
-    for f in latest_findings:
-        comp = lookup_compliance(f.get("rule_id"), f.get("tool"))
-        if comp:
-            if comp.get("soc2"):
-                soc2_m += 1
-            if comp.get("iso"):
-                iso_m += 1
-    map_version = compliance_map().get("version", "unknown")
     db.close()
 
     generated_at = datetime.now(timezone.utc).isoformat()
     try:
         report = build_executive_report(
-            org_name, project_name, scans, latest_findings,
-            prev_counts=prev_counts,
-            compliance={"soc2_mapped": soc2_m, "iso_mapped": iso_m,
-                        "total": len(latest_findings),
-                        "map_version": map_version},
+            inputs["org_name"], inputs["project_name"], inputs["scans"],
+            inputs["latest_findings"],
+            prev_counts=inputs["prev_counts"],
+            compliance=inputs["compliance"],
             generated_at=generated_at)
         pdf = render_executive_pdf(report)
     except ReportError as e:
@@ -2617,6 +2587,303 @@ async def executive_report_pdf(request: Request):
         content=pdf, media_type="application/pdf",
         headers={"Content-Disposition":
                  'attachment; filename="braimsec-executive-report.pdf"'})
+
+
+# ---------------------------------------------------------------------------
+# Scheduled executive reports (weekly/monthly emailed PDFs)
+# ---------------------------------------------------------------------------
+
+def _validate_report_schedule_body(body: dict,
+                                   partial: bool = False) -> dict:
+    """Validate report-schedule fields; returns cleaned values. Raises 400."""
+    from scheduled_reports import (VALID_REPORT_FREQUENCIES,  # noqa: E402
+                                   compute_next_report_run)
+    body = body or {}
+    out: dict = {}
+
+    def need(key, cond, msg):
+        if key in body:
+            if not cond(body[key]):
+                raise HTTPException(400, f"{key}: {msg}")
+            return body[key]
+        if not partial:
+            raise HTTPException(400, f"{key}: required")
+        return None
+
+    name = need("name",
+                lambda v: isinstance(v, str) and 1 <= len(v.strip()) <= 80,
+                "1-80 characters")
+    if name is not None:
+        out["name"] = name.strip()
+    freq = need("frequency", lambda v: v in VALID_REPORT_FREQUENCIES,
+                f"one of {VALID_REPORT_FREQUENCIES}")
+    if freq is not None:
+        out["frequency"] = freq
+    rt = need("run_time", lambda v: isinstance(v, str),
+              "HH:MM (00:00-23:59)")
+    if rt is not None:
+        out["run_time"] = rt.strip()
+    if "weekday" in body:
+        wd = body["weekday"]
+        if wd is not None and not (isinstance(wd, int) and 0 <= wd <= 6):
+            raise HTTPException(400, "weekday: 0=Monday..6=Sunday or null")
+        out["weekday"] = wd
+    elif not partial:
+        out["weekday"] = None
+    if "day_of_month" in body:
+        dom = body["day_of_month"]
+        if dom is not None and not (isinstance(dom, int)
+                                    and 1 <= dom <= 28):
+            raise HTTPException(400, "day_of_month: 1..28 or null")
+        out["day_of_month"] = dom
+    elif not partial:
+        out["day_of_month"] = None
+    tz = need("timezone", lambda v: isinstance(v, str) and v.strip(),
+              "IANA timezone name")
+    if tz is not None:
+        out["timezone"] = tz.strip()
+    if "project_id" in body:
+        pid = body["project_id"]
+        if pid is not None and not (isinstance(pid, str) and pid.strip()):
+            raise HTTPException(400, "project_id: string id or null")
+        out["project_id"] = (pid.strip() if isinstance(pid, str)
+                             and pid.strip() else None)
+    if "days" in body:
+        try:
+            days_v = int(body["days"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "days: integer >= 0 (0 = all time)")
+        if days_v < 0:
+            raise HTTPException(400, "days: >= 0 (0 = all time)")
+        out["days"] = days_v
+    elif not partial:
+        out["days"] = 90
+    if "enabled" in body:
+        out["enabled"] = 1 if body["enabled"] else 0
+    # Spec coherence (create only; PATCH probes the merged row instead).
+    if not partial:
+        if out.get("frequency") == "weekly" and out.get("weekday") is None:
+            raise HTTPException(
+                400, "weekday: required for weekly report schedules")
+        if (out.get("frequency") == "monthly"
+                and out.get("day_of_month") is None):
+            raise HTTPException(
+                400, "day_of_month: required for monthly report schedules")
+        try:
+            compute_next_report_run(out["frequency"], out["run_time"],
+                                    out.get("weekday"),
+                                    out.get("day_of_month"),
+                                    out["timezone"])
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    return out
+
+
+def _report_schedule_row(row) -> dict:
+    return dict(row)
+
+
+def _check_report_project(db, org_id: str, project_id: str | None,
+                          key_pid: str | None) -> str | None:
+    """Resolve + validate the effective project for a report schedule.
+
+    Project-scoped keys never reach this (``require_org_scope`` rejects
+    them at the endpoint). An explicit project must belong to the org
+    (404 otherwise); null means the whole org.
+    """
+    if key_pid and project_id and project_id != key_pid:
+        raise HTTPException(
+            403, "Project-scoped keys cannot use other projects")
+    eff = key_pid or project_id
+    if eff:
+        prow = db.execute("SELECT id FROM projects WHERE id=? AND org_id=?",
+                          (eff, org_id)).fetchone()
+        if not prow:
+            raise HTTPException(404, "Project not found")
+    return eff
+
+
+@app.post("/api/report-schedules")
+@limiter.limit("30/minute")
+async def create_report_schedule(request: Request):
+    """Create a scheduled executive report (member+, org scope).
+
+    ``frequency`` is weekly|monthly; weekly needs ``weekday`` (0=Monday),
+    monthly needs ``day_of_month`` (1..28). ``project_id`` scopes the
+    report to one project (null = whole org). The PDF is emailed to the
+    org's ``/api/alert-emails`` recipients when the schedule fires.
+    """
+    from scheduled_reports import (compute_next_report_run,  # noqa: E402
+                                   new_report_schedule_id)
+    require_role(request, "member")
+    require_org_scope(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    spec = _validate_report_schedule_body(body)
+    db = get_db()
+    eff_project = _check_report_project(db, request.state.org_id,
+                                        spec.get("project_id"), None)
+    sid = new_report_schedule_id()
+    nxt = compute_next_report_run(spec["frequency"], spec["run_time"],
+                                  spec.get("weekday"),
+                                  spec.get("day_of_month"),
+                                  spec["timezone"])
+    db.execute(
+        "INSERT INTO report_schedules (id, org_id, name, frequency,"
+        " run_time, weekday, day_of_month, timezone, project_id, days,"
+        " enabled, next_run_at, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (sid, request.state.org_id, spec["name"], spec["frequency"],
+         spec["run_time"], spec.get("weekday"), spec.get("day_of_month"),
+         spec["timezone"], eff_project, spec.get("days", 90),
+         spec.get("enabled", 1), nxt, now()))
+    db.commit()
+    db.close()
+    _audit(request, "report_schedule.created", "report_schedule", sid,
+           {"name": spec["name"], "frequency": spec["frequency"]})
+    return {"report_schedule_id": sid, "next_run_at": nxt}
+
+
+@app.get("/api/report-schedules")
+@limiter.limit("60/minute")
+def list_report_schedules(request: Request):
+    """List the org's report schedules (viewer+, org scope)."""
+    require_org_scope(request)
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM report_schedules WHERE org_id=?"
+        " ORDER BY created_at DESC",
+        (request.state.org_id,)).fetchall()
+    db.close()
+    return [_report_schedule_row(r) for r in rows]
+
+
+@app.get("/api/report-schedules/{schedule_id}")
+@limiter.limit("60/minute")
+def get_report_schedule(request: Request, schedule_id: str):
+    """Fetch one report schedule (viewer+, org scope)."""
+    require_org_scope(request)
+    db = get_db()
+    row = db.execute("SELECT * FROM report_schedules WHERE id=? AND org_id=?",
+                     (schedule_id, request.state.org_id)).fetchone()
+    db.close()
+    if not row:
+        raise HTTPException(404, "Report schedule not found")
+    return _report_schedule_row(row)
+
+
+@app.patch("/api/report-schedules/{schedule_id}")
+@limiter.limit("30/minute")
+async def update_report_schedule(request: Request, schedule_id: str):
+    """Update a report schedule (member+, org scope). Changing the cadence
+    or timezone recomputes the next run from now."""
+    from scheduled_reports import compute_next_report_run  # noqa: E402
+    require_role(request, "member")
+    require_org_scope(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    db = get_db()
+    row = db.execute("SELECT * FROM report_schedules WHERE id=? AND org_id=?",
+                     (schedule_id, request.state.org_id)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Report schedule not found")
+    sched = dict(row)
+    spec = _validate_report_schedule_body(body, partial=True)
+    if "project_id" in spec:
+        spec["project_id"] = _check_report_project(
+            db, request.state.org_id, spec["project_id"], None)
+    merged = {**sched, **spec}
+    if merged["frequency"] == "weekly" and merged.get("weekday") is None:
+        db.close()
+        raise HTTPException(
+            400, "weekday: required for weekly report schedules")
+    if (merged["frequency"] == "monthly"
+            and merged.get("day_of_month") is None):
+        db.close()
+        raise HTTPException(
+            400, "day_of_month: required for monthly report schedules")
+    sets, params = [], []
+    for key in ("name", "frequency", "run_time", "weekday", "day_of_month",
+                "timezone", "project_id", "days", "enabled"):
+        if key in spec:
+            sets.append(f"{key}=?")
+            params.append(spec[key])
+    if any(k in spec for k in ("frequency", "run_time", "weekday",
+                               "day_of_month", "timezone")):
+        try:
+            nxt = compute_next_report_run(
+                merged["frequency"], merged["run_time"],
+                merged.get("weekday"), merged.get("day_of_month"),
+                merged["timezone"])
+        except ValueError as e:
+            db.close()
+            raise HTTPException(400, str(e))
+        sets.append("next_run_at=?")
+        params.append(nxt)
+    if sets:
+        params.extend([schedule_id, request.state.org_id])
+        db.execute(f"UPDATE report_schedules SET {', '.join(sets)}"
+                   " WHERE id=? AND org_id=?", params)
+        db.commit()
+    db.close()
+    _audit(request, "report_schedule.updated", "report_schedule", schedule_id,
+           {"fields": sorted(spec.keys())})
+    return get_report_schedule(request, schedule_id)
+
+
+@app.delete("/api/report-schedules/{schedule_id}")
+@limiter.limit("30/minute")
+def delete_report_schedule(request: Request, schedule_id: str):
+    """Delete a report schedule and its delivery history (member+)."""
+    require_role(request, "member")
+    require_org_scope(request)
+    db = get_db()
+    row = db.execute("SELECT project_id FROM report_schedules"
+                     " WHERE id=? AND org_id=?",
+                     (schedule_id, request.state.org_id)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Report schedule not found")
+    db.execute("DELETE FROM notifications WHERE report_schedule_id=?",
+               (schedule_id,))
+    db.execute("DELETE FROM report_schedules WHERE id=?", (schedule_id,))
+    db.commit()
+    db.close()
+    _audit(request, "report_schedule.deleted", "report_schedule",
+           schedule_id, {})
+    return {"report_schedule_id": schedule_id, "deleted": True}
+
+
+@app.post("/api/report-schedules/{schedule_id}/run")
+@limiter.limit("10/minute")
+def run_report_schedule_endpoint(request: Request, schedule_id: str):
+    """Trigger one immediate delivery of an enabled report schedule
+    (member+). The regular cadence is untouched: ``next_run_at`` keeps
+    its value."""
+    from scheduled_reports import run_report_schedule_now  # noqa: E402
+    require_role(request, "member")
+    require_org_scope(request)
+    db = get_db()
+    row = db.execute("SELECT project_id, enabled FROM report_schedules"
+                     " WHERE id=? AND org_id=?",
+                     (schedule_id, request.state.org_id)).fetchone()
+    db.close()
+    if not row:
+        raise HTTPException(404, "Report schedule not found")
+    try:
+        out = run_report_schedule_now(schedule_id)
+    except KeyError:
+        raise HTTPException(404, "Report schedule not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _audit(request, "report_schedule.run", "report_schedule", schedule_id,
+           {"delivered": out.get("delivered")})
+    return {"report_schedule_id": schedule_id, **out}
 
 
 # ---------------------------------------------------------------------------
