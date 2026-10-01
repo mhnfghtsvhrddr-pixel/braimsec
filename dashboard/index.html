@@ -390,6 +390,30 @@
       <div id="teams-wrap" style="margin-top: 0.6rem;"></div>
     </div>
     <h3 style="margin: 1.6rem 0 1rem;">🔔 سجل التنبيهات</h3>
+    <div class="row" style="margin-bottom: 0.8rem; gap: 0.6rem; flex-wrap: wrap;">
+      <select id="notif-f-channel" onchange="loadNotifications()" aria-label="فلتر القناة">
+        <option value="">كل القنوات</option>
+        <option value="webhook">🔗 ويبهوك</option>
+        <option value="email">📧 إيميل</option>
+        <option value="telegram">✈️ تيليجرام</option>
+        <option value="slack">💬 Slack</option>
+        <option value="teams">👔 Teams</option>
+      </select>
+      <select id="notif-f-event" onchange="loadNotifications()" aria-label="فلتر الحدث">
+        <option value="">كل الأحداث</option>
+        <option value="schedule.alert">نتائج جديدة</option>
+        <option value="schedule.failed">فشل الفحص</option>
+        <option value="vcs.alert">نتائج جديدة (مستودع)</option>
+        <option value="vcs.failed">فشل الفحص (مستودع)</option>
+      </select>
+      <select id="notif-f-status" onchange="loadNotifications()" aria-label="فلتر الحالة">
+        <option value="">كل الحالات</option>
+        <option value="sent">أُرسل</option>
+        <option value="failed">فشل</option>
+        <option value="skipped">متخطاة</option>
+      </select>
+      <button class="btn-ghost" onclick="resetNotifFilters()">↺ تصفير</button>
+    </div>
     <div id="notif-wrap"></div>
   </section>
 
@@ -1564,8 +1588,15 @@ async function deleteTeamsWebhook(id) {
 }
 
 async function loadNotifications() {
+  const fc = document.getElementById("notif-f-channel").value;
+  const fe = document.getElementById("notif-f-event").value;
+  const fs = document.getElementById("notif-f-status").value;
+  const qs = new URLSearchParams({ limit: 30 });
+  if (fc) qs.set("channel", fc);
+  if (fe) qs.set("event", fe);
+  if (fs) qs.set("status", fs);
   let rows;
-  try { rows = await api("/notifications?limit=30"); }
+  try { rows = await api("/notifications?" + qs.toString()); }
   catch (e) {
     document.getElementById("notif-wrap").innerHTML =
       `<div class="empty"><p>تعذر التحميل: ${esc(e.message)}</p></div>`;
@@ -1573,12 +1604,13 @@ async function loadNotifications() {
   }
   const el = document.getElementById("notif-wrap");
   if (!rows.length) {
-    el.innerHTML = `<div class="empty"><p>لا تنبيهات بعد — ستظهر هنا عند اكتشاف نتائج جديدة 🔕</p></div>`;
+    el.innerHTML = `<div class="empty"><p>${(fc || fe || fs) ? "لا تنبيهات تطابق الفلاتر المحددة 🔍" : "لا تنبيهات بعد — ستظهر هنا عند اكتشاف نتائج جديدة 🔕"}</p></div>`;
     return;
   }
   const evAr = { "schedule.alert": "نتائج جديدة", "schedule.failed": "فشل الفحص",
     "vcs.alert": "نتائج جديدة (مستودع)", "vcs.failed": "فشل الفحص (مستودع)" };
-  const chAr = { "webhook": "🔗 ويبهوك", "email": "📧 إيميل" };
+  const chAr = { "webhook": "🔗 ويبهوك", "email": "📧 إيميل",
+    "telegram": "✈️ تيليجرام", "slack": "💬 Slack", "teams": "👔 Teams" };
   const stBadge = s => s === "sent" ? `<span class="badge b-done">أُرسل</span>`
     : s === "skipped" ? `<span class="badge b-queued">متخطاة</span>`
     : `<span class="badge b-failed">فشل</span>`;
@@ -1594,6 +1626,13 @@ async function loadNotifications() {
       <td>${stBadge(n.status)}</td>
       <td>${n.attempts}${n.error ? ` <span title="${esc(n.error)}" style="color:var(--red)">⚠️</span>` : ""}</td>
     </tr>`).join("") + `</tbody></table>`;
+}
+
+function resetNotifFilters() {
+  document.getElementById("notif-f-channel").value = "";
+  document.getElementById("notif-f-event").value = "";
+  document.getElementById("notif-f-status").value = "";
+  loadNotifications();
 }
 
 /* ---------- المستودعات: فحص تلقائي عند push ---------- */
