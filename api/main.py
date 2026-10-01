@@ -363,7 +363,8 @@ def _new_scan(org_id: str, target_name: str, target_dir: str,
               webhook_url: str | None = None,
               webhook_secret: str | None = None,
               baseline_scan_id: str | None = None,
-              project_id: str | None = None):
+              project_id: str | None = None,
+              scan_id: str | None = None):
     """Create a scan owned by org_id. Consumes one unit of monthly quota.
 
     Raises HTTPException(402) when the org's plan quota is exhausted,
@@ -376,7 +377,7 @@ def _new_scan(org_id: str, target_name: str, target_dir: str,
             f"Monthly scan quota exceeded ({used}/{quota} used). "
             "Upgrade your plan to continue scanning.",
         )
-    scan_id = uuid.uuid4().hex[:12]
+    scan_id = scan_id or uuid.uuid4().hex[:12]
     db = get_db()
     db.execute(
         "INSERT INTO scans (id, org_id, target_name, status, created_at,"
@@ -907,6 +908,277 @@ def delete_project_endpoint(request: Request, project_id: str):
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"project_id": project_id, "deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# Scheduled scans + new-findings alerts (webhooks)
+# ---------------------------------------------------------------------------
+
+def _validate_schedule_body(body: dict, partial: bool = False) -> dict:
+    """Validate schedule fields; returns cleaned values. Raises 400."""
+    from scheduler import (VALID_FREQUENCIES, VALID_SEVERITIES,  # noqa: E402
+                           compute_next_run)
+    from ssrf_guard import validate_webhook_url  # noqa: E402
+
+    body = body or {}
+    out: dict = {}
+
+    def need(key, cond, msg):
+        if key in body:
+            if not cond(body[key]):
+                raise HTTPException(400, f"{key}: {msg}")
+            return body[key]
+        if not partial:
+            raise HTTPException(400, f"{key}: required")
+        return None
+
+    name = need("name", lambda v: isinstance(v, str) and 1 <= len(v.strip()) <= 80,
+                "1-80 characters")
+    if name is not None:
+        out["name"] = name.strip()
+    tp = need("target_path", lambda v: isinstance(v, str) and v.strip(),
+              "non-empty string")
+    if tp is not None:
+        out["target_path"] = tp.strip()
+    freq = need("frequency", lambda v: v in VALID_FREQUENCIES,
+                f"one of {VALID_FREQUENCIES}")
+    if freq is not None:
+        out["frequency"] = freq
+    rt = need("run_time", lambda v: isinstance(v, str),
+              "HH:MM (00:00-23:59)")
+    if rt is not None:
+        out["run_time"] = rt.strip()
+    if "weekday" in body:
+        wd = body["weekday"]
+        if wd is not None and not (isinstance(wd, int) and 0 <= wd <= 6):
+            raise HTTPException(400, "weekday: 0=Monday..6=Sunday or null")
+        out["weekday"] = wd
+    elif not partial:
+        out["weekday"] = None
+    tz = need("timezone", lambda v: isinstance(v, str) and v.strip(),
+              "IANA timezone name")
+    if tz is not None:
+        out["timezone"] = tz.strip()
+    sev = need("alert_severity", lambda v: v in VALID_SEVERITIES,
+               f"one of {VALID_SEVERITIES}")
+    if sev is not None:
+        out["alert_severity"] = sev
+    if "webhook_url" in body or not partial:
+        url = (body.get("webhook_url") or "").strip()
+        if not url:
+            raise HTTPException(400, "webhook_url: required")
+        try:
+            validate_webhook_url(url)
+        except ValueError as e:
+            raise HTTPException(400, f"webhook_url: {e}")
+        out["webhook_url"] = url
+    if "enabled" in body:
+        out["enabled"] = 1 if body["enabled"] else 0
+    # Spec coherence: weekly needs a weekday; run_time/timezone must parse.
+    freq_v = out.get("frequency")
+    if freq_v == "weekly" and out.get("weekday") is None and not partial:
+        raise HTTPException(400, "weekday: required for weekly schedules")
+    if not partial or any(k in out for k in ("frequency", "run_time",
+                                            "weekday", "timezone")):
+        probe = {
+            "frequency": out.get("frequency", body.get("frequency", "daily")),
+            "run_time": out.get("run_time", body.get("run_time", "02:00")),
+            "weekday": out.get("weekday", body.get("weekday")),
+            "timezone": out.get("timezone", body.get("timezone", "UTC")),
+        }
+        try:
+            compute_next_run(probe["frequency"], probe["run_time"],
+                             probe["weekday"], probe["timezone"])
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    return out
+
+
+def _schedule_row(row) -> dict:
+    return dict(row)
+
+
+@app.post("/api/schedules")
+@limiter.limit("30/minute")
+async def create_schedule(request: Request):
+    """Create a scheduled scan (member+, org scope).
+
+    ``target_path`` must resolve inside the scan sandbox (same guard as
+    ``POST /api/scans``); ``webhook_url`` must pass the SSRF check.
+    """
+    from scheduler import compute_next_run  # noqa: E402
+    require_role(request, "member")
+    require_org_scope(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    spec = _validate_schedule_body(body)
+    # Fail fast on a bad target: reuse the scan sandbox guard.
+    _resolve_scan_target(spec["target_path"])
+    sid = uuid.uuid4().hex[:12]
+    nxt = compute_next_run(spec["frequency"], spec["run_time"],
+                           spec.get("weekday"), spec["timezone"])
+    db = get_db()
+    db.execute(
+        "INSERT INTO schedules (id, org_id, name, target_path, frequency,"
+        " run_time, weekday, timezone, alert_severity, webhook_url, enabled,"
+        " next_run_at, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (sid, request.state.org_id, spec["name"], spec["target_path"],
+         spec["frequency"], spec["run_time"], spec.get("weekday"),
+         spec["timezone"], spec["alert_severity"], spec["webhook_url"],
+         spec.get("enabled", 1), nxt, now()))
+    db.commit()
+    db.close()
+    _audit(request, "schedule.created", "schedule", sid,
+           {"name": spec["name"], "frequency": spec["frequency"]})
+    return {"schedule_id": sid, "next_run_at": nxt}
+
+
+@app.get("/api/schedules")
+@limiter.limit("60/minute")
+def list_schedules(request: Request):
+    """List the org's schedules (viewer+, org scope)."""
+    require_org_scope(request)
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM schedules WHERE org_id=? ORDER BY created_at DESC",
+        (request.state.org_id,)).fetchall()
+    db.close()
+    return [_schedule_row(r) for r in rows]
+
+
+@app.get("/api/schedules/{schedule_id}")
+@limiter.limit("60/minute")
+def get_schedule(request: Request, schedule_id: str):
+    """Fetch one schedule (viewer+, org scope)."""
+    require_org_scope(request)
+    db = get_db()
+    row = db.execute("SELECT * FROM schedules WHERE id=? AND org_id=?",
+                     (schedule_id, request.state.org_id)).fetchone()
+    db.close()
+    if not row:
+        raise HTTPException(404, "Schedule not found")
+    return _schedule_row(row)
+
+
+@app.patch("/api/schedules/{schedule_id}")
+@limiter.limit("30/minute")
+async def update_schedule(request: Request, schedule_id: str):
+    """Update a schedule (member+, org scope). Changing the cadence or
+    timezone recomputes the next run from now."""
+    from scheduler import compute_next_run  # noqa: E402
+    require_role(request, "member")
+    require_org_scope(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    db = get_db()
+    row = db.execute("SELECT * FROM schedules WHERE id=? AND org_id=?",
+                     (schedule_id, request.state.org_id)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Schedule not found")
+    sched = dict(row)
+    spec = _validate_schedule_body(body, partial=True)
+    if "target_path" in spec:
+        _resolve_scan_target(spec["target_path"])
+    merged = {**sched, **spec}
+    if merged["frequency"] == "weekly" and merged.get("weekday") is None:
+        db.close()
+        raise HTTPException(400, "weekday: required for weekly schedules")
+    sets, params = [], []
+    for key in ("name", "target_path", "frequency", "run_time", "weekday",
+                "timezone", "alert_severity", "webhook_url", "enabled"):
+        if key in spec:
+            sets.append(f"{key}=?")
+            params.append(spec[key])
+    if any(k in spec for k in ("frequency", "run_time", "weekday",
+                               "timezone")):
+        nxt = compute_next_run(merged["frequency"], merged["run_time"],
+                               merged.get("weekday"), merged["timezone"])
+        sets.append("next_run_at=?")
+        params.append(nxt)
+    if sets:
+        params.extend([schedule_id, request.state.org_id])
+        db.execute(f"UPDATE schedules SET {', '.join(sets)}"
+                   " WHERE id=? AND org_id=?", params)
+        db.commit()
+    db.close()
+    _audit(request, "schedule.updated", "schedule", schedule_id,
+           {"fields": sorted(spec.keys())})
+    return get_schedule(request, schedule_id)
+
+
+@app.delete("/api/schedules/{schedule_id}")
+@limiter.limit("30/minute")
+def delete_schedule(request: Request, schedule_id: str):
+    """Delete a schedule and its notification history (member+, org scope)."""
+    require_role(request, "member")
+    require_org_scope(request)
+    db = get_db()
+    row = db.execute("SELECT id FROM schedules WHERE id=? AND org_id=?",
+                     (schedule_id, request.state.org_id)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Schedule not found")
+    db.execute("DELETE FROM notifications WHERE schedule_id=?", (schedule_id,))
+    db.execute("DELETE FROM schedules WHERE id=?", (schedule_id,))
+    db.commit()
+    db.close()
+    _audit(request, "schedule.deleted", "schedule", schedule_id, {})
+    return {"schedule_id": schedule_id, "deleted": True}
+
+
+@app.post("/api/schedules/{schedule_id}/run")
+@limiter.limit("10/minute")
+def run_schedule_endpoint(request: Request, schedule_id: str):
+    """Trigger one immediate run of an enabled schedule (member+).
+
+    The regular cadence is untouched: ``next_run_at`` keeps its value.
+    """
+    from scheduler import run_schedule_now  # noqa: E402
+    require_role(request, "member")
+    require_org_scope(request)
+    db = get_db()
+    row = db.execute("SELECT id FROM schedules WHERE id=? AND org_id=?",
+                     (schedule_id, request.state.org_id)).fetchone()
+    db.close()
+    if not row:
+        raise HTTPException(404, "Schedule not found")
+    try:
+        scan_id = run_schedule_now(schedule_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError:
+        raise HTTPException(404, "Schedule not found")
+    _audit(request, "schedule.run", "schedule", schedule_id,
+           {"scan_id": scan_id})
+    return {"schedule_id": schedule_id, "scan_id": scan_id, "status": "queued"}
+
+
+@app.get("/api/notifications")
+@limiter.limit("60/minute")
+def list_notifications(request: Request, schedule_id: str | None = None,
+                       limit: int = 50):
+    """Alert delivery log (viewer+, org scope). Newest first."""
+    require_org_scope(request)
+    limit = max(1, min(limit, 200))
+    db = get_db()
+    if schedule_id:
+        rows = db.execute(
+            "SELECT * FROM notifications WHERE org_id=? AND schedule_id=?"
+            " ORDER BY id DESC LIMIT ?",
+            (request.state.org_id, schedule_id, limit)).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM notifications WHERE org_id=?"
+            " ORDER BY id DESC LIMIT ?",
+            (request.state.org_id, limit)).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
 
 
 def _fix_payload(row):
