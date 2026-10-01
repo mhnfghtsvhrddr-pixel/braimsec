@@ -91,9 +91,24 @@ FIX_SYSTEM = (
 )
 
 
-def generate_fix(client, finding, func_src="", imports_src=""):
-    """One LLM call -> dict with explanation/original/patched/confidence/caveats."""
+def _cap_context(src, limit):
+    """Truncate LLM-bound code context with an explicit marker."""
+    src = src or ""
+    if len(src) > limit:
+        return src[:limit].rstrip() + "\n…[context truncated]"
+    return src
+
+
+def generate_fix(client, finding, func_src="", imports_src="",
+                 max_context_chars=6000):
+    """One LLM call -> dict with explanation/original/patched/confidence/caveats.
+
+    Only a capped excerpt of the customer code is sent (the enclosing
+    function + imports); the whole file never leaves the server.
+    """
     location = f"{finding.get('file')}:{finding.get('line')}"
+    func_src = _cap_context(func_src, max_context_chars)
+    imports_src = _cap_context(imports_src, max_context_chars)
     user = (
         f"Finding: [{finding.get('tool')}] {finding.get('rule_id')} "
         f"({finding.get('severity')}) at {location}\n"
