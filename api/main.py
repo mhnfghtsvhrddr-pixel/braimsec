@@ -14,6 +14,7 @@ import os
 import json
 import logging
 import secrets
+import sqlite3
 import sys
 import tempfile
 import time
@@ -176,9 +177,12 @@ async def api_key_gate(request: Request, call_next):
     /api/plans is public (pricing catalog for the marketing page).
     /api/checkout/crypto is public (new-customer crypto checkout; rate-limited).
     /api/webhooks/nowpayments is public (NOWPayments IPN; secured by HMAC).
+    /api/webhooks/github and /api/webhooks/gitlab are public (push receivers;
+    secured by HMAC-SHA256 / token respectively).
     """
     public_paths = ("/api/plans", "/api/checkout/crypto",
                     "/api/checkout/status", "/api/webhooks/nowpayments",
+                    "/api/webhooks/github", "/api/webhooks/gitlab",
                     "/api/health")
     if request.url.path.startswith("/api/") and request.url.path not in public_paths:
         presented = request.headers.get("x-api-key", "")
@@ -364,7 +368,9 @@ def _new_scan(org_id: str, target_name: str, target_dir: str,
               webhook_secret: str | None = None,
               baseline_scan_id: str | None = None,
               project_id: str | None = None,
-              scan_id: str | None = None):
+              scan_id: str | None = None,
+              vcs_repo_id: str | None = None,
+              commit_sha: str | None = None):
     """Create a scan owned by org_id. Consumes one unit of monthly quota.
 
     Raises HTTPException(402) when the org's plan quota is exhausted,
@@ -381,10 +387,12 @@ def _new_scan(org_id: str, target_name: str, target_dir: str,
     db = get_db()
     db.execute(
         "INSERT INTO scans (id, org_id, target_name, status, created_at,"
-        " webhook_url, webhook_secret, target_dir, project_id)"
-        " VALUES (?,?,?,?,?,?,?,?,?)",
+        " webhook_url, webhook_secret, target_dir, project_id,"
+        " vcs_repo_id, commit_sha)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (scan_id, org_id, target_name, "queued", now(),
-         webhook_url, webhook_secret, target_dir, project_id))
+         webhook_url, webhook_secret, target_dir, project_id,
+         vcs_repo_id, commit_sha))
     db.commit()
     db.close()
     try:
@@ -1173,10 +1181,400 @@ def run_schedule_endpoint(request: Request, schedule_id: str):
     return {"schedule_id": schedule_id, "scan_id": scan_id, "status": "queued"}
 
 
+
+# ---------------------------------------------------------------------------
+# VCS integration: scan on push (GitHub / GitLab)
+# ---------------------------------------------------------------------------
+
+def _serialize_vcs_repo(row: dict) -> dict:
+    """Repo row for API responses — never exposes secret material."""
+    return {
+        "id": row["id"],
+        "provider": row["provider"],
+        "repo_url": row["repo_url"],
+        "full_name": row["full_name"],
+        "branch": row["branch"],
+        "project_id": row["project_id"],
+        "webhook_url": row["webhook_url"],
+        "alert_severity": row["alert_severity"],
+        "enabled": bool(row["enabled"]),
+        "last_scan_id": row["last_scan_id"],
+        "prev_scan_id": row["prev_scan_id"],
+        "last_scan_at": row["last_scan_at"],
+        "last_error": row["last_error"],
+        "created_at": row["created_at"],
+    }
+
+
+def _validate_vcs_body(body: dict) -> dict:
+    """Validate repo registration/update fields. Returns a clean spec dict."""
+    from ssrf_guard import validate_webhook_url  # noqa: E402
+    from vcs import VCS_PROVIDERS, validate_branch, validate_repo_url  # noqa: E402
+    provider = (body.get("provider") or "").strip().lower()
+    if provider not in VCS_PROVIDERS:
+        raise HTTPException(
+            400, f"Unknown provider {provider!r} (expected github|gitlab)")
+    try:
+        repo_url = validate_repo_url(body.get("repo_url") or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    branch = (body.get("branch") or "main").strip()
+    try:
+        validate_branch(branch)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    severity = (body.get("alert_severity") or "warning").strip()
+    if severity not in ("note", "warning", "error"):
+        raise HTTPException(400, "alert_severity must be note|warning|error")
+    webhook_url = (body.get("webhook_url") or "").strip()
+    if not webhook_url:
+        raise HTTPException(400, "webhook_url is required for VCS alerts")
+    try:
+        webhook_url = validate_webhook_url(webhook_url)
+    except ValueError as e:
+        raise HTTPException(400, f"webhook_url: {e}")
+    return {"provider": provider, "repo_url": repo_url, "branch": branch,
+            "alert_severity": severity, "webhook_url": webhook_url}
+
+
+def _resolve_vcs_project(request: Request, body: dict) -> str | None:
+    """Project scoping for VCS repos (mirrors scan/key creation)."""
+    key_pid = getattr(request.state, "project_id", None)
+    project_id = body.get("project_id")
+    if key_pid:
+        if project_id and project_id != key_pid:
+            raise HTTPException(
+                403, "This key is scoped to its own project")
+        return key_pid
+    if project_id:
+        db = get_db()
+        row = db.execute("SELECT id FROM projects WHERE id=? AND org_id=?",
+                         (project_id, request.state.org_id)).fetchone()
+        db.close()
+        if not row:
+            raise HTTPException(400, "Unknown project_id for this org")
+    return project_id
+
+
+def _vcs_receiver_url(provider: str) -> str:
+    base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    return f"{base}/api/webhooks/{provider}" if base else f"/api/webhooks/{provider}"
+
+
+@app.post("/api/vcs/repos")
+@limiter.limit("30/minute")
+async def create_vcs_repo(request: Request):
+    """Register a repo for scan-on-push (member+, org scope).
+
+    Returns the repo plus the one-time ``webhook_secret`` and the
+    ``receiver_url`` to paste into the provider's webhook settings.
+    """
+    from vcs import encrypt_secret, generate_webhook_secret, hash_secret  # noqa: E402
+    require_role(request, "member")
+    require_org_scope(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    spec = _validate_vcs_body(body)
+    project_id = _resolve_vcs_project(request, body)
+    full_name = (body.get("full_name") or "").strip()[:200]
+    if not full_name:
+        # Derive from the URL path when the caller doesn't supply it
+        # (keeps nested GitLab groups: a/b/c).
+        full_name = "/".join(spec["repo_url"].split("/")[3:])
+    rid = uuid.uuid4().hex[:12]
+    secret = generate_webhook_secret()
+    enc = encrypt_secret(secret) if spec["provider"] == "github" else None
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO vcs_repos (id, org_id, project_id, provider,"
+            " repo_url, full_name, branch, webhook_secret_hash,"
+            " webhook_secret_enc, webhook_url, alert_severity, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rid, request.state.org_id, project_id, spec["provider"],
+             spec["repo_url"], full_name, spec["branch"],
+             hash_secret(secret), enc, spec["webhook_url"],
+             spec["alert_severity"], now()))
+        db.commit()
+        row = db.execute("SELECT * FROM vcs_repos WHERE id=?",
+                         (rid,)).fetchone()
+    except sqlite3.IntegrityError:
+        db.close()
+        raise HTTPException(409, "This repo is already registered for this org")
+    db.close()
+    _audit(request, "vcs.repo.created", "vcs_repo", rid,
+           {"provider": spec["provider"], "repo_url": spec["repo_url"],
+            "branch": spec["branch"], "project_id": project_id})
+    out = _serialize_vcs_repo(dict(row))
+    out["webhook_secret"] = secret
+    out["receiver_url"] = _vcs_receiver_url(spec["provider"])
+    out["warning"] = ("Store this secret now — it will never be shown again."
+                      " Paste it as the webhook secret in your provider.")
+    return out
+
+
+@app.get("/api/vcs/repos")
+@limiter.limit("60/minute")
+def list_vcs_repos(request: Request):
+    """List the org's registered repos (viewer+, org scope)."""
+    require_org_scope(request)
+    key_pid = getattr(request.state, "project_id", None)
+    db = get_db()
+    if key_pid:
+        rows = db.execute(
+            "SELECT * FROM vcs_repos WHERE org_id=? AND project_id=?"
+            " ORDER BY created_at DESC",
+            (request.state.org_id, key_pid)).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT * FROM vcs_repos WHERE org_id=? ORDER BY created_at DESC",
+            (request.state.org_id,)).fetchall()
+    db.close()
+    return [_serialize_vcs_repo(dict(r)) for r in rows]
+
+
+@app.get("/api/vcs/repos/{repo_id}")
+@limiter.limit("60/minute")
+def get_vcs_repo(request: Request, repo_id: str):
+    """Repo detail incl. last scan summary (viewer+, org scope)."""
+    require_org_scope(request)
+    db = get_db()
+    row = db.execute("SELECT * FROM vcs_repos WHERE id=? AND org_id=?",
+                     (repo_id, request.state.org_id)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Repo not found")
+    repo = dict(row)
+    scan = None
+    if repo["last_scan_id"]:
+        s = db.execute(
+            "SELECT id, status, total_findings, finished_at, commit_sha,"
+            " target_name, error FROM scans WHERE id=?",
+            (repo["last_scan_id"],)).fetchone()
+        if s:
+            scan = dict(s)
+    db.close()
+    out = _serialize_vcs_repo(repo)
+    out["last_scan"] = scan
+    return out
+
+
+@app.patch("/api/vcs/repos/{repo_id}")
+@limiter.limit("30/minute")
+async def update_vcs_repo(request: Request, repo_id: str):
+    """Update branch / webhook_url / alert_severity / enabled (member+)."""
+    from ssrf_guard import validate_webhook_url  # noqa: E402
+    from vcs import validate_branch  # noqa: E402
+    require_role(request, "member")
+    require_org_scope(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    db = get_db()
+    row = db.execute("SELECT * FROM vcs_repos WHERE id=? AND org_id=?",
+                     (repo_id, request.state.org_id)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Repo not found")
+    repo = dict(row)
+    updates, params = [], []
+    if "branch" in body:
+        try:
+            branch = validate_branch((body["branch"] or "").strip())
+        except ValueError as e:
+            db.close()
+            raise HTTPException(400, str(e))
+        updates.append("branch=?")
+        params.append(branch)
+    if "webhook_url" in body:
+        url = (body["webhook_url"] or "").strip()
+        if not url:
+            db.close()
+            raise HTTPException(400, "webhook_url is required")
+        try:
+            url = validate_webhook_url(url)
+        except ValueError as e:
+            db.close()
+            raise HTTPException(400, f"webhook_url: {e}")
+        updates.append("webhook_url=?")
+        params.append(url)
+    if "alert_severity" in body:
+        sev = (body["alert_severity"] or "").strip()
+        if sev not in ("note", "warning", "error"):
+            db.close()
+            raise HTTPException(400, "alert_severity must be note|warning|error")
+        updates.append("alert_severity=?")
+        params.append(sev)
+    if "enabled" in body:
+        updates.append("enabled=?")
+        params.append(1 if body["enabled"] else 0)
+    if not updates:
+        db.close()
+        raise HTTPException(400, "Nothing to update")
+    params.append(repo_id)
+    db.execute(f"UPDATE vcs_repos SET {', '.join(updates)} WHERE id=?", params)
+    db.commit()
+    row = db.execute("SELECT * FROM vcs_repos WHERE id=?", (repo_id,)).fetchone()
+    db.close()
+    _audit(request, "vcs.repo.updated", "vcs_repo", repo_id,
+           {"updated": [u.split("=")[0] for u in updates]})
+    return _serialize_vcs_repo(dict(row))
+
+
+@app.delete("/api/vcs/repos/{repo_id}")
+@limiter.limit("30/minute")
+def delete_vcs_repo(request: Request, repo_id: str):
+    """Delete a repo and its notification history (member+, org scope).
+
+    Scans stay (org audit data); only the repo link is removed.
+    """
+    require_role(request, "member")
+    require_org_scope(request)
+    db = get_db()
+    row = db.execute("SELECT id FROM vcs_repos WHERE id=? AND org_id=?",
+                     (repo_id, request.state.org_id)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Repo not found")
+    db.execute("DELETE FROM notifications WHERE vcs_repo_id=?", (repo_id,))
+    db.execute("DELETE FROM vcs_repos WHERE id=?", (repo_id,))
+    db.commit()
+    db.close()
+    _audit(request, "vcs.repo.deleted", "vcs_repo", repo_id, {})
+    return {"repo_id": repo_id, "deleted": True}
+
+
+@app.post("/api/vcs/repos/{repo_id}/rotate-secret")
+@limiter.limit("30/minute")
+def rotate_vcs_secret(request: Request, repo_id: str):
+    """Issue a new webhook secret (member+). Shown once; update the provider."""
+    from vcs import encrypt_secret, generate_webhook_secret, hash_secret  # noqa: E402
+    require_role(request, "member")
+    require_org_scope(request)
+    db = get_db()
+    row = db.execute("SELECT * FROM vcs_repos WHERE id=? AND org_id=?",
+                     (repo_id, request.state.org_id)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Repo not found")
+    repo = dict(row)
+    secret = generate_webhook_secret()
+    enc = encrypt_secret(secret) if repo["provider"] == "github" else None
+    db.execute("UPDATE vcs_repos SET webhook_secret_hash=?,"
+               " webhook_secret_enc=? WHERE id=?",
+               (hash_secret(secret), enc, repo_id))
+    db.commit()
+    db.close()
+    _audit(request, "vcs.repo.secret_rotated", "vcs_repo", repo_id, {})
+    return {"repo_id": repo_id,
+            "webhook_secret": secret,
+            "receiver_url": _vcs_receiver_url(repo["provider"]),
+            "warning": "Store this secret now — it will never be shown again."}
+
+
+def _handle_vcs_webhook(provider: str, raw: bytes, headers, payload: dict,
+                        background_tasks: BackgroundTasks):
+    """Shared receiver logic for GitHub and GitLab (public, rate-limited).
+
+    Returns (status_code, body). Never raises for business outcomes.
+    """
+    from tasks import enqueue_vcs_ingest  # noqa: E402
+    from vcs import (decrypt_secret, find_repos, parse_github_push,
+                     parse_gitlab_push, scan_exists_for_commit,
+                     verify_github_signature, verify_gitlab_token)  # noqa: E402
+
+    def _verified_repo(candidates):
+        """First repo whose secret verifies this request (multi-org safe)."""
+        for cand in candidates:
+            if provider == "github":
+                enc = cand.get("webhook_secret_enc")
+                if enc and verify_github_signature(
+                        raw, headers.get("X-Hub-Signature-256"),
+                        decrypt_secret(enc)):
+                    return cand
+            elif verify_gitlab_token(headers.get("X-Gitlab-Token"),
+                                     cand["webhook_secret_hash"]):
+                return cand
+        return None
+
+    if provider == "github":
+        parsed = parse_github_push(payload, headers.get("X-GitHub-Event", ""))
+    else:
+        parsed = parse_gitlab_push(payload, headers.get("X-Gitlab-Event"))
+    if parsed is None:
+        return 200, {"ok": True, "ignored": "not a push event"}
+    if parsed["type"] == "ignore":
+        return 200, {"ok": True, "ignored": parsed["reason"]}
+
+    # Locate candidate repos first (the signature needs a secret to verify).
+    candidates = find_repos(provider, parsed.get("clone_url") or "")
+    if not candidates:
+        return 200, {"ok": True, "ignored": "unknown repository"}
+    repo = _verified_repo(candidates)
+    if repo is None:
+        log.warning("vcs webhook: bad signature/token for %s",
+                    parsed.get("clone_url"))
+        return 400, {"ok": False, "error": "invalid signature"}
+    if parsed["type"] == "ping":
+        # GitHub ping: acknowledge only when it verifiably belongs to us.
+        return 200, {"ok": True, "pong": True}
+    if not repo["enabled"]:
+        return 200, {"ok": True, "ignored": "repository disabled"}
+    if parsed["branch"] != repo["branch"]:
+        return 200, {"ok": True,
+                     "ignored": f"branch '{parsed['branch']}' not watched"}
+    if scan_exists_for_commit(repo["id"], parsed["sha"]):
+        return 200, {"ok": True, "deduped": True}
+    mode = enqueue_vcs_ingest(repo["id"], parsed["sha"], background_tasks)
+    log.info("vcs webhook: push %s@%s queued via %s",
+             repo["full_name"], parsed["sha"][:8], mode)
+    return 202, {"ok": True, "queued": True, "commit": parsed["sha"][:12]}
+
+
+@app.post("/api/webhooks/github")
+@limiter.limit("60/minute")
+async def github_webhook(request: Request, background_tasks: BackgroundTasks):
+    """Public GitHub push receiver (rate-limited, HMAC-verified)."""
+    raw = await request.body()
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception:  # noqa: BLE001 - malformed JSON
+        return JSONResponse({"ok": False, "error": "invalid JSON"},
+                            status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"ok": False, "error": "invalid JSON"},
+                            status_code=400)
+    code, body = _handle_vcs_webhook("github", raw, request.headers, payload,
+                                     background_tasks)
+    return JSONResponse(body, status_code=code)
+
+
+@app.post("/api/webhooks/gitlab")
+@limiter.limit("60/minute")
+async def gitlab_webhook(request: Request, background_tasks: BackgroundTasks):
+    """Public GitLab push receiver (rate-limited, token-verified)."""
+    raw = await request.body()
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception:  # noqa: BLE001 - malformed JSON
+        return JSONResponse({"ok": False, "error": "invalid JSON"},
+                            status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"ok": False, "error": "invalid JSON"},
+                            status_code=400)
+    code, body = _handle_vcs_webhook("gitlab", raw, request.headers, payload,
+                                     background_tasks)
+    return JSONResponse(body, status_code=code)
+
+
+
 @app.get("/api/notifications")
 @limiter.limit("60/minute")
 def list_notifications(request: Request, schedule_id: str | None = None,
-                       limit: int = 50):
+                       vcs_repo_id: str | None = None, limit: int = 50):
     """Alert delivery log (viewer+, org scope). Newest first."""
     require_org_scope(request)
     limit = max(1, min(limit, 200))
@@ -1186,6 +1584,11 @@ def list_notifications(request: Request, schedule_id: str | None = None,
             "SELECT * FROM notifications WHERE org_id=? AND schedule_id=?"
             " ORDER BY id DESC LIMIT ?",
             (request.state.org_id, schedule_id, limit)).fetchall()
+    elif vcs_repo_id:
+        rows = db.execute(
+            "SELECT * FROM notifications WHERE org_id=? AND vcs_repo_id=?"
+            " ORDER BY id DESC LIMIT ?",
+            (request.state.org_id, vcs_repo_id, limit)).fetchall()
     else:
         rows = db.execute(
             "SELECT * FROM notifications WHERE org_id=?"
