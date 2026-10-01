@@ -116,7 +116,7 @@ from sink_audit import (  # noqa: E402
     discover_sinks,
     enabled as sink_audit_enabled,
 )
-from ai_layer import LLMClient  # noqa: E402
+from groq_provider import make_llm_client, sanitize_text  # noqa: E402
 from taintflow import extract_taint_path  # noqa: E402
 from fix_suggestions import (  # noqa: E402
     extract_fix_context,
@@ -2028,10 +2028,15 @@ def fix_suggestion(request: Request, finding_id: int):
             f"Monthly AI-review quota exceeded ({used}/{quota} used; "
             "fix generation costs 2 units). Upgrade your plan to continue.",
         )
-    client = LLMClient()
+    client = make_llm_client()
     if not client.configured:
         db.close()
-        raise HTTPException(503, "AI provider not configured")
+        raise HTTPException(
+            503,
+            "مزود الذكاء الاصطناعي غير مُعد على هذا السيرفر — "
+            "فعّل BRAIMSEC_GROQ_API_KEY (مفتاح مجاني من console.groq.com) "
+            "وقت النشر لاستخدام اقتراحات الإصلاح.",
+        )
     func_src, imports_src = extract_fix_context(
         finding.get("file") or "", finding.get("line") or 0)
     t0 = time.monotonic()
@@ -2043,6 +2048,12 @@ def fix_suggestion(request: Request, finding_id: int):
     wall_ms = int((time.monotonic() - t0) * 1000)
     checks = validate_fix(finding.get("file") or "",
                           gen["fix_original"], gen["fix_patched"])
+    # Backend hygiene on the stored prose (anchoring above used the raw
+    # model output). The dashboard HTML-escapes on render; this is the
+    # defense-in-depth half.
+    gen["fix_explanation"] = sanitize_text(gen.get("fix_explanation", ""),
+                                           2000)
+    gen["fix_caveats"] = sanitize_text(gen.get("fix_caveats", ""), 2000)
     generated_at = now()
     db.execute(
         """UPDATE findings SET fix_diff=?, fix_explanation=?, fix_confidence=?,
