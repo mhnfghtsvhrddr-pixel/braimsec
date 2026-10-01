@@ -7,3 +7,4 @@ redis
 fpdf2
 arabic_reshaper
 python-bidi
+cryptography
