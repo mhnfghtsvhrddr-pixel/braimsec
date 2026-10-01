@@ -228,6 +228,7 @@
 
 <nav>
   <button id="nav-scans" class="active" onclick="showView('scans')">📋 الفحوصات</button>
+  <button id="nav-trends" onclick="showView('trends')">📈 التطور</button>
   <button id="nav-sched" onclick="showView('sched')">⏰ الجدولة</button>
   <button id="nav-vcs" onclick="showView('vcs')">🔗 المستودعات</button>
   <button id="nav-billing" onclick="showView('billing')">💳 الاشتراك والاستخدام</button>
@@ -279,6 +280,22 @@
   </section>
 
   <!-- الجدولة والتنبيهات -->
+  <!-- تطور الثغرات عبر الزمن -->
+  <section id="view-trends" hidden>
+    <div class="toolbar">
+      <h2>📈 تطور الثغرات عبر الزمن</h2>
+      <div class="filters" id="trend-filters" style="margin:0">
+        <select id="trend-project" onchange="setTrendProject(this.value)" style="margin-inline-end:0.5rem"></select>
+        <button class="btn-ghost" data-days="30" onclick="setTrendDays(30)">آخر 30 يوم</button>
+        <button class="btn-ghost" data-days="90" onclick="setTrendDays(90)">آخر 90 يوم</button>
+        <button class="btn-ghost" data-days="0" onclick="setTrendDays(0)">الكل</button>
+      </div>
+    </div>
+    <div class="cards" id="trend-cards"></div>
+    <div id="trend-chart-wrap" dir="ltr"></div>
+    <div id="trend-table"></div>
+  </section>
+
   <section id="view-sched" hidden>
     <div class="toolbar">
       <h2>⏰ الفحوصات المجدولة</h2>
@@ -511,17 +528,19 @@ const myPrefix = () => (localStorage.getItem("braimsec_key") || "").slice(0, 8);
 
 /* ---------- التنقل ---------- */
 function showView(name) {
-  ["scans", "sched", "vcs", "billing", "keys"].forEach(v => {
+  ["scans", "trends", "sched", "vcs", "billing", "keys"].forEach(v => {
     document.getElementById("nav-" + v).classList.toggle("active", v === name);
   });
   document.getElementById("view-scans").hidden = name !== "scans";
   document.getElementById("view-detail").hidden = true;
+  document.getElementById("view-trends").hidden = name !== "trends";
   document.getElementById("view-sched").hidden = name !== "sched";
   document.getElementById("view-vcs").hidden = name !== "vcs";
   document.getElementById("view-billing").hidden = name !== "billing";
   document.getElementById("view-keys").hidden = name !== "keys";
   clearInterval(pollTimer);
   if (name === "scans") loadScans();
+  if (name === "trends") loadTrends();
   if (name === "sched") { loadSchedules(); loadAlertEmails(); loadNotifications(); }
   if (name === "vcs") loadVcsRepos();
   if (name === "billing") loadBilling();
@@ -884,6 +903,111 @@ async function revokeKey(id) {
     await api(`/keys/${id}`, { method: "DELETE" });
     loadKeys();
   } catch (e) { alert("تعذر الإلغاء: " + e.message); }
+}
+
+/* ---------- تطور الثغرات عبر الزمن ---------- */
+let trendDays = 90, trendProject = "";
+const TREND_SEVS = ["note", "warning", "error"];
+const TREND_COLOR = { error: "#f85149", warning: "#d29922", note: "#58a6ff" };
+const TREND_AR = { error: "حرجة", warning: "متوسطة", note: "منخفضة" };
+
+async function loadTrends() {
+  try {
+    const projs = await api("/projects").catch(() => []);
+    const sel = document.getElementById("trend-project");
+    const keep = projs.some(p => p.id === trendProject) ? trendProject : "";
+    trendProject = keep;
+    sel.innerHTML = `<option value="">كل المشاريع</option>` +
+      projs.map(p => `<option value="${esc(p.id)}"${p.id === keep ? " selected" : ""}>${esc(p.name)}</option>`).join("");
+    let q = `/trends?days=${trendDays}`;
+    if (trendProject) q += `&project_id=${encodeURIComponent(trendProject)}`;
+    const data = await api(q);
+    renderTrendCards(data.summary);
+    renderTrendChart(data.points);
+    renderTrendTable(data.points);
+    document.querySelectorAll("#trend-filters [data-days]").forEach(b => {
+      b.style.borderColor = (+b.dataset.days === trendDays) ? "var(--accent)" : "";
+    });
+  } catch (e) { showErr("trend-table", e); }
+}
+function setTrendDays(d) { trendDays = d; loadTrends(); }
+function setTrendProject(v) { trendProject = v; loadTrends(); }
+
+function renderTrendCards(s) {
+  const T = {
+    improving: ["📉 يتحسن", "var(--green)"],
+    worsening: ["📈 يتدهور", "var(--red)"],
+    stable: ["➖ مستقر", "var(--accent)"],
+    insufficient: ["— بيانات غير كافية", "var(--muted)"]
+  }[s.trend] || ["—", "var(--muted)"];
+  const d = s.delta > 0 ? "+" + s.delta : "" + s.delta;
+  document.getElementById("trend-cards").innerHTML = `
+    <div class="card"><div class="num" style="color:${T[1]};font-size:1.4rem">${T[0]}</div><div class="lbl">الاتجاه العام</div></div>
+    <div class="card"><div class="num">${s.latest_total}</div><div class="lbl">نتائج أحدث فحص</div></div>
+    <div class="card"><div class="num">${s.previous_total ?? "—"}</div><div class="lbl">الفحص السابق</div></div>
+    <div class="card"><div class="num">${d}</div><div class="lbl">الفرق (الأحدث − السابق)</div></div>
+    <div class="card"><div class="num">${s.scans}</div><div class="lbl">فحوصات مكتملة</div></div>`;
+}
+
+function renderTrendChart(points) {
+  const wrap = document.getElementById("trend-chart-wrap");
+  if (!points.length) {
+    wrap.innerHTML = `<p style="color:var(--muted);margin:1rem 0">لا توجد فحوصات مكتملة في هذه الفترة بعد.</p>`;
+    return;
+  }
+  const W = 920, H = 280, PL = 46, PR = 14, PT = 14, PB = 32;
+  const maxV = Math.max(1, ...points.map(p => p.total));
+  const n = points.length;
+  const X = i => n === 1 ? W / 2 : PL + i * (W - PL - PR) / (n - 1);
+  const Y = v => PT + (H - PT - PB) * (1 - v / maxV);
+  let svg = "";
+  const steps = 4;
+  for (let g = 0; g <= steps; g++) {
+    const v = Math.round(maxV * g / steps), y = Y(v);
+    svg += `<line x1="${PL}" y1="${y}" x2="${W - PR}" y2="${y}" stroke="#2d3748" stroke-width="1"/>` +
+           `<text x="${PL - 6}" y="${y + 4}" fill="#8b949e" font-size="11" text-anchor="end">${v}</text>`;
+  }
+  let cum = points.map(() => 0);
+  for (const s of TREND_SEVS) {
+    const top = points.map((p, i) => cum[i] + (p.by_severity[s] || 0));
+    const dTop = top.map((v, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+    const dBot = cum.map((v, i) => `L${X(n - 1 - i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+    svg += `<path d="${dTop} ${dBot} Z" fill="${TREND_COLOR[s]}" fill-opacity="0.55" stroke="none"/>`;
+    cum = top;
+  }
+  const line = points.map((p, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(p.total).toFixed(1)}`).join(" ");
+  svg += `<path d="${line}" fill="none" stroke="#22d3ee" stroke-width="2"/>`;
+  points.forEach((p, i) => {
+    svg += `<circle cx="${X(i).toFixed(1)}" cy="${Y(p.total).toFixed(1)}" r="3.5" fill="#22d3ee"/>`;
+  });
+  const every = Math.max(1, Math.ceil(n / 8));
+  points.forEach((p, i) => {
+    if (i % every === 0 || i === n - 1)
+      svg += `<text x="${X(i).toFixed(1)}" y="${H - 10}" fill="#8b949e" font-size="11" text-anchor="middle">${esc(fmtD(p.created_at))}</text>`;
+  });
+  const legend = TREND_SEVS.slice().reverse().map(s =>
+    `<span style="margin-inline-start:1rem"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${TREND_COLOR[s]}"></span> ${TREND_AR[s]}</span>`).join("") +
+    `<span style="margin-inline-start:1rem"><span style="display:inline-block;width:14px;height:2px;background:#22d3ee;vertical-align:middle"></span> الإجمالي</span>`;
+  wrap.innerHTML = `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:1rem;margin-bottom:1.5rem">` +
+    `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">${svg}</svg>` +
+    `<div style="color:var(--muted);font-size:0.85rem;margin-top:0.5rem">${legend}</div></div>`;
+}
+
+function renderTrendTable(points) {
+  const el = document.getElementById("trend-table");
+  if (!points.length) { el.innerHTML = ""; return; }
+  const rows = points.slice().reverse().map(p => `<tr>
+      <td>${esc(fmtDT(p.created_at))}</td><td>${esc(p.target_name)}</td>
+      <td><b>${p.total}</b></td>
+      <td style="color:var(--red)">${p.by_severity.error || 0}</td>
+      <td style="color:var(--amber)">${p.by_severity.warning || 0}</td>
+      <td style="color:var(--blue)">${p.by_severity.note || 0}</td>
+      <td style="color:var(--amber)">+${p.new}</td>
+      <td style="color:var(--green)">−${p.fixed}</td>
+    </tr>`).join("");
+  el.innerHTML = `<table><thead><tr><th>التاريخ</th><th>الهدف</th><th>الإجمالي</th>` +
+    `<th>حرجة</th><th>متوسطة</th><th>منخفضة</th><th>جديدة</th><th>مُصلحة</th></tr></thead>` +
+    `<tbody>${rows}</tbody></table>`;
 }
 
 /* ---------- الجدولة والتنبيهات ---------- */
