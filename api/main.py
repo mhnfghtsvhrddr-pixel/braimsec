@@ -913,6 +913,37 @@ def get_audit_log(request: Request, limit: int = 50, offset: int = 0,
                        action=action)
 
 
+@app.get("/api/audit-log/export.csv")
+@limiter.limit("10/minute")
+def export_audit_log_csv(request: Request, action: str | None = None):
+    """CSV export of the org's audit trail (compliance handoff).
+
+    Newest-first, up to 5,000 rows per export (use archives for deeper
+    history). Same visibility as GET /api/audit-log: org-scoped, viewers
+    may read; project-scoped keys are rejected. ``detail`` is embedded as
+    a JSON string in its column (RFC 4180 quoting). Downloads as
+    ``braimsec-audit-<org_id>.csv``.
+    """
+    require_org_scope(request)
+    events = read_events(request.state.org_id, limit=5000, action=action)
+    cols = ("id", "created_at", "actor", "action", "detail")
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")
+    w.writerow(cols)
+    for e in events:
+        w.writerow([e.get("id", ""), e.get("created_at", ""),
+                    e.get("actor", ""), e.get("action", ""),
+                    json.dumps(e.get("detail") or {},
+                               ensure_ascii=False, sort_keys=True)])
+    body = buf.getvalue().encode("utf-8")
+    return Response(
+        content=body, media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="braimsec-audit-'
+                 f'{request.state.org_id}.csv"'})
+
+
+
 @app.post("/api/audit-log/archive")
 @limiter.limit("10/minute")
 async def archive_audit_log(request: Request):
