@@ -256,6 +256,7 @@
       <h2 id="detail-title"></h2>
       <div class="detail-actions">
         <button class="btn-ghost" id="pdf-btn" onclick="downloadPdf()" hidden>📄 تحميل تقرير PDF</button>
+        <button class="btn-ghost" id="sarif-btn" onclick="downloadSarif()" hidden>🧾 تحميل SARIF</button>
         <button class="btn-ghost" onclick="showScans()">→ رجوع للقائمة</button>
       </div>
     </div>
@@ -625,6 +626,7 @@ async function refreshDetail() {
   document.getElementById("detail-title").textContent = "📁 " + s.target_name;
   document.getElementById("detail-status").innerHTML = statusLine(s);
   document.getElementById("pdf-btn").hidden = s.status !== "done";
+  document.getElementById("sarif-btn").hidden = s.status !== "done";
   const sum = s.severity_summary || {};
   const total = s.total_findings || 0;
   document.getElementById("severity-cards").innerHTML = `
@@ -759,6 +761,24 @@ async function downloadPdf() {
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   } catch (e) { alert("تعذر تحميل التقرير: " + e.message); }
+  btn.disabled = false;
+}
+
+async function downloadSarif() {
+  const btn = document.getElementById("sarif-btn");
+  btn.disabled = true;
+  try {
+    const r = await fetch(API + `/scans/${currentScan}/sarif`, {
+      headers: { "X-API-Key": localStorage.getItem("braimsec_key") || "" }
+    });
+    if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || ("خطأ " + r.status)); }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `braimsec-${currentScan}.sarif`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch (e) { alert("تعذر تحميل SARIF: " + e.message); }
   btn.disabled = false;
 }
 
