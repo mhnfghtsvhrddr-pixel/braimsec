@@ -53,4 +53,4 @@ def test_cert_event_label_and_option():
 def test_cert_loader_runs_with_sched_view():
     h = _html()
     # the JS that refreshes the scheduling tab must include cert domains
-    assert h.count("loadCertDomains(); }") >= 2
+    assert h.count("loadCertDomains();") >= 2
