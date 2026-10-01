@@ -2,5 +2,10 @@
   "scanner/test_incremental.py": true,
   "api/test_billing.py": true,
   "api/test_subscriptions.py": true,
-  "api/test_vcs.py::test_register_repo_validation[payload6-missing webhook]": true
+  "api/test_vcs.py::test_register_repo_validation[payload6-missing webhook]": true,
+  "reports/test_sarif_export.py::test_validate_rejects_malformed": true,
+  "reports/test_sarif_export.py::test_endpoint_ok_headers_and_body": true,
+  "reports/test_sarif_export.py::test_endpoint_deterministic": true,
+  "reports/test_sarif_export.py::test_endpoint_viewer_may_read": true,
+  "reports/test_sarif_export.py::test_endpoint_401_and_404s": true
 }
