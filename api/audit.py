@@ -64,6 +64,8 @@ ACTIONS = frozenset({
     "telegram_chat.removed",
     "slack_webhook.added",
     "slack_webhook.removed",
+    "teams_webhook.added",
+    "teams_webhook.removed",
 })
 
 # Archival never touches recent history: the window must be at least
