@@ -155,7 +155,7 @@ def test_scan_engine_passes_custom_config(monkeypatch):
     assert "--config" in cmd
     assert RULES in cmd
     assert scan_engine.BRAIMSEC_GHA_RULES in cmd
-    assert cmd.count("--config") == 3  # auto + taint pack + gha pack
+    assert cmd.count("--config") == 4  # auto + taint + gha + inject packs
 
 
 def test_scan_engine_taint_rules_can_be_disabled(monkeypatch):
@@ -174,7 +174,7 @@ def test_scan_engine_taint_rules_can_be_disabled(monkeypatch):
         with monkeypatch.context() as m:
             m.setattr("json.load", lambda f: {"results": []})
             scan_engine.run_semgrep(d)
-    assert seen["cmd"].count("--config") == 2  # auto + gha pack
+    assert seen["cmd"].count("--config") == 3  # auto + gha + inject packs
 
 
 def test_scan_engine_gha_rules_can_be_disabled(monkeypatch):
@@ -193,7 +193,7 @@ def test_scan_engine_gha_rules_can_be_disabled(monkeypatch):
         with monkeypatch.context() as m:
             m.setattr("json.load", lambda f: {"results": []})
             scan_engine.run_semgrep(d)
-    assert seen["cmd"].count("--config") == 2  # auto + taint pack
+    assert seen["cmd"].count("--config") == 3  # auto + taint + inject packs
 
 
 # ---------------------------------------------------------------------------
