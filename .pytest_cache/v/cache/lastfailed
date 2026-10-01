@@ -5,5 +5,13 @@
   "scanner/test_prbot.py::test_e2e_new_vuln_commented_moved_legacy_not": true,
   "scanner/test_prbot.py::test_e2e_no_ai_means_no_taint_comments": true,
   "scanner/test_sca_diff.py::test_run_bot_sca_comment_e2e": true,
-  "scanner/test_sca_diff.py::test_run_bot_no_sca_flag_disables": true
+  "scanner/test_sca_diff.py::test_run_bot_no_sca_flag_disables": true,
+  "api/test_schedules.py::test_crud_flow": true,
+  "api/test_schedules.py::test_rbac_and_org_isolation": true,
+  "api/test_schedules.py::test_manual_run_disabled": true,
+  "api/test_schedules.py::test_alert_respects_threshold": true,
+  "api/test_schedules.py::test_first_run_is_silent_baseline": true,
+  "api/test_schedules.py::test_failed_scan_alerts": true,
+  "api/test_schedules.py::test_moved_finding_is_not_new": true,
+  "api/test_schedules.py::test_notifications_log_endpoint": true
 }
