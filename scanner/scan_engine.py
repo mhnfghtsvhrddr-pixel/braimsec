@@ -76,27 +76,45 @@ def _run(cmd, timeout=600):
         raise EngineError(f"timed out: {' '.join(cmd)}", exit_code=3)
 
 
-def run_semgrep(target, scope=None):
+def run_semgrep(target, scope=None, base_configs=None):
     """Run Semgrep and return normalized findings.
 
     scope: optional list of absolute file paths to scan instead of the whole
     target directory (incremental scans). None = full target.
+
+    base_configs: configs replacing the default ``auto`` registry lookup
+    (which needs the network). Used by the sandboxed scan runner, whose
+    image vendors a pinned ruleset snapshot at build time. None = ["auto"].
     """
+    if scope is not None and len(scope) == 0:
+        return []  # incremental scan with no changed files: nothing to do
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
         out_path = f.name
-    cmd = [SEMGREP_BIN, "--config", "auto"]
+    cmd = [SEMGREP_BIN]
+    for cfg in (base_configs if base_configs is not None else ["auto"]):
+        cmd += ["--config", cfg]
     if BRAIMSEC_TAINT_RULES and os.path.isfile(BRAIMSEC_TAINT_RULES):
         cmd += ["--config", BRAIMSEC_TAINT_RULES]
     if BRAIMSEC_GHA_RULES and os.path.isfile(BRAIMSEC_GHA_RULES):
         cmd += ["--config", BRAIMSEC_GHA_RULES]
-    targets = list(scope) if scope else [target]
+    targets = list(scope) if scope is not None else [target]
     cmd += ["--json", "-o", out_path] + targets
     try:
-        _run(cmd)
-        with open(out_path) as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
-        data = {}
+        proc = _run(cmd)
+        try:
+            with open(out_path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            data = {}
+        if proc.returncode != 0 and not data.get("results"):
+            # Fail closed: a crashed semgrep must never look like a clean
+            # scan. (A non-zero exit WITH parseable findings is still
+            # honored; only an engine that died without results raises.)
+            raise EngineError(
+                f"semgrep exited {proc.returncode} without results: "
+                f"{(proc.stderr or '')[-500:]}",
+                exit_code=4,
+            )
     finally:
         if os.path.exists(out_path):
             os.unlink(out_path)
@@ -121,7 +139,9 @@ def run_gitleaks(target, scope=None):
     scope: optional list of absolute file paths to scan instead of the whole
     target directory (incremental scans). None = full target.
     """
-    targets = list(scope) if scope else [target]
+    if scope is not None and len(scope) == 0:
+        return []  # incremental scan with no changed files: nothing to do
+    targets = list(scope) if scope is not None else [target]
     findings = []
     for t in targets:
         findings.extend(_run_gitleaks_one(t))
