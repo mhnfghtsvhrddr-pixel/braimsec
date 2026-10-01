@@ -23,6 +23,10 @@ After a scheduled scan reaches a terminal state, the worker calls
 
 Alerts are delivered with :func:`send_alert` (SSRF-guarded, 3 attempts with
 backoff) and every outcome is recorded in the ``notifications`` table.
+Email is the twin channel: :func:`email_alerts.dispatch_email_alerts`
+sends to the org's registered addresses on the *same* trigger (operator's
+own SMTP via ``BRAIMSEC_SMTP_*`` env vars; unconfigured SMTP is recorded
+as ``skipped``, never silent).
 
 The periodic driver is :func:`run_scheduler_once`, invoked every minute by
 Celery beat (``braimsec.check_schedules`` in ``tasks.py``). Due schedules
@@ -317,6 +321,31 @@ def run_schedule_now(schedule_id: str) -> str:
 # Post-scan: diff against the previous scheduled scan, alert on new findings
 # ---------------------------------------------------------------------------
 
+def _email_row(new_findings: list[dict]) -> list[dict]:
+    """Slim finding dicts for the email body builder."""
+    return [{"severity": f["severity"], "rule_id": f["rule_id"],
+             "file": f["file"], "line": f["line"],
+             "message": f["message"]} for f in new_findings]
+
+
+def _send_email_alerts(db, *, org_id: str, schedule_id: str | None,
+                       vcs_repo_id: str | None, scan_id: str, event: str,
+                       severity: str, new_count: int, heading: str,
+                       subheading: str, findings: list[dict]) -> dict:
+    """Email twin of a webhook alert (deferred import keeps the worker's
+    import graph light). Never raises: alerting must never break scans."""
+    try:
+        from email_alerts import dispatch_email_alerts  # noqa: E402
+        return dispatch_email_alerts(
+            db, org_id=org_id, schedule_id=schedule_id,
+            vcs_repo_id=vcs_repo_id, scan_id=scan_id, event=event,
+            severity=severity, new_count=new_count, heading=heading,
+            subheading=subheading, findings=findings)
+    except Exception:  # noqa: BLE001 - best-effort by design
+        log.exception("email alert dispatch crashed for %s", scan_id)
+        return {"emailed": False, "reason": "dispatch crashed"}
+
+
 def _scan_findings(db, scan_id: str) -> list[dict]:
     return [dict(r) for r in db.execute(
         "SELECT tool, rule_id, severity, message, file, line "
@@ -382,20 +411,34 @@ def evaluate_schedule_alerts(scan_id: str) -> dict:
         if not new_findings:
             return {"alerted": False, "reason": "no new findings >= threshold"}
         payload = build_alert_payload(sched, scan, new_findings)
-        ok, attempts, code, err = send_alert(sched["webhook_url"], payload)
-        db.execute(
-            "INSERT INTO notifications (org_id, schedule_id, scan_id, event,"
-            " severity, new_count, webhook_url, status, attempts,"
-            " response_code, error, payload, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (sched["org_id"], sched["id"], scan_id, "schedule.alert",
-             payload["highest_severity"], len(new_findings),
-             sched["webhook_url"], "sent" if ok else "failed", attempts,
-             code, err, json.dumps(payload, ensure_ascii=False),
-             _now_iso()))
-        db.commit()
-        return {"alerted": ok, "new_count": len(new_findings),
-                "attempts": attempts, "error": err}
+        webhook_url = sched["webhook_url"] or ""
+        email_out = _send_email_alerts(
+            db, org_id=sched["org_id"], schedule_id=sched["id"],
+            vcs_repo_id=None, scan_id=scan_id, event="schedule.alert",
+            severity=payload["highest_severity"],
+            new_count=len(new_findings),
+            heading=f"فحص مجدول: {sched['name']}",
+            subheading=f"الهدف: {scan['target_name']}",
+            findings=_email_row(new_findings))
+        if webhook_url:
+            ok, attempts, code, err = send_alert(webhook_url, payload)
+            db.execute(
+                "INSERT INTO notifications (org_id, schedule_id, vcs_repo_id,"
+                " scan_id, event, severity, new_count, webhook_url, channel,"
+                " status, attempts, response_code, error, payload, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (sched["org_id"], sched["id"], None, scan_id, "schedule.alert",
+                 payload["highest_severity"], len(new_findings),
+                 webhook_url, "webhook", "sent" if ok else "failed", attempts,
+                 code, err, json.dumps(payload, ensure_ascii=False),
+                 _now_iso()))
+            db.commit()
+        else:
+            # Email-only org: no webhook configured, nothing to send/record.
+            ok, attempts, err = False, 0, None
+        emailed = bool(email_out.get("emailed"))
+        return {"alerted": bool(ok) or emailed, "new_count": len(new_findings),
+                "attempts": attempts, "error": err, "email": email_out}
     finally:
         db.close()
 
@@ -414,15 +457,29 @@ def _alert_failure(db, sched: dict, scan: dict) -> dict:
         "error": (scan["error"] or "")[:500],
     }
     payload["content"] = payload["text"]
-    ok, attempts, code, err = send_alert(sched["webhook_url"], payload)
-    db.execute(
-        "INSERT INTO notifications (org_id, schedule_id, scan_id, event,"
-        " severity, new_count, webhook_url, status, attempts,"
-        " response_code, error, payload, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (sched["org_id"], sched["id"], scan["id"], "schedule.failed",
-         "error", 0, sched["webhook_url"], "sent" if ok else "failed",
-         attempts, code, err, json.dumps(payload, ensure_ascii=False),
-         _now_iso()))
-    db.commit()
-    return {"alerted": ok, "event": "schedule.failed", "error": err}
+    webhook_url = sched["webhook_url"] or ""
+    email_out = _send_email_alerts(
+        db, org_id=sched["org_id"], schedule_id=sched["id"],
+        vcs_repo_id=None, scan_id=scan["id"], event="schedule.failed",
+        severity="error", new_count=0,
+        heading=f"فحص مجدول: {sched['name']}",
+        subheading=(f"الهدف: {scan['target_name']} — "
+                    f"{(scan['error'] or 'unknown error')[:200]}"),
+        findings=[])
+    if webhook_url:
+        ok, attempts, code, err = send_alert(webhook_url, payload)
+        db.execute(
+            "INSERT INTO notifications (org_id, schedule_id, vcs_repo_id,"
+            " scan_id, event, severity, new_count, webhook_url, channel,"
+            " status, attempts, response_code, error, payload, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sched["org_id"], sched["id"], None, scan["id"], "schedule.failed",
+             "error", 0, webhook_url, "webhook", "sent" if ok else "failed",
+             attempts, code, err, json.dumps(payload, ensure_ascii=False),
+             _now_iso()))
+        db.commit()
+    else:
+        ok, err = False, None
+    emailed = bool(email_out.get("emailed"))
+    return {"alerted": bool(ok) or emailed, "event": "schedule.failed",
+            "error": err, "email": email_out}
