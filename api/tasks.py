@@ -61,6 +61,7 @@ def _audit_scan_terminal(db, scan_id: str, action: str, detail: dict):
     except Exception:  # noqa: BLE001 - audit must not break scan completion
         pass
 from scan_engine import run_gitleaks, run_semgrep, run_sca  # noqa: E402
+from docker_runner import run_scan_isolated, sandbox_mode  # noqa: E402
 from ai_layer import LLMClient, analyze_finding, read_snippet  # noqa: E402
 from sink_audit import (  # noqa: E402
     analyze_sink,
@@ -248,8 +249,14 @@ def _run_incremental(db, scan_id, org_id, target_dir, baseline_scan_id):
     # Semgrep only scans code; gitleaks re-checks every changed file
     # (a changed manifest could theoretically gain a secret).
     code_scope = [p for p in scope_abs if p.endswith(SCANABLE_EXTS)]
-    fresh = run_semgrep(target_dir, code_scope) \
-        + run_gitleaks(target_dir, scope_abs)
+    if sandbox_mode() == "docker":
+        # One sandboxed run over the union scope; SCA stays on the host
+        # (it needs the OSV network). run_scan_isolated returns
+        # host-absolute paths, same as the local engines.
+        fresh = run_scan_isolated(target_dir, scope_abs)
+    else:
+        fresh = run_semgrep(target_dir, code_scope) \
+            + run_gitleaks(target_dir, scope_abs)
     if plan["sca_needed"]:
         fresh += run_sca(target_dir)
     # else: manifests unchanged → SCA skipped. A periodic full SCA is still
@@ -289,7 +296,18 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
             findings, incremental_of = _run_incremental(
                 db, scan_id, org_id, target_dir, baseline_scan_id)
         else:
-            findings = run_semgrep(target_dir) + run_gitleaks(target_dir) + run_sca(target_dir)
+            if sandbox_mode() == "docker":
+                # semgrep+gitleaks run isolated in the sandbox container;
+                # SCA stays on the host (manifest parsing + OSV lookups
+                # need the network and never execute target code).
+                # A ContainerError fails the scan loudly: docker mode must
+                # never silently degrade to an un-isolated scan.
+                findings = (run_scan_isolated(target_dir)
+                            + run_sca(target_dir))
+            else:
+                findings = (run_semgrep(target_dir)
+                            + run_gitleaks(target_dir)
+                            + run_sca(target_dir))
         for f in findings:
             db.execute(
                 """INSERT INTO findings
