@@ -1,0 +1,117 @@
+{
+  "activationEvents": [
+    "onCommand:braimsec.scanWorkspace",
+    "onCommand:braimsec.scanFile",
+    "onCommand:braimsec.setApiKey",
+    "onCommand:braimsec.setServerUrl",
+    "onView:braimsec.findings"
+  ],
+  "categories": [
+    "Linters",
+    "Other"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "braimsec.scanWorkspace",
+        "title": "BraimSec: Scan Workspace"
+      },
+      {
+        "command": "braimsec.scanFile",
+        "title": "BraimSec: Scan Current File"
+      },
+      {
+        "command": "braimsec.setApiKey",
+        "title": "BraimSec: Set API Key"
+      },
+      {
+        "command": "braimsec.setServerUrl",
+        "title": "BraimSec: Set Server URL"
+      },
+      {
+        "command": "braimsec.openFinding",
+        "title": "BraimSec: Open Finding"
+      },
+      {
+        "command": "braimsec.clearResults",
+        "title": "BraimSec: Clear Results"
+      }
+    ],
+    "configuration": {
+      "properties": {
+        "braimsec.pollIntervalMs": {
+          "default": 3000,
+          "description": "How often (ms) to poll the server while a scan is running.",
+          "order": 3,
+          "type": "number"
+        },
+        "braimsec.projectId": {
+          "default": "",
+          "description": "Optional project ID to file scans under.",
+          "order": 2,
+          "type": "string"
+        },
+        "braimsec.serverUrl": {
+          "default": "",
+          "description": "URL of your BraimSec server, e.g. https://api.braimsec.world (no trailing slash).",
+          "order": 1,
+          "type": "string"
+        }
+      },
+      "title": "BraimSec"
+    },
+    "views": {
+      "braimsec": [
+        {
+          "id": "braimsec.findings",
+          "name": "Scan Findings"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "icon": "images/shield.png",
+          "id": "braimsec",
+          "title": "BraimSec"
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "archiver": "^7.0.1"
+  },
+  "description": "Scan your code with the BraimSec security engine: SAST, secrets and IaC findings right inside VS Code.",
+  "devDependencies": {
+    "@types/archiver": "^6.0.2",
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.5.4"
+  },
+  "displayName": "BraimSec Scanner",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "icon": "images/shield.png",
+  "keywords": [
+    "security",
+    "sast",
+    "scanner",
+    "secrets"
+  ],
+  "license": "MIT",
+  "main": "./out/extension.js",
+  "name": "braimsec-scanner",
+  "publisher": "braim",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mhnfghtsvhrddr-pixel/braimsec"
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "test": "npm run compile && node --test \"out/test/**/*.test.js\"",
+    "vscode:prepublish": "npm run compile",
+    "watch": "tsc -watch -p ./"
+  },
+  "version": "0.1.0"
+}
