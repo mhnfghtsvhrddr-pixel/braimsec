@@ -128,6 +128,8 @@
   .card.c-error .num { color: var(--red); }
   .card.c-warning .num { color: var(--amber); }
   .card.c-note .num { color: var(--blue); }
+  .card.c-fixed .num { color: var(--green); }
+  .card.c-persist .num { color: var(--muted); }
   .card.c-total .num { color: var(--accent); }
   .filters { display: flex; gap: 0.6rem; margin-bottom: 1rem; flex-wrap: wrap; }
   .filter-btn {
@@ -262,6 +264,15 @@
     </div>
     <div id="detail-status"></div>
     <div class="cards" id="severity-cards"></div>
+    <!-- مقارنة فحصين -->
+    <div class="scan-card" id="diff-card" style="flex-direction:column;align-items:stretch;margin-top:1rem" hidden>
+      <div class="row" style="align-items:center">
+        <h3 style="margin:0">⚖️ مقارنة مع فحص سابق</h3>
+        <select id="diff-against" class="sel-small" style="min-width:14rem"></select>
+        <button class="btn" onclick="runDiff()">قارن</button>
+      </div>
+      <div id="diff-result" style="margin-top:1rem"></div>
+    </div>
     <div class="filters" id="filters">
       <button class="filter-btn active" data-sev="" onclick="setFilter('')">الكل</button>
       <button class="filter-btn" data-sev="error" onclick="setFilter('error')">🔴 حرجة</button>
@@ -598,6 +609,8 @@ function showErr(elId, e) {
 
 async function openDetail(id) {
   currentScan = id; currentFilter = ""; currentTriage = ""; currentAssignee = "";
+  document.getElementById("diff-card").hidden = true;
+  document.getElementById("diff-result").innerHTML = "";
   document.querySelectorAll(".filter-btn").forEach(b => b.classList.toggle("active", b.dataset.sev === ""));
   document.querySelectorAll(".tfilter").forEach(b => b.classList.toggle("active", b.dataset.ts === ""));
   document.getElementById("view-scans").hidden = true;
@@ -635,6 +648,57 @@ async function refreshDetail() {
     <div class="card c-warning"><div class="num">${sum.warning || 0}</div><div class="lbl">🟡 متوسطة</div></div>
     <div class="card c-note"><div class="num">${sum.note || 0}</div><div class="lbl">🔵 منخفضة</div></div>`;
   await loadFindings();
+  await loadDiffOptions(s);
+}
+
+/* ---------- مقارنة فحصين ---------- */
+async function loadDiffOptions(s) {
+  const card = document.getElementById("diff-card");
+  const sel = document.getElementById("diff-against");
+  document.getElementById("diff-result").innerHTML = "";
+  if (s.status !== "done") { card.hidden = true; return; }
+  const scans = await api("/scans").catch(() => []);
+  const cands = scans.filter(x =>
+    x.id !== s.id && x.status === "done" &&
+    (x.target_name || "") === (s.target_name || "") &&
+    (x.project_id || null) === (s.project_id || null));
+  if (!cands.length) { card.hidden = true; return; }
+  card.hidden = false;
+  sel.innerHTML = cands.map(x =>
+    `<option value="${esc(x.id)}">${fmtDT(x.created_at)} — ${x.total_findings || 0} نتيجة</option>`).join("");
+}
+
+async function runDiff() {
+  const other = document.getElementById("diff-against").value;
+  const el = document.getElementById("diff-result");
+  el.innerHTML = `<p style="color:var(--muted)">⏳ جارٍ المقارنة…</p>`;
+  try {
+    const d = await api(`/scans/${encodeURIComponent(currentScan)}/diff?against=${encodeURIComponent(other)}`);
+    const sm = d.summary;
+    const pct = Math.round((sm.fix_rate || 0) * 100);
+    const row = f => `<tr>
+      <td><span class="sev sev-${f.severity}">${SEV_AR[f.severity] || esc(f.severity)}</span></td>
+      <td><code>${esc(f.tool)}/${esc(String(f.rule_id || "").split(".").pop())}</code></td>
+      <td><code dir="ltr">${esc(f.file ? String(f.file).split("/").pop() : "—")}${f.line != null ? ":" + f.line : ""}</code></td>
+      <td class="msg">${esc((f.message || "").slice(0, 140))}</td>
+    </tr>`;
+    const tbl = (title, list, empty) => list.length ? `
+      <h4 style="margin:1rem 0 0.4rem">${title} (${list.length})</h4>
+      <table><thead><tr><th>الخطورة</th><th>الأداة / القاعدة</th><th>الموقع</th><th>الوصف</th></tr></thead>
+      <tbody>${list.map(row).join("")}</tbody></table>` : `<p style="color:var(--muted)">${empty}</p>`;
+    el.innerHTML = `
+      <div class="cards">
+        <div class="card c-error"><div class="num">${sm.new}</div><div class="lbl">🔴 جديدة</div></div>
+        <div class="card c-fixed"><div class="num">${sm.fixed}</div><div class="lbl">🟢 مُصلحة</div></div>
+        <div class="card c-persist"><div class="num">${sm.persisting}</div><div class="lbl">⚪ مستمرة</div></div>
+        <div class="card"><div class="num">${pct}٪</div><div class="lbl">📉 نسبة الإصلاح</div></div>
+      </div>
+      ${tbl("🔴 نتائج جديدة", d.new, "لا نتائج جديدة 🎉")}
+      ${tbl("🟢 نتائج مُصلحة", d.fixed, "لا نتائج مُصلحة بعد")}
+      ${tbl("⚪ نتائج مستمرة", d.persisting, "لا نتائج مستمرة")}`;
+  } catch (e) {
+    el.innerHTML = `<div class="notice">⚠️ تعذّرت المقارنة: ${esc(e.message)}</div>`;
+  }
 }
 
 function verdictBadge(f) {
