@@ -206,6 +206,19 @@ CREATE TABLE IF NOT EXISTS alert_emails (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_emails_org_email
     ON alert_emails(org_id, email);
 CREATE INDEX IF NOT EXISTS idx_alert_emails_org ON alert_emails(org_id);
+-- Telegram alert chats: per-org chat ids for new-findings alerts.
+-- The list itself is the switch: no rows => no telegram alerts.
+-- (channel='telegram' rows in notifications carry the chat id in recipient.)
+CREATE TABLE IF NOT EXISTS telegram_chats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    chat_id TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_chats_org_chat
+    ON telegram_chats(org_id, chat_id);
+CREATE INDEX IF NOT EXISTS idx_telegram_chats_org ON telegram_chats(org_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_sched ON notifications(schedule_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_org ON notifications(org_id, created_at DESC);
 -- idx_notifications_vcs is created post-migration in init_db(): the column
