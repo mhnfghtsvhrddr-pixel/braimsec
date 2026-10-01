@@ -232,6 +232,7 @@
   <button id="nav-scans" class="active" onclick="showView('scans')">📋 الفحوصات</button>
   <button id="nav-trends" onclick="showView('trends')">📈 التطور</button>
   <button id="nav-sched" onclick="showView('sched')">⏰ الجدولة</button>
+  <button id="nav-reports" onclick="showView('reports')">📊 التقارير</button>
   <button id="nav-vcs" onclick="showView('vcs')">🔗 المستودعات</button>
   <button id="nav-billing" onclick="showView('billing')">💳 الاشتراك والاستخدام</button>
   <button id="nav-keys" onclick="showView('keys')">🔑 مفاتيح API</button>
@@ -330,6 +331,16 @@
     <div id="notif-wrap"></div>
   </section>
 
+  <!-- التقارير التنفيذية المجدولة: PDF يُرسل بالإيميل تلقائياً -->
+  <section id="view-reports" hidden>
+    <div class="toolbar">
+      <h2>📊 التقارير التنفيذية المجدولة</h2>
+      <button class="btn" onclick="openReportSchedModal()">+ جدولة تقرير</button>
+    </div>
+    <p style="color: var(--muted); font-size: 0.9rem; margin: 0 0 1rem;">تقرير PDF تنفيذي بالعربية يُولَّد تلقائياً ويُرسل مرفقاً إلى عناوين الإيميل المسجلة في تبويب الجدولة.</p>
+    <div id="repsched-wrap"></div>
+  </section>
+
   <!-- المستودعات: فحص تلقائي عند كل push -->
   <section id="view-vcs" hidden>
     <div class="toolbar">
@@ -375,6 +386,50 @@
     <div class="row" style="margin-top:1rem;display:flex;gap:0.5rem">
       <button class="btn" id="exec-dl-btn" onclick="downloadExecutive()">⬇ تحميل PDF</button>
       <button class="btn-ghost" onclick="document.getElementById('exec-back').hidden=true">إلغاء</button>
+    </div>
+  </div>
+</div>
+
+<!-- نافذة جدولة تقرير تنفيذي -->
+<div id="repsched-back" class="modal-back" hidden>
+  <div class="modal">
+    <h3 id="repsched-modal-title">📊 جدولة تقرير جديد</h3>
+    <div id="repsched-err" style="color:var(--red);font-size:0.85rem;margin-bottom:0.5rem"></div>
+    <label>الاسم</label>
+    <input type="text" id="repsched-name" placeholder="التقرير الأسبوعي للإدارة">
+    <label>التكرار</label>
+    <select id="repsched-freq" onchange="document.getElementById('repsched-weekday-wrap').style.display = this.value === 'weekly' ? 'block' : 'none'; document.getElementById('repsched-dom-wrap').style.display = this.value === 'monthly' ? 'block' : 'none'">
+      <option value="weekly">أسبوعي</option>
+      <option value="monthly">شهري</option>
+    </select>
+    <div id="repsched-weekday-wrap">
+      <label>اليوم</label>
+      <select id="repsched-weekday">
+        <option value="0">الإثنين</option><option value="1">الثلاثاء</option>
+        <option value="2">الأربعاء</option><option value="3">الخميس</option>
+        <option value="4">الجمعة</option><option value="5">السبت</option>
+        <option value="6">الأحد</option>
+      </select>
+    </div>
+    <div id="repsched-dom-wrap" style="display:none">
+      <label>يوم الشهر (1-28)</label>
+      <input type="number" id="repsched-dom" min="1" max="28" value="1" dir="ltr">
+    </div>
+    <label>الوقت</label>
+    <input type="time" id="repsched-time" value="08:00" dir="ltr">
+    <label>المنطقة الزمنية</label>
+    <input type="text" id="repsched-tz" value="UTC" dir="ltr" placeholder="Asia/Beirut">
+    <label>المشروع</label>
+    <select id="repsched-project"><option value="">كل المشاريع (المنظمة)</option></select>
+    <label>نافذة التقرير</label>
+    <select id="repsched-days">
+      <option value="30">آخر 30 يوم</option>
+      <option value="90" selected>آخر 90 يوم</option>
+      <option value="0">الكل</option>
+    </select>
+    <div class="row" style="margin-top:1rem;display:flex;gap:0.5rem">
+      <button class="btn" onclick="saveReportSchedule()">💾 حفظ</button>
+      <button class="btn-ghost" onclick="document.getElementById('repsched-back').hidden=true">إلغاء</button>
     </div>
   </div>
 </div>
@@ -563,13 +618,14 @@ const myPrefix = () => (localStorage.getItem("braimsec_key") || "").slice(0, 8);
 
 /* ---------- التنقل ---------- */
 function showView(name) {
-  ["scans", "trends", "sched", "vcs", "billing", "keys"].forEach(v => {
+  ["scans", "trends", "sched", "reports", "vcs", "billing", "keys"].forEach(v => {
     document.getElementById("nav-" + v).classList.toggle("active", v === name);
   });
   document.getElementById("view-scans").hidden = name !== "scans";
   document.getElementById("view-detail").hidden = true;
   document.getElementById("view-trends").hidden = name !== "trends";
   document.getElementById("view-sched").hidden = name !== "sched";
+  document.getElementById("view-reports").hidden = name !== "reports";
   document.getElementById("view-vcs").hidden = name !== "vcs";
   document.getElementById("view-billing").hidden = name !== "billing";
   document.getElementById("view-keys").hidden = name !== "keys";
@@ -577,6 +633,7 @@ function showView(name) {
   if (name === "scans") loadScans();
   if (name === "trends") loadTrends();
   if (name === "sched") { loadSchedules(); loadAlertEmails(); loadNotifications(); }
+  if (name === "reports") loadReportSchedules();
   if (name === "vcs") loadVcsRepos();
   if (name === "billing") loadBilling();
   if (name === "keys") loadKeys();
@@ -1450,6 +1507,131 @@ async function deleteSched(id) {
   try {
     await api(`/schedules/${id}`, { method: "DELETE" });
     loadSchedules(); loadNotifications();
+  } catch (e) { alert("تعذر الحذف: " + e.message); }
+}
+
+/* ---------- التقارير التنفيذية المجدولة ---------- */
+const RFREQ_AR = { weekly: "أسبوعي", monthly: "شهري" };
+let editingRepSched = null;
+
+async function loadReportSchedules() {
+  let rows;
+  try { rows = await api("/report-schedules"); }
+  catch (e) {
+    document.getElementById("repsched-wrap").innerHTML =
+      `<div class="empty"><p>تعذر التحميل: ${esc(e.message)}</p></div>`;
+    return;
+  }
+  const el = document.getElementById("repsched-wrap");
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty"><div class="big">📊</div><p>لا توجد جدولة تقارير بعد — أنشئ أول تقرير دوري!</p></div>`;
+    return;
+  }
+  el.innerHTML = rows.map(s => {
+    let cad = RFREQ_AR[s.frequency] || s.frequency;
+    if (s.frequency === "weekly" && s.weekday != null) cad += " (" + WD_AR[s.weekday] + ")";
+    if (s.frequency === "monthly" && s.day_of_month != null) cad += " (يوم " + s.day_of_month + ")";
+    const days = s.days === 0 ? "كل الفحوصات" : `آخر ${s.days} يوم`;
+    return `
+    <div class="scan-card">
+      <div>
+        <div class="name">📊 ${esc(s.name)}</div>
+        <div class="meta">${cad} — ${esc(s.run_time)} (${esc(s.timezone)}) — ${days}</div>
+        <div class="meta">التالي: ${fmtDT(s.next_run_at)}${s.last_run_at ? " — آخر إرسال: " + fmtDT(s.last_run_at) : ""}</div>
+        ${s.last_error ? `<div class="meta" style="color:var(--red)">⚠️ ${esc(s.last_error)}</div>` : ""}
+      </div>
+      <div class="left" style="flex-wrap: wrap; gap: 0.4rem;">
+        <span class="badge ${s.enabled ? "b-done" : "b-queued"}">${s.enabled ? "مفعّلة" : "موقوفة"}</span>
+        <button class="btn-ghost" onclick="runRepSchedNow('${s.id}')">▶ إرسال الآن</button>
+        <button class="btn-ghost" onclick="openReportSchedModal('${s.id}')">تعديل</button>
+        <button class="btn-ghost" onclick="toggleRepSched('${s.id}', ${s.enabled ? 0 : 1})">${s.enabled ? "إيقاف" : "تفعيل"}</button>
+        <button class="btn-ghost" onclick="deleteRepSched('${s.id}')">حذف</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function openReportSchedModal(id) {
+  editingRepSched = id || null;
+  document.getElementById("repsched-err").textContent = "";
+  document.getElementById("repsched-modal-title").textContent = id ? "✏️ تعديل جدولة التقرير" : "📊 جدولة تقرير جديد";
+  api("/projects").then(projs => {
+    document.getElementById("repsched-project").innerHTML =
+      `<option value="">كل المشاريع (المنظمة)</option>` +
+      projs.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+    if (id) {
+      api(`/report-schedules/${id}`).then(s => {
+        document.getElementById("repsched-name").value = s.name || "";
+        document.getElementById("repsched-freq").value = s.frequency || "weekly";
+        document.getElementById("repsched-weekday").value = s.weekday ?? 0;
+        document.getElementById("repsched-dom").value = s.day_of_month ?? 1;
+        document.getElementById("repsched-time").value = s.run_time || "08:00";
+        document.getElementById("repsched-tz").value = s.timezone || "UTC";
+        document.getElementById("repsched-project").value = s.project_id || "";
+        document.getElementById("repsched-days").value = String(s.days ?? 90);
+        document.getElementById("repsched-weekday-wrap").style.display = s.frequency === "weekly" ? "block" : "none";
+        document.getElementById("repsched-dom-wrap").style.display = s.frequency === "monthly" ? "block" : "none";
+        document.getElementById("repsched-back").hidden = false;
+      }).catch(e => alert("تعذر التحميل: " + e.message));
+    } else {
+      document.getElementById("repsched-name").value = "";
+      document.getElementById("repsched-freq").value = "weekly";
+      document.getElementById("repsched-weekday").value = 0;
+      document.getElementById("repsched-dom").value = 1;
+      document.getElementById("repsched-time").value = "08:00";
+      document.getElementById("repsched-tz").value = "UTC";
+      document.getElementById("repsched-project").value = "";
+      document.getElementById("repsched-days").value = "90";
+      document.getElementById("repsched-weekday-wrap").style.display = "block";
+      document.getElementById("repsched-dom-wrap").style.display = "none";
+      document.getElementById("repsched-back").hidden = false;
+    }
+  }).catch(e => alert("تعذر تحميل المشاريع: " + e.message));
+}
+
+async function saveReportSchedule() {
+  const err = document.getElementById("repsched-err");
+  err.textContent = "";
+  const freq = document.getElementById("repsched-freq").value;
+  const pid = document.getElementById("repsched-project").value;
+  const body = {
+    name: document.getElementById("repsched-name").value.trim(),
+    frequency: freq,
+    run_time: document.getElementById("repsched-time").value,
+    timezone: document.getElementById("repsched-tz").value.trim() || "UTC",
+    project_id: pid || null,
+    days: parseInt(document.getElementById("repsched-days").value, 10),
+  };
+  if (freq === "weekly") body.weekday = parseInt(document.getElementById("repsched-weekday").value, 10);
+  if (freq === "monthly") body.day_of_month = parseInt(document.getElementById("repsched-dom").value, 10);
+  try {
+    if (editingRepSched) await api(`/report-schedules/${editingRepSched}`, { method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+    else await api("/report-schedules", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+    document.getElementById("repsched-back").hidden = true;
+    loadReportSchedules();
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function toggleRepSched(id, enabled) {
+  try {
+    await api(`/report-schedules/${id}`, { method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ enabled: !!enabled }) });
+    loadReportSchedules();
+  } catch (e) { alert("تعذر التحديث: " + e.message); }
+}
+
+async function runRepSchedNow(id) {
+  try {
+    const r = await api(`/report-schedules/${id}/run`, { method: "POST" });
+    alert(r.delivered ? "أُرسل التقرير ✅" : "تعذر الإرسال: " + (r.reason || "؟"));
+    loadReportSchedules();
+  } catch (e) { alert("تعذر التشغيل: " + e.message); }
+}
+
+async function deleteRepSched(id) {
+  if (!confirm("حذف جدولة هذا التقرير وسجل إرسالاتها؟\n\nهل أنت متأكد؟")) return;
+  try {
+    await api(`/report-schedules/${id}`, { method: "DELETE" });
+    loadReportSchedules();
   } catch (e) { alert("تعذر الحذف: " + e.message); }
 }
 
