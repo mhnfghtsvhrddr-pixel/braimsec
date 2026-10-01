@@ -563,6 +563,9 @@ def list_scans(request: Request):
     return [dict(r) for r in rows]
 
 
+# ---------------------------------------------------------------------------
+
+
 @app.get("/api/scans/{scan_id}")
 def scan_status(request: Request, scan_id: str):
     db = get_db()
@@ -987,12 +990,12 @@ def _validate_schedule_body(body: dict, partial: bool = False) -> dict:
         out["alert_severity"] = sev
     if "webhook_url" in body or not partial:
         url = (body.get("webhook_url") or "").strip()
-        if not url:
-            raise HTTPException(400, "webhook_url: required")
-        try:
-            validate_webhook_url(url)
-        except ValueError as e:
-            raise HTTPException(400, f"webhook_url: {e}")
+        if url:
+            try:
+                validate_webhook_url(url)
+            except ValueError as e:
+                raise HTTPException(400, f"webhook_url: {e}")
+        # "" = webhook alerts disabled for this schedule (email-only).
         out["webhook_url"] = url
     if "enabled" in body:
         out["enabled"] = 1 if body["enabled"] else 0
@@ -1026,7 +1029,8 @@ async def create_schedule(request: Request):
     """Create a scheduled scan (member+, org scope).
 
     ``target_path`` must resolve inside the scan sandbox (same guard as
-    ``POST /api/scans``); ``webhook_url`` must pass the SSRF check.
+    ``POST /api/scans``); ``webhook_url`` is optional — when empty the
+    schedule alerts by email only (see ``/api/alert-emails``).
     """
     from scheduler import compute_next_run  # noqa: E402
     require_role(request, "member")
@@ -1227,12 +1231,12 @@ def _validate_vcs_body(body: dict) -> dict:
     if severity not in ("note", "warning", "error"):
         raise HTTPException(400, "alert_severity must be note|warning|error")
     webhook_url = (body.get("webhook_url") or "").strip()
-    if not webhook_url:
-        raise HTTPException(400, "webhook_url is required for VCS alerts")
-    try:
-        webhook_url = validate_webhook_url(webhook_url)
-    except ValueError as e:
-        raise HTTPException(400, f"webhook_url: {e}")
+    if webhook_url:
+        try:
+            webhook_url = validate_webhook_url(webhook_url)
+        except ValueError as e:
+            raise HTTPException(400, f"webhook_url: {e}")
+    # "" = webhook alerts disabled for this repo (email-only).
     return {"provider": provider, "repo_url": repo_url, "branch": branch,
             "alert_severity": severity, "webhook_url": webhook_url}
 
@@ -1391,14 +1395,13 @@ async def update_vcs_repo(request: Request, repo_id: str):
         params.append(branch)
     if "webhook_url" in body:
         url = (body["webhook_url"] or "").strip()
-        if not url:
-            db.close()
-            raise HTTPException(400, "webhook_url is required")
-        try:
-            url = validate_webhook_url(url)
-        except ValueError as e:
-            db.close()
-            raise HTTPException(400, f"webhook_url: {e}")
+        if url:
+            try:
+                url = validate_webhook_url(url)
+            except ValueError as e:
+                db.close()
+                raise HTTPException(400, f"webhook_url: {e}")
+        # "" disables webhook alerts (email-only repo).
         updates.append("webhook_url=?")
         params.append(url)
     if "alert_severity" in body:
@@ -1596,6 +1599,109 @@ def list_notifications(request: Request, schedule_id: str | None = None,
             (request.state.org_id, limit)).fetchall()
     db.close()
     return [dict(r) for r in rows]
+
+
+# Email alert recipients (per-org). The list itself is the switch: email
+# alerts fire only when the org has at least one enabled address AND the
+# operator configured SMTP (BRAIMSEC_SMTP_*). Delivery happens on the same
+# trigger as webhook alerts (new findings >= threshold, failed scans).
+# ---------------------------------------------------------------------------
+
+@app.get("/api/alert-emails")
+@limiter.limit("60/minute")
+def list_alert_emails(request: Request):
+    """List the org's email alert recipients (viewer+, org scope).
+
+    Also reports whether the server has SMTP configured — without it,
+    alerts are recorded as ``skipped`` and never sent.
+    """
+    from email_alerts import get_org_emails, smtp_configured  # noqa: E402
+    require_org_scope(request)
+    return {"smtp_configured": smtp_configured(),
+            "emails": get_org_emails(request.state.org_id)}
+
+
+@app.post("/api/alert-emails")
+@limiter.limit("30/minute")
+async def add_alert_email(request: Request):
+    """Add one recipient address (member+, org scope)."""
+    from email_alerts import validate_email  # noqa: E402
+    require_role(request, "member")
+    require_org_scope(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    try:
+        email = validate_email(body.get("email") or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db = get_db()
+    dup = db.execute("SELECT id FROM alert_emails WHERE org_id=? AND email=?",
+                     (request.state.org_id, email)).fetchone()
+    if dup:
+        db.close()
+        raise HTTPException(409, "Address already registered")
+    cur = db.execute(
+        "INSERT INTO alert_emails (org_id, email, enabled, created_at)"
+        " VALUES (?,?,1,?)",
+        (request.state.org_id, email, now()))
+    row = db.execute("SELECT id, email, enabled, created_at FROM alert_emails"
+                     " WHERE rowid=?", (cur.lastrowid,)).fetchone()
+    db.commit()
+    db.close()
+    _audit(request, "alert_email.added", "alert_email", row["id"],
+           {"email": email})
+    return dict(row)
+
+
+@app.patch("/api/alert-emails/{email_id}")
+@limiter.limit("30/minute")
+async def toggle_alert_email(request: Request, email_id: int):
+    """Enable/disable one recipient (member+, org scope)."""
+    require_role(request, "member")
+    require_org_scope(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    if "enabled" not in body:
+        raise HTTPException(400, "enabled: required (true|false)")
+    db = get_db()
+    row = db.execute("SELECT id FROM alert_emails WHERE id=? AND org_id=?",
+                     (email_id, request.state.org_id)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Address not found")
+    enabled = 1 if body["enabled"] else 0
+    db.execute("UPDATE alert_emails SET enabled=? WHERE id=?",
+               (enabled, email_id))
+    db.commit()
+    db.close()
+    _audit(request, "alert_email.toggled", "alert_email", email_id,
+           {"enabled": bool(enabled)})
+    return {"id": email_id, "enabled": bool(enabled)}
+
+
+@app.delete("/api/alert-emails/{email_id}")
+@limiter.limit("30/minute")
+def delete_alert_email(request: Request, email_id: int):
+    """Remove one recipient address (member+, org scope)."""
+    require_role(request, "member")
+    require_org_scope(request)
+    db = get_db()
+    row = db.execute(
+        "SELECT email FROM alert_emails WHERE id=? AND org_id=?",
+        (email_id, request.state.org_id)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Address not found")
+    db.execute("DELETE FROM alert_emails WHERE id=?", (email_id,))
+    db.commit()
+    db.close()
+    _audit(request, "alert_email.removed", "alert_email", email_id,
+           {"email": row["email"]})
+    return {"id": email_id, "deleted": True}
 
 
 def _fix_payload(row):
