@@ -109,8 +109,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 from scan_engine import (  # noqa: E402
     to_sarif,
 )
-from builder import ReportError, build_report  # noqa: E402
+from builder import ReportError, build_report, compliance_map, lookup_compliance  # noqa: E402
 from pdf import render_pdf  # noqa: E402
+from executive import build_executive_report  # noqa: E402
+from executive_pdf import render_executive_pdf  # noqa: E402
 from sink_audit import (  # noqa: E402
     audit_candidates,
     discover_sinks,
@@ -2301,6 +2303,105 @@ def scan_report_pdf(request: Request, scan_id: str):
         headers={"ETag": etag,
                  "Content-Disposition":
                  f'attachment; filename="braimsec-{scan_id}-report.pdf"'})
+
+
+@app.post("/api/reports/executive")
+@limiter.limit("30/minute")
+async def executive_report_pdf(request: Request):
+    """Manager-facing executive PDF (Arabic, deterministic).
+
+    Plain-language posture, top-10 findings with practical
+    recommendations, SOC 2 / ISO 27001 coverage, recent scans. Pure
+    function of stored scan data: no rescan, no LLM calls, no quota
+    consumed. Optional JSON body: {"project_id": ..., "days": 90}.
+    Viewers may read.
+    """
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - empty/malformed body -> defaults
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    project_id = body.get("project_id")
+    try:
+        days = int(body.get("days", 90))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "days: integer >= 0 (0 = all time)")
+    if days < 0:
+        raise HTTPException(400, "days: >= 0 (0 = all time)")
+
+    key_pid = getattr(request.state, "project_id", None)
+    if key_pid and project_id and project_id != key_pid:
+        raise HTTPException(
+            403, "Project-scoped keys cannot query other projects")
+    db = get_db()
+    org_row = db.execute("SELECT name FROM organizations WHERE id=?",
+                         (request.state.org_id,)).fetchone()
+    org_name = org_row["name"] if org_row else request.state.org_id
+    eff_project = key_pid or project_id
+    project_name = None
+    if eff_project:
+        prow = db.execute(
+            "SELECT name FROM projects WHERE id=? AND org_id=?",
+            (eff_project, request.state.org_id)).fetchone()
+        if not prow:
+            db.close()
+            raise HTTPException(404, "Project not found")
+        project_name = prow["name"]
+    pred, params = _scan_scope(request, "s")
+    q = (f"SELECT s.id, s.target_name, s.finished_at, s.created_at,"
+         f" s.total_findings FROM scans s"
+         f" WHERE {pred} AND s.status='done'")
+    if eff_project and not key_pid:
+        q += " AND s.project_id=?"
+        params.append(eff_project)
+    q += " ORDER BY s.created_at ASC"
+    rows = db.execute(q, params).fetchall()
+    if days > 0:
+        cutoff = (datetime.now(timezone.utc) -
+                  timedelta(days=days)).isoformat()
+        rows = [r for r in rows if (r["created_at"] or "") >= cutoff]
+    if not rows:
+        db.close()
+        raise HTTPException(404, "No completed scans in scope")
+    scans = [dict(r) for r in rows]
+    latest = scans[-1]
+    latest_findings = [dict(r) for r in db.execute(
+        "SELECT tool, rule_id, severity, message, file, line"
+        " FROM findings WHERE scan_id=?", (latest["id"],)).fetchall()]
+    prev_counts = None
+    if len(scans) >= 2:
+        pc = db.execute(
+            "SELECT severity, COUNT(*) c FROM findings WHERE scan_id=?"
+            " GROUP BY severity", (scans[-2]["id"],)).fetchall()
+        prev_counts = {r["severity"]: r["c"] for r in pc}
+    soc2_m = iso_m = 0
+    for f in latest_findings:
+        comp = lookup_compliance(f.get("rule_id"), f.get("tool"))
+        if comp:
+            if comp.get("soc2"):
+                soc2_m += 1
+            if comp.get("iso"):
+                iso_m += 1
+    map_version = compliance_map().get("version", "unknown")
+    db.close()
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+    try:
+        report = build_executive_report(
+            org_name, project_name, scans, latest_findings,
+            prev_counts=prev_counts,
+            compliance={"soc2_mapped": soc2_m, "iso_mapped": iso_m,
+                        "total": len(latest_findings),
+                        "map_version": map_version},
+            generated_at=generated_at)
+        pdf = render_executive_pdf(report)
+    except ReportError as e:
+        raise HTTPException(500, f"report refused: {e}")
+    return Response(
+        content=pdf, media_type="application/pdf",
+        headers={"Content-Disposition":
+                 'attachment; filename="braimsec-executive-report.pdf"'})
 
 
 # ---------------------------------------------------------------------------
