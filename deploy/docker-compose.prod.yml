@@ -2,8 +2,17 @@
 #
 #   caddy  ->  api (uvicorn)  ->  redis  <-  worker (celery)
 #
-# api and worker share ONE image and ONE data volume: the worker MUST see the
-# same filesystem (scan targets) and the same BRAIMSEC_DB as the API.
+# api and worker share ONE host directory (HOST_DATA_DIR, mounted at the
+# SAME path inside both containers): the worker MUST see the same scan
+# targets and the same BRAIMSEC_DB as the API, and the sandbox containers
+# the worker spawns mount target dirs by absolute path -- so the host path
+# and the worker-visible path must be identical (no translation layer).
+#
+# Server prep (once):
+#   export HOST_DATA_DIR=/data/braimsec   # or set it in .env
+#   sudo mkdir -p $HOST_DATA_DIR
+#   docker build -f deploy/docker/scan-runner.Dockerfile \
+#       -t braimsec/scan-runner:1.0 .
 #
 # Usage (on the server, inside deploy/):
 #   cp .env.example .env   # then fill SITE_ADDRESS (+ secrets when needed)
@@ -30,11 +39,11 @@ services:
       - .env
     environment:
       BRAIMSEC_BROKER_URL: redis://redis:6379/0
-      BRAIMSEC_DB: /data/braimsec.db
-      BRAIMSEC_SCAN_ROOT: /data/scans
+      BRAIMSEC_DB: ${HOST_DATA_DIR:-/data/braimsec}/braimsec.db
+      BRAIMSEC_SCAN_ROOT: ${HOST_DATA_DIR:-/data/braimsec}/scans
       PORT: 8000
     volumes:
-      - braimsec-data:/data
+      - ${HOST_DATA_DIR:-/data/braimsec}:${HOST_DATA_DIR:-/data/braimsec}
     expose:
       - "8000"
 
@@ -50,10 +59,20 @@ services:
     working_dir: /app/api
     environment:
       BRAIMSEC_BROKER_URL: redis://redis:6379/0
-      BRAIMSEC_DB: /data/braimsec.db
-      BRAIMSEC_SCAN_ROOT: /data/scans
+      BRAIMSEC_DB: ${HOST_DATA_DIR:-/data/braimsec}/braimsec.db
+      BRAIMSEC_SCAN_ROOT: ${HOST_DATA_DIR:-/data/braimsec}/scans
+      # Sandboxed engines: semgrep+gitleaks run in throwaway containers.
+      BRAIMSEC_SCAN_SANDBOX: ${BRAIMSEC_SCAN_SANDBOX:-docker}
+      BRAIMSEC_SCAN_RUNNER_IMAGE: ${BRAIMSEC_SCAN_RUNNER_IMAGE:-braimsec/scan-runner:1.0}
+      BRAIMSEC_DOCKER_BIN: /usr/local/bin/docker
     volumes:
-      - braimsec-data:/data
+      - ${HOST_DATA_DIR:-/data/braimsec}:${HOST_DATA_DIR:-/data/braimsec}
+      # SECURITY: the worker talks to the host Docker daemon to spawn the
+      # sandbox. A compromised worker with this socket is host-root
+      # equivalent. Accepted for phase 1 (the worker already runs the
+      # engines); revisit with a socket proxy or a dedicated runner
+      # service before multi-tenant production.
+      - /var/run/docker.sock:/var/run/docker.sock
     command: ["celery", "-A", "tasks", "worker", "--loglevel=info", "--concurrency=2"]
 
   caddy:
@@ -71,6 +90,5 @@ services:
 
 volumes:
   redis-data:
-  braimsec-data:
   caddy-data:
   caddy-config:
