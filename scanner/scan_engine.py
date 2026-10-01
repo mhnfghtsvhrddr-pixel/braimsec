@@ -47,6 +47,15 @@ _GHA_RULES_DEFAULT = os.path.join(
 BRAIMSEC_GHA_RULES = os.environ.get("BRAIMSEC_GHA_RULES",
                                     _GHA_RULES_DEFAULT)
 
+# BraimSec injection rules (OS command injection / XXE / deserialization /
+# SQLi / XSS / JS code injection — the highest-value OWASP Top 10 families).
+# Loaded alongside `--config auto` like the other packs. Env override for
+# tests: BRAIMSEC_INJECT_RULES=path (empty string disables the pack).
+_INJECT_RULES_DEFAULT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "rules", "braimsec-inject.yaml")
+BRAIMSEC_INJECT_RULES = os.environ.get("BRAIMSEC_INJECT_RULES",
+                                       _INJECT_RULES_DEFAULT)
+
 ENGINE_NAME = "BraimSec Scanner"
 ENGINE_VERSION = "0.1.0"
 
@@ -97,6 +106,8 @@ def run_semgrep(target, scope=None, base_configs=None):
         cmd += ["--config", BRAIMSEC_TAINT_RULES]
     if BRAIMSEC_GHA_RULES and os.path.isfile(BRAIMSEC_GHA_RULES):
         cmd += ["--config", BRAIMSEC_GHA_RULES]
+    if BRAIMSEC_INJECT_RULES and os.path.isfile(BRAIMSEC_INJECT_RULES):
+        cmd += ["--config", BRAIMSEC_INJECT_RULES]
     targets = list(scope) if scope is not None else [target]
     cmd += ["--json", "-o", out_path] + targets
     try:
