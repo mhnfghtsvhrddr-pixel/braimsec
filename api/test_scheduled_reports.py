@@ -625,14 +625,21 @@ def test_beat_task_wires_reports(monkeypatch):
         seen["certs"] = True
         return {"checked": 0}
 
+    def fake_uptime():
+        seen["uptime"] = True
+        return {"checked": 0}
+
     import scheduler
     import cert_monitor
+    import uptime_monitor
     monkeypatch.setattr(scheduler, "run_scheduler_once", fake_scans)
     monkeypatch.setattr(sr, "run_report_scheduler_once", fake_reports)
     monkeypatch.setattr(cert_monitor, "run_cert_checks_once", fake_certs)
+    monkeypatch.setattr(uptime_monitor, "run_uptime_checks_once", fake_uptime)
     out = tasks.check_schedules.__wrapped__()
-    assert seen == {"scans": True, "reports": True, "certs": True}
-    assert set(out) == {"scans", "reports", "certs"}
+    assert seen == {"scans": True, "reports": True, "certs": True,
+                    "uptime": True}
+    assert set(out) == {"scans", "reports", "certs", "uptime"}
 
 
 def test_smtp_retry_then_success(ctx, smtp):
