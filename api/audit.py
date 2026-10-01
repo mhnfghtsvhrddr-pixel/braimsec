@@ -72,6 +72,11 @@ ACTIONS = frozenset({
     "cert_domain.updated",
     "cert_domain.removed",
     "cert_domain.alerted",
+    "uptime_target.added",
+    "uptime_target.updated",
+    "uptime_target.removed",
+    "uptime_target.down",
+    "uptime_target.recovered",
 })
 
 # Archival never touches recent history: the window must be at least
