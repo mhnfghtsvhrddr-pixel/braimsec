@@ -79,6 +79,28 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     command: ["celery", "-A", "tasks", "worker", "--loglevel=info", "--concurrency=2"]
 
+  beat:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.prod
+    restart: unless-stopped
+    depends_on:
+      - redis
+    env_file:
+      - .env
+    working_dir: /app/api
+    environment:
+      BRAIMSEC_BROKER_URL: redis://redis:6379/0
+      BRAIMSEC_DB: ${HOST_DATA_DIR:-/data/braimsec}/braimsec.db
+      BRAIMSEC_SCAN_ROOT: ${HOST_DATA_DIR:-/data/braimsec}/scans
+    volumes:
+      - ${HOST_DATA_DIR:-/data/braimsec}:${HOST_DATA_DIR:-/data/braimsec}
+    # Fires braimsec.check_schedules every 60s (see beat_schedule in
+    # api/tasks.py). The schedule claim is a conditional DB UPDATE, so a
+    # second beat instance can never double-run a schedule.
+    command: ["celery", "-A", "tasks", "beat", "--loglevel=info",
+              "--schedule=/tmp/celerybeat-schedule"]
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
