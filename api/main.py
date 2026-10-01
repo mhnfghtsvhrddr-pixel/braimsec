@@ -11,6 +11,8 @@ Endpoints:
     GET  /api/scans/{id}/sarif     SARIF 2.1.0 report
 """
 import os
+import csv
+import io
 import json
 import logging
 import secrets
@@ -628,6 +630,35 @@ def scan_results(request: Request, scan_id: str, severity: str | None = None,
     rows = db.execute(q, params).fetchall()
     db.close()
     return [dict(r) for r in rows]
+
+
+CSV_COLUMNS = ("id", "tool", "rule_id", "severity", "file", "line", "col",
+               "message", "triage_status", "triage_assignee",
+               "ai_verdict", "ai_confidence")
+
+
+@app.get("/api/scans/{scan_id}/results.csv")
+@limiter.limit("30/minute")
+def scan_results_csv(request: Request, scan_id: str,
+                     severity: str | None = None):
+    """CSV export of a scan's findings (auditor-friendly).
+
+    Same filters/visibility as GET /api/scans/{id}/results (org-scoped,
+    RBAC, 404 for a missing or foreign scan). RFC 4180 quoting via the
+    csv module — messages with commas/quotes/newlines stay intact.
+    Downloads as ``braimsec-<scan_id>-results.csv``.
+    """
+    findings = scan_results(request, scan_id, severity=severity)
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")
+    w.writerow(CSV_COLUMNS)
+    for f in findings:
+        w.writerow([f.get(c, "") for c in CSV_COLUMNS])
+    body = buf.getvalue().encode("utf-8")
+    return Response(
+        content=body, media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="braimsec-{scan_id}-results.csv"'})
 
 
 @app.get("/api/trends")
