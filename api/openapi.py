@@ -1185,6 +1185,34 @@ _doc("GET", "/api/notifications",
          "429": _err429(),
      })
 
+_doc("POST", "/api/notifications/{notif_id}/resend",
+     tag="Alerts",
+     summary="Resend a failed notification",
+     description=("Retries one failed delivery from the alert log. Webhook "
+                  "rows replay their stored payload exactly (re-signed with "
+                  "the org's current HMAC secret); telegram/email rows "
+                  "rebuild the message from the same scan's findings. "
+                  "Slack/Teams rows cannot be resent (masked destination) -> "
+                  "409. Already-sent or skipped rows -> 409. Member+, org "
+                  "scope."),
+     auth="key", min_role="member", org_scope=True, rate_limit="10/minute",
+     params=[
+         _param("notif_id", "path", "integer",
+                "Notification row id.", True, example=7),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Updated row summary.",
+                      {"id": 7, "channel": "webhook", "status": "sent",
+                       "attempts": 2, "error": None}),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Notification"),
+         "409": _err409("Notification already sent / not resendable"),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
 _doc("GET", "/api/alert-emails",
      tag="Alerts",
      summary="List email recipients",
