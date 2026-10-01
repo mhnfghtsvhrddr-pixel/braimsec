@@ -10,6 +10,7 @@ trail never loses track of its own pruning.
 What gets logged (v1 — the CISO surface):
 - scan.created / scan.completed / scan.failed
 - ai_review.requested / fix_suggestion.requested / patch_verify.requested
+- finding.triaged / finding.triaged_bulk
 - api_key.created / api_key.revoked
 - audit_log.archived
 
@@ -36,6 +37,8 @@ ACTIONS = frozenset({
     "ai_review.requested",
     "fix_suggestion.requested",
     "patch_verify.requested",
+    "finding.triaged",
+    "finding.triaged_bulk",
     "api_key.created",
     "api_key.revoked",
     "project.created",
