@@ -42,8 +42,20 @@ def test_map_versioned_and_conservative():
         "home.hatch.workspace.rules.braimsec.taint.ssrf-requests", "semgrep")
     assert hit["owasp"]["code"] == "A10:2021"
     assert hit["cwe"]["id"] == "CWE-918"
-    assert hit["map_version"] == "1.0.0"
+    assert hit["map_version"] == "2.0.0"
     assert hit["provenance"] == "deterministic"
+    # v2.0.0: SOC 2 + ISO 27001 columns populated for mapped rules
+    assert hit["soc2"]["code"] == "CC6.1"
+    assert hit["iso"]["code"] == "A.8.20"
+
+
+def test_inject_rule_soc2_iso_mapping():
+    hit = lookup_compliance(
+        "home.hatch.workspace.rules.braimsec.inject.sqli", "semgrep")
+    assert hit["owasp"]["code"] == "A03:2021"
+    assert hit["soc2"]["code"] == "CC6.1"
+    assert hit["iso"]["code"] == "A.8.28"
+    assert hit["map_version"] == "2.0.0"
 
 
 def test_gitleaks_tool_level_mapping():
