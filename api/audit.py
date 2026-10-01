@@ -66,6 +66,7 @@ ACTIONS = frozenset({
     "slack_webhook.removed",
     "teams_webhook.added",
     "teams_webhook.removed",
+    "webhook_signing.rotated",
 })
 
 # Archival never touches recent history: the window must be at least
