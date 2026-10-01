@@ -400,13 +400,26 @@ def test_register_repo_gitlab_no_encrypted_secret(ctx):
       "alert_severity": "critical", "webhook_url": WEBHOOK}, "bad severity"),
     ({"provider": "github", "repo_url": "https://github.com/o/r",
       "webhook_url": "https://evil.com/hook"}, "bad webhook"),
-    ({"provider": "github", "repo_url": "https://github.com/o/r"},
-     "missing webhook"),
 ])
 def test_register_repo_validation(ctx, payload, why):
     c = TestClient(main.app)
     r = c.post("/api/vcs/repos", headers=_h(ctx["member"]), json=payload)
     assert r.status_code == 400, why
+
+
+def test_register_repo_without_webhook_is_email_only(ctx):
+    """Missing webhook_url no longer 400s: the repo is email-only."""
+    c = TestClient(main.app)
+    r = c.post("/api/vcs/repos", headers=_h(ctx["member"]),
+               json={"provider": "github",
+                     "repo_url": "https://github.com/o/r"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["webhook_url"] == ""
+    # cleanup so later tests see a pristine repo list
+    rr = c.delete(f"/api/vcs/repos/{body['id']}",
+                  headers=_h(ctx["member"]))
+    assert rr.status_code == 200
 
 
 def test_repo_rbac(ctx):
