@@ -1895,6 +1895,88 @@ def delete_alert_email(request: Request, email_id: int):
     return {"id": email_id, "deleted": True}
 
 
+# ---------------------------------------------------------------------------
+# Telegram alert chats (per-org). The list itself is the switch: telegram
+# alerts fire only when the org registered at least one chat id AND the
+# operator configured a bot (BRAIMSEC_TELEGRAM_BOT_TOKEN). Delivery happens
+# on the same trigger as webhook/email alerts (new findings >= threshold,
+# failed scans). Setup steps are documented in api/telegram_alerts.py.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/telegram-chats")
+@limiter.limit("60/minute")
+def list_telegram_chats(request: Request):
+    """List the org's telegram alert chats (viewer+, org scope).
+
+    Also reports whether the server has a bot token configured — without
+    it, alerts are recorded as ``skipped`` and never sent.
+    """
+    from telegram_alerts import get_org_chats, telegram_configured  # noqa: E402
+    require_org_scope(request)
+    return {"telegram_configured": telegram_configured(),
+            "chats": get_org_chats(request.state.org_id)}
+
+
+@app.post("/api/telegram-chats")
+@limiter.limit("30/minute")
+async def add_telegram_chat(request: Request):
+    """Register one chat id (member+, org scope).
+
+    Body: {"chat_id": "<telegram chat id>", "label": "optional"}.
+    """
+    from telegram_alerts import validate_chat_id  # noqa: E402
+    require_role(request, "member")
+    require_org_scope(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    try:
+        chat_id = validate_chat_id(body.get("chat_id"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    label = str(body.get("label") or "")[:80]
+    label = " ".join(label.split())
+    db = get_db()
+    dup = db.execute("SELECT id FROM telegram_chats WHERE org_id=? AND chat_id=?",
+                     (request.state.org_id, chat_id)).fetchone()
+    if dup:
+        db.close()
+        raise HTTPException(409, "Chat already registered")
+    cur = db.execute(
+        "INSERT INTO telegram_chats (org_id, chat_id, label, created_at)"
+        " VALUES (?,?,?,?)",
+        (request.state.org_id, chat_id, label, now()))
+    row = db.execute("SELECT id, chat_id, label, created_at FROM telegram_chats"
+                     " WHERE rowid=?", (cur.lastrowid,)).fetchone()
+    db.commit()
+    db.close()
+    _audit(request, "telegram_chat.added", "telegram_chat", row["id"],
+           {"chat_id": chat_id, "label": label})
+    return dict(row)
+
+
+@app.delete("/api/telegram-chats/{chat_row_id}")
+@limiter.limit("30/minute")
+def delete_telegram_chat(request: Request, chat_row_id: int):
+    """Remove one registered chat (member+, org scope)."""
+    require_role(request, "member")
+    require_org_scope(request)
+    db = get_db()
+    row = db.execute(
+        "SELECT chat_id FROM telegram_chats WHERE id=? AND org_id=?",
+        (chat_row_id, request.state.org_id)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Chat not found")
+    db.execute("DELETE FROM telegram_chats WHERE id=?", (chat_row_id,))
+    db.commit()
+    db.close()
+    _audit(request, "telegram_chat.removed", "telegram_chat", chat_row_id,
+           {"chat_id": row["chat_id"]})
+    return {"id": chat_row_id, "deleted": True}
+
+
 def _fix_payload(row):
     """Serialize the cached AI fix-suggestion columns of a finding row."""
     try:
