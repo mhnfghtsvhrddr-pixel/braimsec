@@ -710,6 +710,107 @@ def scan_trends(request: Request, days: int = 90,
     }
 
 
+@app.get("/api/scans/{scan_id}/diff")
+@limiter.limit("60/minute")
+def scan_diff(request: Request, scan_id: str, against: str):
+    """Diff two completed scans: new / fixed / persisting findings.
+
+    Findings are matched by the stable fingerprint (tool|rule_id|file|message
+    — line/column insensitive), the same identity used by alerting, trends
+    and SARIF. ``scan_id`` is the newer scan, ``against`` the baseline.
+
+    Both scans must be visible to the caller (404 otherwise) and completed
+    (400 otherwise). They must target the same project/target — a mismatch
+    is a 400, never a silent apples-to-oranges comparison. Viewers may read.
+    """
+    from scheduler import finding_fingerprint  # noqa: E402
+    db = get_db()
+    pred, params = _scan_scope(request, "")
+
+    def _load(sid):
+        row = db.execute(
+            "SELECT id, target_name, project_id, status, created_at,"
+            " total_findings FROM scans WHERE id=? AND " + pred,
+            (sid, *params)).fetchone()
+        return dict(row) if row else None
+
+    if against == scan_id:
+        db.close()
+        raise HTTPException(400, "Cannot diff a scan against itself")
+    newer = _load(scan_id)
+    older = _load(against)
+    if not newer or not older:
+        db.close()
+        raise HTTPException(404, "Scan not found")
+    for s in (newer, older):
+        if s["status"] != "done":
+            db.close()
+            raise HTTPException(
+                400, f"Scan {s['id']} is not completed "
+                     f"(status={s['status']})")
+    if (newer["project_id"] or older["project_id"]) and \
+            newer["project_id"] != older["project_id"]:
+        db.close()
+        raise HTTPException(400, "Scans belong to different projects")
+    if newer["target_name"] != older["target_name"]:
+        db.close()
+        raise HTTPException(
+            400, "Scans target different codebases "
+                 f"({newer['target_name']!r} vs {older['target_name']!r})")
+
+    def _rows(sid):
+        return db.execute(
+            "SELECT id, tool, rule_id, severity, message, file, line, col"
+            " FROM findings WHERE scan_id=?", (sid,)).fetchall()
+
+    new_rows = _rows(scan_id)
+    old_rows = _rows(against)
+    db.close()
+
+    def _fp(f):
+        return finding_fingerprint(f["tool"], f["rule_id"], f["file"],
+                                   f["message"])
+
+    def _dedup(rows):
+        seen = {}
+        for f in rows:  # first occurrence wins — deterministic
+            seen.setdefault(_fp(f), dict(f))
+        return seen
+
+    new_map = _dedup(new_rows)
+    old_map = _dedup(old_rows)
+    new_only = [new_map[k] for k in new_map if k not in old_map]
+    fixed_only = [old_map[k] for k in old_map if k not in new_map]
+    persisting = [new_map[k] for k in new_map if k in old_map]
+
+    def _by_sev(rows):
+        d: dict[str, int] = {}
+        for f in rows:
+            sev = f.get("severity") or "note"
+            d[sev] = d.get(sev, 0) + 1
+        return d
+
+    old_total = len(old_rows)
+    fix_rate = round(len(fixed_only) / old_total, 3) if old_total else 0.0
+    return {
+        "scan": {"id": scan_id, "target_name": newer["target_name"],
+                 "created_at": newer["created_at"], "total": len(new_rows)},
+        "against": {"id": against, "target_name": older["target_name"],
+                    "created_at": older["created_at"], "total": old_total},
+        "summary": {
+            "new": len(new_only),
+            "fixed": len(fixed_only),
+            "persisting": len(persisting),
+            "fix_rate": fix_rate,
+            "new_by_severity": _by_sev(new_only),
+            "fixed_by_severity": _by_sev(fixed_only),
+        },
+        "new": new_only,
+        "fixed": fixed_only,
+        "persisting": persisting,
+    }
+
+
 @app.post("/api/scans/{scan_id}/ai-review")
 @limiter.limit("30/minute")  # LLM calls are expensive — stricter budget
 def start_ai_review(request: Request, scan_id: str, background_tasks: BackgroundTasks):
