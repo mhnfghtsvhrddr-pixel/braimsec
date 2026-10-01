@@ -104,8 +104,16 @@ def run_semgrep(target, scope=None, base_configs=None):
         try:
             with open(out_path) as f:
                 data = json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
-            data = {}
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            # Fail closed: semgrep always writes valid JSON on success
+            # (verified: rc=0 on a clean target writes a full report).
+            # A missing/corrupt report means the engine malfunctioned —
+            # it must never masquerade as a clean scan.
+            raise EngineError(
+                f"semgrep produced no parseable report "
+                f"(rc={proc.returncode}): {e}",
+                exit_code=4,
+            )
         if proc.returncode != 0 and not data.get("results"):
             # Fail closed: a crashed semgrep must never look like a clean
             # scan. (A non-zero exit WITH parseable findings is still
@@ -158,8 +166,15 @@ def _run_gitleaks_one(target):
         try:
             with open(out_path) as f:
                 data = json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
-            data = []
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            # Fail closed: gitleaks always writes valid JSON on success
+            # (verified: rc=0 on a clean target writes `[]`).
+            # A missing/corrupt report means the engine malfunctioned —
+            # it must never masquerade as a clean scan.
+            raise EngineError(
+                f"gitleaks produced no parseable report: {e}",
+                exit_code=4,
+            )
     finally:
         if os.path.exists(out_path):
             os.unlink(out_path)
