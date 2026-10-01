@@ -153,10 +153,33 @@ CREATE TABLE IF NOT EXISTS schedules (
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at);
 CREATE INDEX IF NOT EXISTS idx_schedules_org ON schedules(org_id);
 -- Alert delivery log: one row per fired (or attempted) notification.
+CREATE TABLE IF NOT EXISTS vcs_repos (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    project_id TEXT,
+    provider TEXT NOT NULL,          -- github | gitlab
+    repo_url TEXT NOT NULL,          -- normalized https://host/owner/repo
+    full_name TEXT NOT NULL,         -- owner/repo (or gitlab group path)
+    branch TEXT NOT NULL DEFAULT 'main',
+    webhook_secret_hash TEXT NOT NULL,
+    webhook_secret_enc TEXT,         -- encrypted raw secret (github HMAC only)
+    webhook_url TEXT NOT NULL DEFAULT '',
+    alert_severity TEXT NOT NULL DEFAULT 'warning',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_scan_id TEXT,
+    prev_scan_id TEXT,
+    last_scan_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_vcs_repos_org ON vcs_repos(org_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vcs_repos_org_url
+    ON vcs_repos(org_id, repo_url);
 CREATE TABLE IF NOT EXISTS notifications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     org_id TEXT NOT NULL REFERENCES organizations(id),
-    schedule_id TEXT NOT NULL REFERENCES schedules(id),
+    schedule_id TEXT REFERENCES schedules(id),
+    vcs_repo_id TEXT REFERENCES vcs_repos(id),
     scan_id TEXT NOT NULL,
     event TEXT NOT NULL DEFAULT 'schedule.alert',
     severity TEXT NOT NULL,
@@ -171,6 +194,8 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_sched ON notifications(schedule_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_org ON notifications(org_id, created_at DESC);
+-- idx_notifications_vcs is created post-migration in init_db(): the column
+-- does not exist on pre-VCS databases when this script first runs.
 -- Team finding triage: one row per finding with its workflow status,
 -- assignee (an api_keys.id of the same org) and a note. Change history
 -- is append-only in triage_history.
@@ -288,5 +313,55 @@ def init_db():
         conn.execute("ALTER TABLE scans ADD COLUMN project_id TEXT")
     if "project_id" not in key_cols:
         conn.execute("ALTER TABLE api_keys ADD COLUMN project_id TEXT")
+    # Lightweight migration: VCS integration (scan on push). scans.vcs_repo_id
+    # links a scan to its repo; commit_sha records the exact commit scanned.
+    if "vcs_repo_id" not in scan_cols:
+        conn.execute("ALTER TABLE scans ADD COLUMN vcs_repo_id TEXT")
+    if "commit_sha" not in scan_cols:
+        conn.execute("ALTER TABLE scans ADD COLUMN commit_sha TEXT")
+    # Migration: notifications gains vcs_repo_id and a nullable schedule_id
+    # (VCS alerts have no schedule). SQLite cannot ALTER a column's NOT NULL,
+    # so the table is rebuilt when the new column is absent.
+    notif_cols = {r["name"] for r in conn.execute("PRAGMA table_info(notifications)")}
+    if "vcs_repo_id" not in notif_cols:
+        conn.execute("""
+            CREATE TABLE notifications_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_id TEXT NOT NULL REFERENCES organizations(id),
+                schedule_id TEXT REFERENCES schedules(id),
+                vcs_repo_id TEXT REFERENCES vcs_repos(id),
+                scan_id TEXT NOT NULL,
+                event TEXT NOT NULL DEFAULT 'schedule.alert',
+                severity TEXT NOT NULL,
+                new_count INTEGER NOT NULL DEFAULT 0,
+                webhook_url TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                response_code INTEGER,
+                error TEXT,
+                payload TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            INSERT INTO notifications_new (id, org_id, schedule_id, scan_id,
+                event, severity, new_count, webhook_url, status, attempts,
+                response_code, error, payload, created_at)
+            SELECT id, org_id, schedule_id, scan_id, event, severity,
+                new_count, webhook_url, status, attempts, response_code,
+                error, payload, created_at FROM notifications
+        """)
+        conn.execute("DROP TABLE notifications")
+        conn.execute("ALTER TABLE notifications_new RENAME TO notifications")
+        conn.execute("CREATE INDEX idx_notifications_sched"
+                     " ON notifications(schedule_id, created_at DESC)")
+        conn.execute("CREATE INDEX idx_notifications_org"
+                     " ON notifications(org_id, created_at DESC)")
+        conn.execute("CREATE INDEX idx_notifications_vcs"
+                     " ON notifications(vcs_repo_id, created_at DESC)")
+    # Post-migration index (kept out of the SCHEMA script: the vcs_repo_id
+    # column does not exist yet on pre-VCS databases when it runs).
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_notifications_vcs"
+                 " ON notifications(vcs_repo_id, created_at DESC)")
     conn.commit()
     conn.close()
