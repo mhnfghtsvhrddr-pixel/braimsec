@@ -138,7 +138,11 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-app = FastAPI(title="BraimSec API", version="0.1.0")
+app = FastAPI(title="BraimSec API", version="0.1.0",
+                # Built-in docs are disabled: the curated, fail-closed API
+                # reference lives at GET /docs (+ /api/openapi.json),
+                # generated from api/openapi.py.
+                docs_url=None, redoc_url=None, openapi_url=None)
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +187,7 @@ async def api_key_gate(request: Request, call_next):
     public_paths = ("/api/plans", "/api/checkout/crypto",
                     "/api/checkout/status", "/api/webhooks/nowpayments",
                     "/api/webhooks/github", "/api/webhooks/gitlab",
+                    "/api/openapi.json",
                     "/api/health")
     if request.url.path.startswith("/api/") and request.url.path not in public_paths:
         presented = request.headers.get("x-api-key", "")
@@ -3118,6 +3123,33 @@ def api_usage(request: Request):
                       "remaining": (quota - used) if quota >= 0 else -1,
                       "unlimited": quota < 0}
     return out
+
+
+# ---------------------------------------------------------------------------
+# API documentation: OpenAPI 3.1 document + human-readable reference page.
+# The spec is generated from the live routes (api/openapi.py) and fails
+# closed when a route lacks a docs entry — it cannot go stale.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/openapi.json")
+@limiter.limit("60/minute")
+def api_openapi_json(request: Request):
+    """Public OpenAPI 3.1 document (see api/openapi.py)."""
+    from openapi import OpenAPIError, spec_to_json  # noqa: E402
+    try:
+        body = spec_to_json(app)
+    except OpenAPIError as e:
+        return JSONResponse({"detail": f"docs out of sync: {e}"},
+                            status_code=500)
+    return Response(content=body, media_type="application/json")
+
+
+@app.get("/docs", response_class=HTMLResponse)
+@limiter.limit("600/minute")
+def api_docs_page(request: Request):
+    """Human-readable API reference (self-contained, no CDN)."""
+    from openapi import docs_page_html  # noqa: E402
+    return docs_page_html()
 
 
 # Dashboard (served after API routes so /api/* matches first)
