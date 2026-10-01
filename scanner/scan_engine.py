@@ -56,6 +56,26 @@ _INJECT_RULES_DEFAULT = os.path.join(
 BRAIMSEC_INJECT_RULES = os.environ.get("BRAIMSEC_INJECT_RULES",
                                        _INJECT_RULES_DEFAULT)
 
+# BraimSec Dockerfile rules (root user / remote ADD / :latest / baked-in
+# secrets / uncleaned apt cache / sensitive EXPOSE / curl-piped-to-shell).
+# Loaded alongside `--config auto` like the other packs. Env override for
+# tests: BRAIMSEC_DOCKERFILE_RULES=path (empty string disables the pack).
+_DOCKERFILE_RULES_DEFAULT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "rules",
+    "braimsec-dockerfile.yaml")
+BRAIMSEC_DOCKERFILE_RULES = os.environ.get("BRAIMSEC_DOCKERFILE_RULES",
+                                           _DOCKERFILE_RULES_DEFAULT)
+
+# BraimSec Terraform rules (world-open security groups / public S3 ACLs /
+# unencrypted RDS-EBS / disabled RDS backups). Loaded alongside
+# `--config auto` like the other packs. Env override for tests:
+# BRAIMSEC_TERRAFORM_RULES=path (empty string disables the pack).
+_TERRAFORM_RULES_DEFAULT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "rules",
+    "braimsec-terraform.yaml")
+BRAIMSEC_TERRAFORM_RULES = os.environ.get("BRAIMSEC_TERRAFORM_RULES",
+                                          _TERRAFORM_RULES_DEFAULT)
+
 ENGINE_NAME = "BraimSec Scanner"
 ENGINE_VERSION = "0.1.0"
 
@@ -108,6 +128,10 @@ def run_semgrep(target, scope=None, base_configs=None):
         cmd += ["--config", BRAIMSEC_GHA_RULES]
     if BRAIMSEC_INJECT_RULES and os.path.isfile(BRAIMSEC_INJECT_RULES):
         cmd += ["--config", BRAIMSEC_INJECT_RULES]
+    if BRAIMSEC_DOCKERFILE_RULES and os.path.isfile(BRAIMSEC_DOCKERFILE_RULES):
+        cmd += ["--config", BRAIMSEC_DOCKERFILE_RULES]
+    if BRAIMSEC_TERRAFORM_RULES and os.path.isfile(BRAIMSEC_TERRAFORM_RULES):
+        cmd += ["--config", BRAIMSEC_TERRAFORM_RULES]
     targets = list(scope) if scope is not None else [target]
     cmd += ["--json", "-o", out_path] + targets
     try:
