@@ -17,6 +17,9 @@ After a scheduled scan reaches a terminal state, the worker calls
 - the first scheduled run only establishes the baseline: no alert
 - a failed scheduled scan fires a ``schedule.failed`` alert (silent
   monitoring is worse than a noisy one)
+- findings triaged as false_positive (``finding_suppressions`` table,
+  team triage feature) are excluded from the new-findings set: a
+  dismissed false positive never re-alerts
 
 Alerts are delivered with :func:`send_alert` (SSRF-guarded, 3 attempts with
 backoff) and every outcome is recorded in the ``notifications`` table.
@@ -320,6 +323,22 @@ def _scan_findings(db, scan_id: str) -> list[dict]:
         "FROM findings WHERE scan_id=?", (scan_id,)).fetchall()]
 
 
+def _suppressed_fps(db, org_id: str) -> set:
+    """Fingerprints the org triaged as false_positive.
+
+    Tolerant of DBs that predate the finding_suppressions table (team
+    triage feature): a missing table means no suppressions, and alerting
+    behaves exactly as before.
+    """
+    try:
+        rows = db.execute(
+            "SELECT fingerprint FROM finding_suppressions WHERE org_id=?",
+            (org_id,)).fetchall()
+    except Exception:  # noqa: BLE001 - pre-triage DBs: no suppression yet
+        return set()
+    return {r[0] for r in rows}
+
+
 def evaluate_schedule_alerts(scan_id: str) -> dict:
     """Diff a finished scheduled scan vs its predecessor; alert if needed.
 
@@ -351,10 +370,13 @@ def evaluate_schedule_alerts(scan_id: str) -> dict:
                    for f in _scan_findings(db, prev_id)}
         threshold = SEVERITY_ORDER.get(sched.get("alert_severity",
                                                  "warning"), 1)
+        suppressed = _suppressed_fps(db, sched["org_id"])
         new_findings = [
             f for f in _scan_findings(db, scan_id)
             if finding_fingerprint(f["tool"], f["rule_id"], f["file"],
                                    f["message"]) not in old_fps
+            and finding_fingerprint(f["tool"], f["rule_id"], f["file"],
+                                    f["message"]) not in suppressed
             and SEVERITY_ORDER.get(f["severity"], 0) >= threshold
         ]
         if not new_findings:
