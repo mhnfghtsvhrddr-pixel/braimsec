@@ -318,7 +318,7 @@ def test_false_positive_suppresses_scheduled_alert(ctx, monkeypatch):
     seen = {}
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: (seen.setdefault("payload", payload),
+        lambda url, payload, org_id=None: (seen.setdefault("payload", payload),
                              (True, 1, 200, None))[1])
     out = scheduler.evaluate_schedule_alerts(new_id)
     assert out["alerted"] is True
