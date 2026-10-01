@@ -48,6 +48,11 @@ ACTIONS = frozenset({
     "schedule.updated",
     "schedule.deleted",
     "schedule.run",
+    "vcs.repo.created",
+    "vcs.repo.updated",
+    "vcs.repo.deleted",
+    "vcs.repo.secret_rotated",
+    "vcs.scan.created",
 })
 
 # Archival never touches recent history: the window must be at least
