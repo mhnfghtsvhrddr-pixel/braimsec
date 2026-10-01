@@ -33,7 +33,7 @@ never execute target code).
 |---|---|
 | `Dockerfile.prod` | Full image: API + worker + semgrep 1.178.0 + gitleaks 8.28.0 (both pinned to the versions our rules/evals were validated against) + Docker CLI (worker spawns the sandbox) + all code (`api/`, `scanner/`, `ai/`, `reports/`, `dashboard/`). The old root `Dockerfile` only copied `api/`+`dashboard/` and no engines — it cannot run a real scan. |
 | `docker/scan-runner.Dockerfile` | Minimal sandbox image: semgrep 1.178.0 + gitleaks 8.28.0 (both sha256-pinned) + vendored ruleset snapshot + `runner-entrypoint.py`. Built once per server (see Deploy stages). |
-| `docker-compose.prod.yml` | `redis` (AOF persistence), `api` (uvicorn), `worker` (celery, concurrency 2), `caddy` (auto-TLS reverse proxy). api+worker share the host data dir at the same path (required: worker must see the same scan targets and the same `BRAIMSEC_DB`, and sandbox mounts use absolute paths). |
+| `docker-compose.prod.yml` | `redis` (AOF persistence), `api` (uvicorn), `worker` (celery, concurrency 2), `beat` (celery beat — fires the scan scheduler every 60s), `caddy` (auto-TLS reverse proxy). api+worker share the host data dir at the same path (required: worker must see the same scan targets and the same `BRAIMSEC_DB`, and sandbox mounts use absolute paths). |
 | `deploy.sh` | **One-command provision + deploy + smoke test** (run as root on the server): installs Docker (official repo), bootstraps `.env` (auto-detects the public IP for stage 1, generates the master API key), creates the data dir, builds the scan-runner image, starts the stack, waits for health, then runs the smoke test (health, plans, end-to-end scan with findings, sandbox proof from worker logs). `--domain api.braimsec.world` for stage 2, `--rebuild-runner`, `--skip-smoke`, `--smoke-only`. |
 | `Caddyfile` | Templated by `SITE_ADDRESS`: `http://<ip>` for smoke test, `api.braimsec.world` for production (automatic Let's Encrypt). |
 | `.env.example` | Copy to `.env`; never commit real secrets. |
@@ -72,3 +72,22 @@ never execute target code).
 - `SINK_AUDIT_OFF=1` / `SCA_OFFLINE=1` are available as kill switches.
 - Celery is real here (`BRAIMSEC_BROKER_URL` set); the inline fallback only
   applies to dev.
+
+## Scheduled scans + alerts
+
+- Customers create schedules in the dashboard (⏰ tab) or via
+  `POST /api/schedules`: daily/weekly at a chosen time + timezone,
+  alert threshold (error/warning/note) and a Slack/Discord webhook URL.
+- The `beat` service runs `braimsec.check_schedules` every 60s; each due
+  schedule is claimed atomically (one conditional UPDATE — no double runs)
+  and a worker scan is queued against the previous run as its baseline
+  (incremental, engines are spared).
+- After each scheduled scan finishes, the worker diffs the new findings
+  against the previous run (fingerprint ignores line numbers, so a moved
+  finding is not "new") and posts to the webhook on new results ≥ the
+  threshold — max 3 attempts with backoff, recorded in `notifications`.
+  First run is a silent baseline; a **failed** scheduled scan also alerts
+  (`schedule.failed`) so a blind spot is never silent. Email is
+  deliberately not implemented — webhooks only.
+- Webhook URLs are SSRF-guarded (no private/loopback targets) at creation
+  and at delivery (re-resolved + pinned, best-effort).
