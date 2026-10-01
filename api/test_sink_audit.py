@@ -215,7 +215,7 @@ def test_should_store_precision_gate(monkeypatch):
 def wired(monkeypatch):
     """Task with stubbed LLM, open quota, and usage recording observed."""
     usage = []
-    monkeypatch.setattr(tasks, "LLMClient", lambda: StubClient({}))
+    monkeypatch.setattr(tasks, "make_llm_client", lambda: StubClient({}))
     monkeypatch.setattr(tasks, "quota_check", lambda o, k, u=(1,): (True, 0, 200))
     monkeypatch.setattr(tasks, "record_usage",
                         lambda o, k, s, wall_time_ms=0: usage.append((o, k, s)))
@@ -339,7 +339,7 @@ def test_task_no_llm_configured_skips(monkeypatch, target_dir):
         @property
         def configured(self):
             return False
-    monkeypatch.setattr(tasks, "LLMClient", DeadClient)
+    monkeypatch.setattr(tasks, "make_llm_client", DeadClient)
     scan_id = _mk_scan(target_dir)
     out = tasks._run_ai_review_impl(FakeSelf(), scan_id)
     assert out["sink_audit"]["status"] == "skipped_no_llm"
