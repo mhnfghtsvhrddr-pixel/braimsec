@@ -56,6 +56,8 @@ ACTIONS = frozenset({
     "alert_email.added",
     "alert_email.toggled",
     "alert_email.removed",
+    "telegram_chat.added",
+    "telegram_chat.removed",
 })
 
 # Archival never touches recent history: the window must be at least
