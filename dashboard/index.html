@@ -205,6 +205,34 @@
   }
   .fix-meta { color: var(--muted); font-size: 0.88rem; margin: 0.8rem 0; line-height: 1.7; }
   footer { text-align: center; color: var(--muted); font-size: 0.8rem; padding: 2rem; }
+
+  /* ---------- معالج البداية ---------- */
+  #ob-back { z-index: 100; }
+  .wiz-modal { max-width: 640px; }
+  .wiz-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.2rem; }
+  .wiz-head h3 { margin: 0; }
+  .wiz-steps { display: flex; justify-content: space-between; margin-bottom: 0.6rem; }
+  .wiz-step { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; flex: 1; color: var(--muted); font-size: 0.78rem; }
+  .wiz-dot { width: 2rem; height: 2rem; border-radius: 50%; border: 2px solid var(--border);
+    display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 0.85rem; background: var(--bg); }
+  .wiz-step.cur .wiz-dot { border-color: var(--accent); color: var(--accent); }
+  .wiz-step.cur { color: var(--text); font-weight: bold; }
+  .wiz-step.done .wiz-dot { border-color: var(--green); background: var(--green); color: #0d1117; }
+  .wiz-progress { background: var(--bg3); border-radius: 999px; height: 8px; overflow: hidden; margin-bottom: 1.4rem; }
+  .wiz-progress > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent2));
+    border-radius: 999px; transition: width 0.4s; }
+  .wiz-pane p.lead { color: var(--muted); line-height: 1.8; }
+  .wiz-points { display: grid; gap: 0.8rem; margin: 1.2rem 0; }
+  .wiz-point { display: flex; gap: 0.8rem; align-items: flex-start; background: var(--bg3);
+    border: 1px solid var(--border); border-radius: 12px; padding: 0.9rem 1rem; }
+  .wiz-point .ic { font-size: 1.6rem; line-height: 1.2; }
+  .wiz-point b { display: block; margin-bottom: 0.2rem; }
+  .wiz-point small { color: var(--muted); line-height: 1.7; display: block; }
+  .wiz-nav { display: flex; justify-content: space-between; align-items: center; margin-top: 1.6rem; gap: 0.6rem; flex-wrap: wrap; }
+  .wiz-pane { animation: wizIn 0.25s ease; }
+  @keyframes wizIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  .wiz-pane .row { display: flex; gap: 0.8rem; margin-top: 1rem; align-items: center; flex-wrap: wrap; }
+  .wiz-pane input[type=file] { color: var(--muted); font-size: 0.88rem; margin-top: 0.3rem; }
   @media (max-width: 640px) {
     .scan-card { flex-direction: column; align-items: flex-start; gap: 0.8rem; }
     th:nth-child(4), td:nth-child(4) { display: none; }
@@ -225,6 +253,8 @@
       style="background: var(--bg3); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.45rem 0.7rem; font-size: 0.85rem; width: 11rem;"
       oninput="localStorage.setItem('braimsec_key', this.value)">
     <script>document.getElementById('api-key').value = localStorage.getItem('braimsec_key') || '';</script>
+    <button class="btn-ghost" title="إعادة معالج البداية" onclick="obRestart()"
+      style="padding:0.45rem 0.7rem;font-size:0.9rem">🧭</button>
   </div>
 </header>
 
@@ -579,6 +609,91 @@
     <div class="row">
       <button class="btn" onclick="copyRawKey()">📋 نسخ</button>
       <button class="btn-ghost" onclick="document.getElementById('rawkey-back').hidden = true">تم، حفظته</button>
+    </div>
+  </div>
+</div>
+
+<!-- معالج البداية: يظهر مرة واحدة عند أول زيارة -->
+<div id="ob-back" class="modal-back" hidden>
+  <div class="modal wiz-modal">
+    <div class="wiz-head">
+      <h3>🧭 معالج البداية</h3>
+      <button class="btn-ghost" onclick="obFinish(true)">✕ تخطي المعالج</button>
+    </div>
+    <div class="wiz-steps" id="ob-steps">
+      <div class="wiz-step"><span class="wiz-dot">1</span><span>مرحباً</span></div>
+      <div class="wiz-step"><span class="wiz-dot">2</span><span>مفتاح API</span></div>
+      <div class="wiz-step"><span class="wiz-dot">3</span><span>أول فحص</span></div>
+      <div class="wiz-step"><span class="wiz-dot">4</span><span>التنبيهات</span></div>
+      <div class="wiz-step"><span class="wiz-dot">5</span><span>جاهز</span></div>
+    </div>
+    <div class="wiz-progress"><div id="ob-bar"></div></div>
+
+    <!-- 1: مرحباً -->
+    <div id="ob-pane-1" class="wiz-pane">
+      <p class="lead">أهلاً بك في <b>BraimSec</b> 🛡️ — منصة فحص الثغرات الأمنية للمؤسسات. ثلاث خطوات سريعة وتصبح جاهزاً:</p>
+      <div class="wiz-points">
+        <div class="wiz-point"><div class="ic">🔍</div><div><b>فحص تلقائي معزول</b><small>semgrep وgitleaks وفحص التبعيات — كلها تعمل داخل sandbox معزول تماماً عن بقية النظام.</small></div></div>
+        <div class="wiz-point"><div class="ic">⏰</div><div><b>فحص دوري وتنبيهات فورية</b><small>جدولة يومية أو أسبوعية، وتنبيه فوري بالإيميل أو الويبهوك أو تيليجرام عند أي نتيجة جديدة.</small></div></div>
+        <div class="wiz-point"><div class="ic">📊</div><div><b>تقارير للمديرين وتكاملات</b><small>تقارير تنفيذية PDF بالعربية تُرسل تلقائياً، وتصدير SARIF لتكامل GitHub code scanning.</small></div></div>
+      </div>
+      <div class="wiz-nav"><span></span><button class="btn" onclick="obGo(2)">ابدأ الإعداد ←</button></div>
+    </div>
+
+    <!-- 2: مفتاح API -->
+    <div id="ob-pane-2" class="wiz-pane" hidden>
+      <p class="lead">مفتاح API يعرّف منظمتك ويُستخدم في اللوحة والـCLI والتكاملات. أنشئ مفتاحك الأول الآن — يُعرض <b>مرة واحدة فقط</b>:</p>
+      <div id="ob-key-create">
+        <div class="row"><button class="btn" id="ob-key-btn" onclick="obCreateKey()">🔑 إنشاء مفتاح API</button></div>
+      </div>
+      <div id="ob-key-done" hidden>
+        <p style="color:var(--green);font-weight:bold">✅ تم إنشاء المفتاح — وُضع تلقائياً في حقل API أعلى الصفحة</p>
+        <div class="keybox" id="ob-key-val"></div>
+        <div class="row"><button class="btn" onclick="obCopyKey()">📋 نسخ المفتاح</button></div>
+      </div>
+      <p id="ob-key-err" style="color:var(--red);font-size:0.85rem;margin-top:0.6rem"></p>
+      <p class="warn" style="font-size:0.82rem;margin-top:0.6rem">💡 الإنشاء يتطلب مفتاحاً بدور «مدير» في الحقل أعلى الصفحة (المفتاح الرئيسي من إعداد السيرفر). بعد الإنشاء سنضعه تلقائياً في الحقل.</p>
+      <div class="wiz-nav"><button class="btn-ghost" onclick="obGo(1)">→ رجوع</button><button class="btn-ghost" onclick="obGo(3)">تخطي هذه الخطوة</button></div>
+    </div>
+
+    <!-- 3: أول فحص -->
+    <div id="ob-pane-3" class="wiz-pane" hidden>
+      <p class="lead">ارفع ملف <b>zip</b> لمشروعك وشغّل أول فحص حقيقي — ستظهر النتيجة هنا مباشرة:</p>
+      <label>ملف المشروع (zip)</label>
+      <input type="file" id="ob-zip" accept=".zip">
+      <div class="row"><button class="btn" id="ob-scan-btn" onclick="obStartScan()">🚀 ابدأ أول فحص</button></div>
+      <p id="ob-scan-err" style="color:var(--red);font-size:0.85rem;margin-top:0.6rem"></p>
+      <div id="ob-scan-prog" hidden>
+        <div class="wiz-progress"><div id="ob-scan-bar"></div></div>
+        <p style="color:var(--muted);font-size:0.85rem" id="ob-scan-msg"><span class="spinner"></span> جارٍ الفحص…</p>
+      </div>
+      <div id="ob-scan-result"></div>
+      <div class="wiz-nav"><button class="btn-ghost" onclick="obGo(2)">→ رجوع</button><button class="btn-ghost" onclick="obGo(4)">تخطي هذه الخطوة</button></div>
+    </div>
+
+    <!-- 4: التنبيهات -->
+    <div id="ob-pane-4" class="wiz-pane" hidden>
+      <p class="lead">أضف بريد فريقك ليصله تنبيه فوري عند اكتشاف نتائج جديدة:</p>
+      <div class="row">
+        <div style="flex:1;min-width:12rem"><label>البريد الإلكتروني</label><input type="email" id="ob-email" placeholder="security@company.com" dir="ltr"></div>
+        <button class="btn" onclick="obAddEmail()">+ إضافة</button>
+      </div>
+      <p id="ob-email-msg" style="font-size:0.88rem;margin-top:0.8rem"></p>
+      <p class="warn" style="font-size:0.82rem;margin-top:0.6rem">💡 الإرسال يتطلب تهيئة SMTP على السيرفر (<code dir="ltr">BRAIMSEC_SMTP_HOST</code>) — وحتى ذلك الحين تُسجَّل التنبيهات كـ«متخطاة» في سجل التنبيهات. تنبيهات الويبهوك تُضبط لاحقاً من تبويب «الجدولة».</p>
+      <div class="wiz-nav"><button class="btn-ghost" onclick="obGo(3)">→ رجوع</button><button class="btn-ghost" onclick="obGo(5)">تخطي هذه الخطوة</button></div>
+    </div>
+
+    <!-- 5: جاهز -->
+    <div id="ob-pane-5" class="wiz-pane" hidden>
+      <p class="lead" style="font-size:1.1rem">🎉 <b>كل شيء جاهز!</b> ملخص إعدادك:</p>
+      <div id="ob-summary" class="wiz-points"></div>
+      <div class="wiz-nav">
+        <button class="btn" onclick="obFinish(false)">الذهاب للوحة ←</button>
+        <span style="display:flex;gap:0.6rem;flex-wrap:wrap">
+          <button class="btn-ghost" onclick="window.open('https://github.com/mhnfghtsvhrddr-pixel/braimsec/tree/main/cli','_blank')">⌨️ تحميل الـCLI</button>
+          <button class="btn-ghost" onclick="window.open('/docs','_blank')">📚 توثيق API</button>
+        </span>
+      </div>
     </div>
   </div>
 </div>
@@ -1634,6 +1749,163 @@ async function deleteRepSched(id) {
     loadReportSchedules();
   } catch (e) { alert("تعذر الحذف: " + e.message); }
 }
+
+/* ---------- معالج البداية ---------- */
+let obStep = 1;
+let obPoll = null;
+let obRawKey = "";
+const OB_DONE = "braimsec_onboarding_done";
+const obState = { key: false, scan: false, email: false };
+
+function obShow() { document.getElementById("ob-back").hidden = false; obGo(1); }
+function obGo(n) {
+  obStep = Math.min(5, Math.max(1, n));
+  for (let i = 1; i <= 5; i++) document.getElementById("ob-pane-" + i).hidden = i !== obStep;
+  document.getElementById("ob-bar").style.width = (obStep / 5 * 100) + "%";
+  const steps = document.getElementById("ob-steps").children;
+  for (let i = 0; i < 5; i++) {
+    steps[i].classList.toggle("cur", i + 1 === obStep);
+    steps[i].classList.toggle("done", i + 1 < obStep);
+    steps[i].querySelector(".wiz-dot").textContent = i + 1 < obStep ? "✓" : String(i + 1);
+  }
+  if (obStep === 5) obRenderSummary();
+}
+function obFinish(skip) {
+  if (obPoll) { clearInterval(obPoll); obPoll = null; }
+  localStorage.setItem(OB_DONE, "1");
+  document.getElementById("ob-back").hidden = true;
+  if (!skip) showView("scans");
+}
+function obRestart() {
+  if (obPoll) { clearInterval(obPoll); obPoll = null; }
+  localStorage.removeItem(OB_DONE);
+  obState.key = obState.scan = obState.email = false;
+  obRawKey = "";
+  document.getElementById("ob-key-create").hidden = false;
+  document.getElementById("ob-key-done").hidden = true;
+  document.getElementById("ob-key-err").textContent = "";
+  document.getElementById("ob-key-btn").disabled = false;
+  document.getElementById("ob-zip").value = "";
+  document.getElementById("ob-scan-err").textContent = "";
+  document.getElementById("ob-scan-prog").hidden = true;
+  document.getElementById("ob-scan-result").innerHTML = "";
+  document.getElementById("ob-scan-btn").disabled = false;
+  document.getElementById("ob-email").value = "";
+  document.getElementById("ob-email-msg").textContent = "";
+  obShow();
+}
+async function obCreateKey() {
+  const err = document.getElementById("ob-key-err");
+  const btn = document.getElementById("ob-key-btn");
+  err.textContent = "";
+  btn.disabled = true;
+  try {
+    const r = await api("/keys", {
+      method: "POST",
+      body: JSON.stringify({ name: "مفتاح معالج البداية", role: "member" })
+    });
+    obRawKey = r.key;
+    localStorage.setItem("braimsec_key", r.key);
+    document.getElementById("api-key").value = r.key;
+    document.getElementById("ob-key-val").textContent = r.key;
+    document.getElementById("ob-key-create").hidden = true;
+    document.getElementById("ob-key-done").hidden = false;
+    obState.key = true;
+  } catch (e) { err.textContent = e.message; }
+  btn.disabled = false;
+}
+function obCopyKey() {
+  navigator.clipboard.writeText(obRawKey).then(
+    () => alert("تم النسخ ✅"),
+    () => alert("تعذر النسخ التلقائي — انسخه يدوياً"));
+}
+async function obStartScan() {
+  const err = document.getElementById("ob-scan-err");
+  err.textContent = "";
+  const file = document.getElementById("ob-zip").files[0];
+  if (!file) { err.textContent = "اختر ملف zip أولاً"; return; }
+  const btn = document.getElementById("ob-scan-btn");
+  btn.disabled = true;
+  const prog = document.getElementById("ob-scan-prog");
+  const bar = document.getElementById("ob-scan-bar");
+  const msg = document.getElementById("ob-scan-msg");
+  const res = document.getElementById("ob-scan-result");
+  res.innerHTML = "";
+  prog.hidden = false;
+  bar.style.width = "5%";
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const r = await api("/scans", { method: "POST", body: fd });
+    const id = r.scan_id;
+    const t0 = Date.now();
+    const s = await new Promise((resolve, reject) => {
+      obPoll = setInterval(async () => {
+        try {
+          const st = await api(`/scans/${id}`);
+          bar.style.width = Math.min(90, 5 + (Date.now() - t0) / 1000 * 3) + "%";
+          if (st.status === "done" || st.status === "failed") {
+            clearInterval(obPoll); obPoll = null;
+            bar.style.width = "100%";
+            resolve(st);
+          }
+        } catch (e) { clearInterval(obPoll); obPoll = null; reject(e); }
+      }, 3000);
+    });
+    if (s.status === "failed") {
+      msg.innerHTML = "❌ فشل الفحص";
+      res.innerHTML = `<div class="notice">⚠️ ${esc(s.error || "فشل الفحص")}</div>`;
+    } else {
+      const sum = s.severity_summary || {};
+      msg.innerHTML = "✅ اكتمل الفحص";
+      res.innerHTML = `<div class="cards" style="margin:1rem 0">
+        <div class="card c-total"><div class="num">${s.total_findings || 0}</div><div class="lbl">إجمالي النتائج</div></div>
+        <div class="card c-error"><div class="num">${sum.error || 0}</div><div class="lbl">🔴 حرجة</div></div>
+        <div class="card c-warning"><div class="num">${sum.warning || 0}</div><div class="lbl">🟡 متوسطة</div></div>
+        <div class="card c-note"><div class="num">${sum.note || 0}</div><div class="lbl">🔵 منخفضة</div></div></div>
+        <p style="color:var(--muted);font-size:0.85rem">التفاصيل الكاملة في تبويب «الفحوصات» بعد إغلاق المعالج.</p>`;
+      obState.scan = true;
+    }
+  } catch (e) { err.textContent = e.message; prog.hidden = true; }
+  btn.disabled = false;
+}
+async function obAddEmail() {
+  const inp = document.getElementById("ob-email");
+  const msg = document.getElementById("ob-email-msg");
+  const email = inp.value.trim();
+  msg.style.color = "var(--red)";
+  msg.textContent = "";
+  if (!email) { msg.textContent = "أدخل بريداً إلكترونياً"; return; }
+  try {
+    await api("/alert-emails", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email })
+    });
+    msg.style.color = "var(--green)";
+    msg.textContent = "✅ تمت الإضافة — ستصلك التنبيهات عند النتائج الجديدة";
+    inp.value = "";
+    obState.email = true;
+  } catch (e) { msg.textContent = e.message; }
+}
+function obRenderSummary() {
+  const item = (ok, t, d) =>
+    `<div class="wiz-point"><div class="ic">${ok ? "✅" : "⏭️"}</div><div><b>${t}</b><small>${d}</small></div></div>`;
+  document.getElementById("ob-summary").innerHTML =
+    item(obState.key, "مفتاح API", obState.key
+      ? "أُنشئ ووُضع تلقائياً في حقل API أعلى الصفحة" : "تُخطي — أنشئه لاحقاً من تبويب «مفاتيح API»") +
+    item(obState.scan, "أول فحص", obState.scan
+      ? "اكتمل بنجاح — التفاصيل الكاملة في تبويب «الفحوصات»" : "تُخطي — ابدأ فحصاً لاحقاً من زر «+ فحص جديد»") +
+    item(obState.email, "تنبيهات الإيميل", obState.email
+      ? "فُعّلت — ستصلك التنبيهات عند النتائج الجديدة" : "تُخطي — أضفها لاحقاً من تبويب «الجدولة»");
+}
+
+/* إظهار المعالج مرة واحدة فقط: مستخدم حالي (لديه مفتاح) لا يُزعَج */
+(function () {
+  if (localStorage.getItem(OB_DONE)) return;
+  if (localStorage.getItem("braimsec_key")) { localStorage.setItem(OB_DONE, "1"); return; }
+  obShow();
+})();
 
 loadScans();
 setInterval(() => {
