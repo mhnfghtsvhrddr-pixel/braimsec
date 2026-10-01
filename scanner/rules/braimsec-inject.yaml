@@ -1,0 +1,369 @@
+# BraimSec injection rules (v1) — first principles, not holdout-tuned.
+#
+# Why these exist: the frozen registry snapshot (`--config auto` vendored at
+# image build time) covers generic injection patterns, but these nine rules
+# encode BraimSec's precision-first taint specifications for the highest-value
+# OWASP Top 10 families our customers ask about: OS command injection,
+# XXE, insecure deserialization, SQL injection, XSS (server + DOM), and
+# Python/JavaScript code injection. Verified with Semgrep 1.178.0 on paired
+# vuln/safe repros (see scanner/test_inject_rules.py): every rule fires on
+# its true-positive sample and stays silent on clean code.
+#
+# Design philosophy (precision-first, honest) — same as braimsec-taint.yaml:
+# - Taint mode wherever the dangerous operation has a legitimate constant
+#   form: sources are web/user inputs, sinks are the dangerous call
+#   arguments. A constant query / constant command / constant template never
+#   fires — that alone removes the bulk of noise.
+# - SQLi is taint-based (not string-format patterns) so two-step
+#   construction (`q = "..." % u; cur.execute(q)`) fires while parameterized
+#   queries (`execute("... %s ...", (u,))`) stay silent by construction —
+#   the query string is never tainted when parameters are separate.
+# - xxe-unsafe-parser is the one pure pattern rule: constructing an lxml
+#   XMLParser without resolve_entities=False IS the vulnerability (entity
+#   resolution defaults to on), so pattern-not on the safe construction is
+#   exact, not heuristic.
+# - The JS rules ship WITHOUT pattern sanitizers except DOMPurify for DOM
+#   XSS: real output-encoding / allowlist validation cannot be expressed as
+#   a syntactic pattern. The AI review layer (FINDING_SYSTEM) is the
+#   precision filter for these, by product architecture.
+# - Rule IDs are namespaced `braimsec.inject.*`, matching the taint pack's
+#   `braimsec.taint.*` and the GHA pack's `braimsec.gha.*` conventions.
+#
+# DO NOT tune these against the old holdout set (SPEC v1.0 §4 — no
+# holdout contamination). Measure on scanner/eval/fresh-holdout-v1/.
+
+rules:
+- id: braimsec.inject.command-injection
+  languages:
+  - python
+  message: User-controlled input passed to a shell command — possible OS command injection.
+  metadata:
+    category: security
+    confidence: MEDIUM
+    cwe: 'CWE-78: Improper Neutralization of Special Elements used in an OS Command
+      (''OS Command Injection'')'
+    impact: HIGH
+    owasp: A03:2021 - Injection
+  mode: taint
+  pattern-sanitizers:
+  - patterns:
+    - pattern-either:
+      - pattern: shlex.quote(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern-inside: os.system($X, ...)
+      - pattern-inside: os.popen($X, ...)
+      - pattern-inside: subprocess.call($X, ..., shell=True, ...)
+      - pattern-inside: subprocess.Popen($X, ..., shell=True, ...)
+      - pattern-inside: subprocess.run($X, ..., shell=True, ...)
+      - pattern-inside: subprocess.check_output($X, ..., shell=True, ...)
+      - pattern-inside: subprocess.check_call($X, ..., shell=True, ...)
+    - focus-metavariable: $X
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: request.args.get(...)
+      - pattern: request.args[...]
+      - pattern: request.form.get(...)
+      - pattern: request.form[...]
+      - pattern: request.values.get(...)
+      - pattern: request.values[...]
+      - pattern: request.json.get(...)
+      - pattern: request.json[...]
+      - pattern: request.data
+      - pattern: request.GET.get(...)
+      - pattern: request.GET[...]
+      - pattern: request.POST.get(...)
+      - pattern: request.POST[...]
+      - pattern: input(...)
+      - pattern: sys.argv[...]
+  severity: ERROR
+- id: braimsec.inject.xxe-unsafe-parser
+  languages:
+  - python
+  message: lxml XMLParser constructed without resolve_entities=False — XML external
+    entity (XXE) processing is enabled by default.
+  metadata:
+    category: security
+    confidence: HIGH
+    cwe: 'CWE-611: Improper Restriction of XML External Entity Reference'
+    impact: HIGH
+    owasp: A05:2021 - Security Misconfiguration
+  patterns:
+  - pattern-either:
+    - pattern: etree.XMLParser(...)
+    - pattern: lxml.etree.XMLParser(...)
+  - pattern-not: etree.XMLParser(..., resolve_entities=False, ...)
+  - pattern-not: lxml.etree.XMLParser(..., resolve_entities=False, ...)
+  severity: ERROR
+- id: braimsec.inject.xxe-tainted-parse
+  languages:
+  - python
+  message: User-controlled XML parsed with lxml without a hardened parser — possible
+    XXE.
+  metadata:
+    category: security
+    confidence: MEDIUM
+    cwe: 'CWE-611: Improper Restriction of XML External Entity Reference'
+    impact: HIGH
+    owasp: A05:2021 - Security Misconfiguration
+  mode: taint
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern-inside: etree.fromstring($X, ...)
+      - pattern-inside: lxml.etree.fromstring($X, ...)
+      - pattern-inside: etree.parse($X, ...)
+      - pattern-inside: lxml.etree.parse($X, ...)
+      - pattern-inside: etree.XML($X, ...)
+      - pattern-inside: lxml.etree.XML($X, ...)
+    - focus-metavariable: $X
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: request.args.get(...)
+      - pattern: request.args[...]
+      - pattern: request.form.get(...)
+      - pattern: request.form[...]
+      - pattern: request.values.get(...)
+      - pattern: request.values[...]
+      - pattern: request.json.get(...)
+      - pattern: request.json[...]
+      - pattern: request.data
+      - pattern: request.GET.get(...)
+      - pattern: request.GET[...]
+      - pattern: request.POST.get(...)
+      - pattern: request.POST[...]
+      - pattern: input(...)
+      - pattern: sys.argv[...]
+  severity: ERROR
+- id: braimsec.inject.deserialization
+  languages:
+  - python
+  message: User-controlled data deserialized with an unsafe loader — possible arbitrary
+    code execution.
+  metadata:
+    category: security
+    confidence: MEDIUM
+    cwe: 'CWE-502: Deserialization of Untrusted Data'
+    impact: HIGH
+    owasp: A08:2021 - Software and Data Integrity Failures
+  mode: taint
+  pattern-sanitizers:
+  - patterns:
+    - pattern-either:
+      - pattern: yaml.safe_load(...)
+      - pattern: yaml.load(..., Loader=yaml.SafeLoader, ...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern-inside: pickle.loads($X, ...)
+      - pattern-inside: pickle.load($X, ...)
+      - pattern-inside: marshal.loads($X, ...)
+      - pattern-inside: yaml.load($X, ...)
+    - focus-metavariable: $X
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: request.args.get(...)
+      - pattern: request.args[...]
+      - pattern: request.form.get(...)
+      - pattern: request.form[...]
+      - pattern: request.values.get(...)
+      - pattern: request.values[...]
+      - pattern: request.json.get(...)
+      - pattern: request.json[...]
+      - pattern: request.data
+      - pattern: request.GET.get(...)
+      - pattern: request.GET[...]
+      - pattern: request.POST.get(...)
+      - pattern: request.POST[...]
+      - pattern: input(...)
+      - pattern: sys.argv[...]
+  severity: ERROR
+- id: braimsec.inject.xss-render-template-string
+  languages:
+  - python
+  message: User-controlled input rendered into a template string — possible cross-site
+    scripting (XSS).
+  metadata:
+    category: security
+    confidence: MEDIUM
+    cwe: 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site
+      Scripting'')'
+    impact: HIGH
+    owasp: A03:2021 - Injection
+  mode: taint
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern-inside: render_template_string($T, ...)
+      - pattern-inside: flask.render_template_string($T, ...)
+    - focus-metavariable: $T
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: request.args.get(...)
+      - pattern: request.args[...]
+      - pattern: request.form.get(...)
+      - pattern: request.form[...]
+      - pattern: request.values.get(...)
+      - pattern: request.values[...]
+      - pattern: request.json.get(...)
+      - pattern: request.json[...]
+      - pattern: request.data
+      - pattern: request.GET.get(...)
+      - pattern: request.GET[...]
+      - pattern: request.POST.get(...)
+      - pattern: request.POST[...]
+      - pattern: input(...)
+      - pattern: sys.argv[...]
+  severity: ERROR
+- id: braimsec.inject.js-code-eval
+  languages:
+  - javascript
+  - typescript
+  message: User-controlled input passed to eval-like code execution — possible code
+    injection.
+  metadata:
+    category: security
+    confidence: MEDIUM
+    cwe: 'CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code
+      (''Eval Injection'')'
+    impact: HIGH
+    owasp: A03:2021 - Injection
+  mode: taint
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern-inside: eval($X, ...)
+      - pattern-inside: new Function($X, ...)
+      - pattern-inside: setTimeout($X, ...)
+      - pattern-inside: setInterval($X, ...)
+    - focus-metavariable: $X
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: req.query
+      - pattern: req.query[...]
+      - pattern: req.body
+      - pattern: req.body[...]
+      - pattern: req.params
+      - pattern: req.params[...]
+      - pattern: req.cookies
+      - pattern: req.cookies[...]
+  severity: ERROR
+- id: braimsec.inject.js-dom-xss
+  languages:
+  - javascript
+  - typescript
+  message: User-controlled input assigned to HTML sink — possible DOM-based XSS.
+  metadata:
+    category: security
+    confidence: MEDIUM
+    cwe: 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site
+      Scripting'')'
+    impact: HIGH
+    owasp: A03:2021 - Injection
+  mode: taint
+  pattern-sanitizers:
+  - patterns:
+    - pattern-either:
+      - pattern: DOMPurify.sanitize(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern-inside: $EL.innerHTML = $X
+      - pattern-inside: $EL.outerHTML = $X
+      - pattern-inside: document.write($X, ...)
+      - pattern-inside: $EL.insertAdjacentHTML($P, $X)
+    - focus-metavariable: $X
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: req.query
+      - pattern: req.query[...]
+      - pattern: req.body
+      - pattern: req.body[...]
+      - pattern: req.params
+      - pattern: req.params[...]
+      - pattern: req.cookies
+      - pattern: req.cookies[...]
+  severity: ERROR
+- id: braimsec.inject.sqli
+  languages:
+  - python
+  message: User-controlled input concatenated into a SQL query — possible SQL injection.
+    Use parameterized queries (placeholders + separate parameters).
+  metadata:
+    category: security
+    confidence: MEDIUM
+    cwe: 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command
+      (''SQL Injection'')'
+    impact: HIGH
+    owasp: A03:2021 - Injection
+  mode: taint
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern-inside: $CUR.execute($Q, ...)
+      - pattern-inside: $CUR.executemany($Q, ...)
+    - focus-metavariable: $Q
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: request.args.get(...)
+      - pattern: request.args[...]
+      - pattern: request.form.get(...)
+      - pattern: request.form[...]
+      - pattern: request.values.get(...)
+      - pattern: request.values[...]
+      - pattern: request.json.get(...)
+      - pattern: request.json[...]
+      - pattern: request.data
+      - pattern: request.GET.get(...)
+      - pattern: request.GET[...]
+      - pattern: request.POST.get(...)
+      - pattern: request.POST[...]
+      - pattern: input(...)
+      - pattern: sys.argv[...]
+  severity: ERROR
+- id: braimsec.inject.python-code-eval
+  languages:
+  - python
+  message: User-controlled input passed to eval()/exec() — possible arbitrary code
+    execution.
+  metadata:
+    category: security
+    confidence: MEDIUM
+    cwe: 'CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code
+      (''Eval Injection'')'
+    impact: HIGH
+    owasp: A03:2021 - Injection
+  mode: taint
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern-inside: eval($X, ...)
+      - pattern-inside: exec($X, ...)
+    - focus-metavariable: $X
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: request.args.get(...)
+      - pattern: request.args[...]
+      - pattern: request.form.get(...)
+      - pattern: request.form[...]
+      - pattern: request.values.get(...)
+      - pattern: request.values[...]
+      - pattern: request.json.get(...)
+      - pattern: request.json[...]
+      - pattern: request.data
+      - pattern: request.GET.get(...)
+      - pattern: request.GET[...]
+      - pattern: request.POST.get(...)
+      - pattern: request.POST[...]
+      - pattern: input(...)
+      - pattern: sys.argv[...]
+  severity: ERROR
