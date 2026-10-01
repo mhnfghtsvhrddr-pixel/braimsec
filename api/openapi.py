@@ -1149,7 +1149,8 @@ _doc("GET", "/api/notifications",
      description=("Newest-first alert deliveries for the org. Optional "
                   "filters: schedule_id, vcs_repo_id, report_schedule_id, "
                   "channel (webhook|email|telegram|slack|teams), event "
-                  "(schedule.alert|schedule.failed|vcs.alert|vcs.failed), "
+                  "(schedule.alert|schedule.failed|vcs.alert|vcs.failed|"
+                  "cert.expiry), "
                   "status (sent|failed|skipped). Unknown filter values -> "
                   "400. limit clamped to 1..200. Viewer+, org scope."),
      auth="key", min_role="viewer", org_scope=True, rate_limit="60/minute",
@@ -1165,7 +1166,7 @@ _doc("GET", "/api/notifications",
                 False, example="telegram"),
          _param("event", "query", "string",
                 "Filter by event: schedule.alert|schedule.failed|vcs.alert|"
-                "vcs.failed.", False, example="schedule.alert"),
+                "vcs.failed|cert.expiry.", False, example="schedule.alert"),
          _param("status", "query", "string",
                 "Filter by status: sent|failed|skipped.", False,
                 example="failed"),
@@ -1209,6 +1210,121 @@ _doc("POST", "/api/notifications/{notif_id}/resend",
          "403": _err403(),
          "404": _err404("Notification"),
          "409": _err409("Notification already sent / not resendable"),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
+_doc("GET", "/api/cert-domains",
+     tag="Alerts",
+     summary="List monitored TLS domains",
+     description=("Hostnames registered for TLS expiry monitoring, with "
+                  "their last check state (ok|expiring|error|never), "
+                  "expiry date and days left. Viewer+, org scope."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="60/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("Array of domain rows.",
+                      [{"id": 1, "hostname": "example.com", "port": 443,
+                        "warn_days": 14, "enabled": 1, "last_status": "ok",
+                        "last_days_left": 89,
+                        "last_expires_at": "2026-12-30T12:00:00+00:00"}]),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/cert-domains",
+     tag="Alerts",
+     summary="Register a TLS domain",
+     description=("Register a hostname for expiry monitoring. The domain is "
+                  "probed immediately so the caller sees its live state "
+                  "(_live: ok|expiring|error). The beat worker re-probes "
+                  "enabled domains ~daily; when the cert expires within "
+                  "warn_days an alert fans out to every channel the org "
+                  "configured (webhook URL on the domain, telegram chats, "
+                  "slack/teams webhooks, email recipients) and is logged as "
+                  "event=cert.expiry. Non-public resolved IPs are refused "
+                  "(SSRF guard). Member+, org scope."),
+     auth="key", min_role="member", org_scope=True, rate_limit="10/minute",
+     params=[],
+     request_body={
+         "application/json": {
+             "example": {"hostname": "example.com", "port": 443,
+                         "warn_days": 14,
+                         "webhook_url": "https://hooks.example/cert"}}},
+     responses={
+         "200": _resp("Created domain row with live probe state.",
+                      {"id": 1, "hostname": "example.com", "port": 443,
+                       "_live": {"status": "ok", "days_left": 89}}),
+         "400": _err400("Invalid hostname / port / duplicate domain"),
+         "401": _err401(),
+         "403": _err403(),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
+_doc("PATCH", "/api/cert-domains/{domain_id}",
+     tag="Alerts",
+     summary="Update a TLS domain",
+     description=("Update warn_days (1..90), webhook_url or enabled for a "
+                  "monitored domain. Member+, org scope."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[
+         _param("domain_id", "path", "integer",
+                "Cert domain row id.", True, example=1),
+     ],
+     request_body={
+         "application/json": {
+             "example": {"warn_days": 30, "enabled": False}}},
+     responses={
+         "200": _resp("Updated domain row.", {"id": 1, "warn_days": 30}),
+         "400": _err400("Nothing to update / invalid warn_days"),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Domain"),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
+_doc("DELETE", "/api/cert-domains/{domain_id}",
+     tag="Alerts",
+     summary="Stop monitoring a TLS domain",
+     description=("Delete a monitored domain. Member+, org scope."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[
+         _param("domain_id", "path", "integer",
+                "Cert domain row id.", True, example=1),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Deletion confirmation.", {"deleted": 1}),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Domain"),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/cert-domains/{domain_id}/check",
+     tag="Alerts",
+     summary="Probe a TLS domain now",
+     description=("Probe the domain's certificate immediately (member+). "
+                  "The outcome is persisted and an alert fires if the "
+                  "anti-spam rules allow it. Member+, org scope."),
+     auth="key", min_role="member", org_scope=True, rate_limit="10/minute",
+     params=[
+         _param("domain_id", "path", "integer",
+                "Cert domain row id.", True, example=1),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Domain row with live probe state.",
+                      {"id": 1, "hostname": "example.com",
+                       "_live": {"status": "expiring", "days_left": 5}}),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Domain"),
          "422": _err422(),
          "429": _err429(),
      })
