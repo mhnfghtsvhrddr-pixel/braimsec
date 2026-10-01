@@ -405,6 +405,7 @@
         <option value="schedule.failed">فشل الفحص</option>
         <option value="vcs.alert">نتائج جديدة (مستودع)</option>
         <option value="vcs.failed">فشل الفحص (مستودع)</option>
+        <option value="cert.expiry">🔒 انتهاء شهادة TLS</option>
       </select>
       <select id="notif-f-status" onchange="loadNotifications()" aria-label="فلتر الحالة">
         <option value="">كل الحالات</option>
@@ -415,6 +416,24 @@
       <button class="btn-ghost" onclick="resetNotifFilters()">↺ تصفير</button>
     </div>
     <div id="notif-wrap"></div>
+  </section>
+
+  <!-- مراقبة انتهاء شهادات TLS: فحص دوري وتنبيه مسبق عبر كل القنوات -->
+  <section id="cert-section">
+    <h3 style="margin: 1.6rem 0 1rem;">🔒 مراقبة شهادات TLS</h3>
+    <p style="font-size:0.85rem;opacity:0.75;margin-bottom:0.7rem">
+      فحص تلقائي يومي لشهادات النطاقات المسجلة — تنبيه مسبق قبل انتهائها عبر
+      كل قنوات التنبيه المفعّلة (ويبهوك، إيميل، تيليجرام، Slack، Teams).
+    </p>
+    <div class="row" style="gap:0.6rem;flex-wrap:wrap;margin-bottom:0.8rem">
+      <input id="cert-host" placeholder="example.com" dir="ltr" style="min-width:180px" aria-label="النطاق">
+      <input id="cert-port" type="number" value="443" min="1" max="65535" style="width:90px" dir="ltr" aria-label="المنفذ">
+      <input id="cert-warn" type="number" value="14" min="1" max="90" style="width:110px" dir="ltr" title="التنبيه قبل (يوم)" aria-label="التنبيه قبل (يوم)">
+      <input id="cert-wh" placeholder="Webhook URL (اختياري)" dir="ltr" style="min-width:200px" aria-label="Webhook URL">
+      <button class="btn" onclick="addCertDomain()">＋ إضافة نطاق</button>
+      <button class="btn-ghost" onclick="loadCertDomains()">↻ تحديث</button>
+    </div>
+    <div id="cert-wrap"></div>
   </section>
 
   <!-- التقارير التنفيذية المجدولة: PDF يُرسل بالإيميل تلقائياً -->
@@ -803,7 +822,7 @@ function showView(name) {
   clearInterval(pollTimer);
   if (name === "scans") loadScans();
   if (name === "trends") loadTrends();
-  if (name === "sched") { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); }
+  if (name === "sched") { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); loadCertDomains(); }
   if (name === "reports") loadReportSchedules();
   if (name === "vcs") loadVcsRepos();
   if (name === "billing") loadBilling();
@@ -1608,7 +1627,8 @@ async function loadNotifications() {
     return;
   }
   const evAr = { "schedule.alert": "نتائج جديدة", "schedule.failed": "فشل الفحص",
-    "vcs.alert": "نتائج جديدة (مستودع)", "vcs.failed": "فشل الفحص (مستودع)" };
+    "vcs.alert": "نتائج جديدة (مستودع)", "vcs.failed": "فشل الفحص (مستودع)",
+    "cert.expiry": "🔒 انتهاء شهادة TLS" };
   const chAr = { "webhook": "🔗 ويبهوك", "email": "📧 إيميل",
     "telegram": "✈️ تيليجرام", "slack": "💬 Slack", "teams": "👔 Teams" };
   const stBadge = s => s === "sent" ? `<span class="badge b-done">أُرسل</span>`
@@ -1652,6 +1672,77 @@ async function resendNotification(id, btn) {
   btn.disabled = false;
   btn.textContent = old;
   loadNotifications();
+}
+
+/* ---------- مراقبة شهادات TLS ---------- */
+const CERT_ST = { ok: "✅ سليم", expiring: "⚠️ ينتهي قريباً", error: "❌ خطأ", never: "— لم يُفحص بعد" };
+
+async function loadCertDomains() {
+  const el = document.getElementById("cert-wrap");
+  let rows;
+  try {
+    rows = await api("/cert-domains");
+  } catch (e) {
+    el.innerHTML = `<div class="empty"><p>تعذّر التحميل: ${esc(e.message)}</p></div>`;
+    return;
+  }
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty"><p>لا نطاقات مسجلة — أضف نطاقاً ليبدأ الفحص التلقائي 🔒</p></div>`;
+    return;
+  }
+  el.innerHTML = `<table><thead><tr>
+      <th>النطاق</th><th>الحالة</th><th>تنتهي في</th><th>متبقي (يوم)</th><th>آخر فحص</th><th>إجراءات</th>
+    </tr></thead><tbody>` + rows.map(d => `
+    <tr>
+      <td dir="ltr">${esc(d.hostname)}:${d.port}</td>
+      <td>${CERT_ST[d.last_status] || esc(d.last_status)}${d.enabled ? "" : " ⏸️"}</td>
+      <td dir="ltr">${d.last_expires_at ? esc(d.last_expires_at.slice(0, 10)) : "—"}</td>
+      <td>${d.last_days_left == null ? "—" : d.last_days_left}</td>
+      <td dir="ltr">${d.last_checked_at ? esc(d.last_checked_at.slice(0, 16).replace("T", " ")) : "—"}</td>
+      <td style="white-space:nowrap">
+        <button class="btn-ghost" onclick="checkCertDomain(${d.id})" title="فحص الآن">🔍</button>
+        <button class="btn-ghost" onclick="toggleCertDomain(${d.id}, ${d.enabled ? 0 : 1})" title="${d.enabled ? "إيقاف مؤقت" : "تفعيل"}">${d.enabled ? "⏸️" : "▶️"}</button>
+        <button class="btn-ghost" onclick="delCertDomain(${d.id})" title="حذف">🗑️</button>
+      </td>
+    </tr>`).join("") + `</tbody></table>`;
+}
+
+async function addCertDomain() {
+  const hostname = document.getElementById("cert-host").value.trim();
+  const port = parseInt(document.getElementById("cert-port").value, 10) || 443;
+  const warn_days = parseInt(document.getElementById("cert-warn").value, 10) || 14;
+  const webhook_url = document.getElementById("cert-wh").value.trim();
+  if (!hostname) return;
+  try {
+    await api("/cert-domains", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hostname, port, warn_days, webhook_url }) });
+    document.getElementById("cert-host").value = "";
+    document.getElementById("cert-wh").value = "";
+    loadCertDomains();
+  } catch (e) { alert("تعذّرت الإضافة: " + e.message); }
+}
+
+async function delCertDomain(id) {
+  if (!confirm("إيقاف مراقبة هذا النطاق؟")) return;
+  await api(`/cert-domains/${id}`, { method: "DELETE" });
+  loadCertDomains();
+}
+
+async function checkCertDomain(id) {
+  try {
+    const r = await api(`/cert-domains/${id}/check`, { method: "POST" });
+    loadCertDomains();
+    const s = r._live || {};
+    alert(s.status === "ok" ? `✅ الشهادة سليمة — تنتهي خلال ${s.days_left} يوم`
+      : s.status === "expiring" ? `⚠️ تنبيه: الشهادة تنتهي خلال ${s.days_left} يوم`
+      : `❌ تعذّر الفحص: ${s.error || ""}`);
+  } catch (e) { alert("تعذّر الفحص: " + e.message); }
+}
+
+async function toggleCertDomain(id, enabled) {
+  await api(`/cert-domains/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: !!enabled }) });
+  loadCertDomains();
 }
 
 /* ---------- المستودعات: فحص تلقائي عند push ---------- */
@@ -2113,7 +2204,7 @@ function obRenderSummary() {
 loadScans();
 setInterval(() => {
   if (!document.getElementById("view-scans").hidden && document.getElementById("view-detail").hidden) loadScans();
-  if (!document.getElementById("view-sched").hidden) { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); }
+  if (!document.getElementById("view-sched").hidden) { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); loadCertDomains(); }
 }, 5000);
 </script>
 </body>
