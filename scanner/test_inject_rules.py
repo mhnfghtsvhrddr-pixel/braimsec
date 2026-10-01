@@ -242,7 +242,7 @@ def test_scan_engine_passes_inject_config(monkeypatch):
     assert RULES in cmd
     assert scan_engine.BRAIMSEC_TAINT_RULES in cmd
     assert scan_engine.BRAIMSEC_GHA_RULES in cmd
-    assert cmd.count("--config") == 4  # auto + taint + gha + inject packs
+    assert cmd.count("--config") == 6  # auto + taint + gha + inject + dockerfile + terraform packs
 
 
 def test_scan_engine_inject_rules_can_be_disabled(monkeypatch):
@@ -261,4 +261,4 @@ def test_scan_engine_inject_rules_can_be_disabled(monkeypatch):
         with monkeypatch.context() as m:
             m.setattr("json.load", lambda f: {"results": []})
             scan_engine.run_semgrep(d)
-    assert seen["cmd"].count("--config") == 3  # auto + taint + gha packs
+    assert seen["cmd"].count("--config") == 5  # auto + taint + gha + dockerfile + terraform packs
