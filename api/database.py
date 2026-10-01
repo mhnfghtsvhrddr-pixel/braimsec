@@ -151,6 +151,30 @@ CREATE TABLE IF NOT EXISTS schedules (
 );
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at);
 CREATE INDEX IF NOT EXISTS idx_schedules_org ON schedules(org_id);
+-- Scheduled executive reports: weekly/monthly manager PDFs emailed to the
+-- org's alert_emails recipients. Separate from scan schedules (no target,
+-- no webhook): the report is built from stored scan data, no rescan.
+CREATE TABLE IF NOT EXISTS report_schedules (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    name TEXT NOT NULL,
+    frequency TEXT NOT NULL DEFAULT 'weekly',
+    run_time TEXT NOT NULL DEFAULT '08:00',
+    weekday INTEGER,
+    day_of_month INTEGER,
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    project_id TEXT,
+    days INTEGER NOT NULL DEFAULT 90,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_run_at TEXT,
+    next_run_at TEXT NOT NULL,
+    last_error TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_report_schedules_due
+    ON report_schedules(enabled, next_run_at);
+CREATE INDEX IF NOT EXISTS idx_report_schedules_org
+    ON report_schedules(org_id);
 -- Alert delivery log: one row per fired (or attempted) notification.
 CREATE TABLE IF NOT EXISTS vcs_repos (
     id TEXT PRIMARY KEY,
@@ -403,5 +427,16 @@ def init_db():
     if "recipient" not in notif_cols2:
         conn.execute("ALTER TABLE notifications ADD COLUMN"
                      " recipient TEXT NOT NULL DEFAULT ''")
+    # Migration: scheduled executive reports. report_schedules itself is
+    # covered by CREATE TABLE IF NOT EXISTS in the SCHEMA script (runs on
+    # every init_db); notifications gains a nullable report_schedule_id so
+    # report deliveries are attributable (channel='email_report').
+    notif_cols3 = {r["name"]
+                   for r in conn.execute("PRAGMA table_info(notifications)")}
+    if "report_schedule_id" not in notif_cols3:
+        conn.execute("ALTER TABLE notifications"
+                     " ADD COLUMN report_schedule_id TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_notifications_rsch"
+                 " ON notifications(report_schedule_id, created_at DESC)")
     conn.commit()
     conn.close()
