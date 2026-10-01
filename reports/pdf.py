@@ -286,6 +286,12 @@ def render_pdf(report):
     if comp["by_owasp"]:
         for code, n in sorted(comp["by_owasp"].items()):
             _para(pdf, f"- OWASP {code}: {n} finding(s)", size=10)
+    if comp.get("by_soc2"):
+        for code, n in sorted(comp["by_soc2"].items()):
+            _para(pdf, f"- SOC 2 {code}: {n} finding(s)", size=10)
+    if comp.get("by_iso"):
+        for code, n in sorted(comp["by_iso"].items()):
+            _para(pdf, f"- ISO 27001 {code}: {n} finding(s)", size=10)
     _para(pdf, f"Unmapped findings: {comp['unmapped']}", size=10)
 
     # ---- 5. fix plan -----------------------------------------------------
