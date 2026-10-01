@@ -254,6 +254,17 @@ CREATE TABLE IF NOT EXISTS slack_webhooks (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_slack_webhooks_org_hash
     ON slack_webhooks(org_id, url_hash);
 CREATE INDEX IF NOT EXISTS idx_slack_webhooks_org ON slack_webhooks(org_id);
+CREATE TABLE IF NOT EXISTS teams_webhooks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    webhook_url_enc TEXT NOT NULL,
+    url_hash TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_teams_webhooks_org_hash
+    ON teams_webhooks(org_id, url_hash);
+CREATE INDEX IF NOT EXISTS idx_teams_webhooks_org ON teams_webhooks(org_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_sched ON notifications(schedule_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_org ON notifications(org_id, created_at DESC);
 -- idx_notifications_vcs is created post-migration in init_db(): the column
