@@ -1309,6 +1309,71 @@ _doc("DELETE", "/api/telegram-chats/{chat_row_id}",
          "429": _err429(),
      })
 
+_doc("GET", "/api/slack-webhooks",
+     tag="Alerts",
+     summary="List Slack webhooks",
+     description=("The org's Slack alert webhooks. URLs are never returned — "
+                  "only a masked tail (the secret is Fernet-encrypted at "
+                  "rest). Viewer+, org scope."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="60/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("Webhook rows (masked).",
+                      {"webhooks": [
+                          {"id": 3, "label": "#security",
+                           "webhook_url_masked":
+                           "https://hooks.slack.com/services/…a1b2c3",
+                           "created_at": "2026-10-01T12:00:00+00:00"}]}),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/slack-webhooks",
+     tag="Alerts",
+     summary="Register Slack webhook",
+     description=("Register one Slack incoming-webhook URL for alerts. The "
+                  "URL must be on hooks.slack.com and is Fernet-encrypted "
+                  "at rest, never returned. 409 when already registered. "
+                  "Member+, org scope."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[],
+     request_body=_body(
+         "Webhook registration.",
+         {"webhook_url": "https://hooks.slack.com/services/T000/B000/xxxx",
+          "label": "#security"}),
+     responses={
+         "200": _resp("Created webhook row (masked).",
+                      {"id": 3, "label": "#security",
+                       "webhook_url_masked":
+                       "https://hooks.slack.com/services/…a1b2c3",
+                       "created_at": "2026-10-01T12:00:00+00:00"}),
+         "400": _err400("Invalid Slack webhook URL"),
+         "401": _err401(),
+         "403": _err403(),
+         "409": _err409("Webhook already registered"),
+         "429": _err429(),
+     })
+
+_doc("DELETE", "/api/slack-webhooks/{webhook_row_id}",
+     tag="Alerts",
+     summary="Remove Slack webhook",
+     description="Remove one registered Slack webhook. Member+, org scope.",
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[_param("webhook_row_id", "path", "integer", "Webhook row id.",
+                   True, example=3)],
+     request_body=None,
+     responses={
+         "200": _resp("Deletion receipt.",
+                      {"id": 3, "deleted": True}),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Webhook not found"),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
 # ============================ Keys =========================================
 
 _doc("POST", "/api/keys",
