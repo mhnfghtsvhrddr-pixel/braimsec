@@ -1891,6 +1891,30 @@ def list_notifications(request: Request, schedule_id: str | None = None,
     return [dict(r) for r in rows]
 
 
+@app.post("/api/notifications/{notif_id}/resend")
+@limiter.limit("10/minute")
+def resend_notification_endpoint(request: Request, notif_id: int):
+    """Resend a failed alert notification (member+, org scope).
+
+    Webhook rows replay the stored payload exactly; telegram/email rows
+    rebuild the message from the same scan's findings. Slack/Teams rows
+    cannot be resent (masked destination) -> 409.
+    """
+    require_role(request, "member")  # resending fires an external alert
+    from resend_alerts import ResendError, resend_notification  # noqa: E402
+    db = get_db()
+    try:
+        try:
+            result = resend_notification(db, notif_id,
+                                         request.state.org_id,
+                                         request.state.actor)
+        except ResendError as e:
+            raise HTTPException(e.status_code, e.message)
+        return result
+    finally:
+        db.close()
+
+
 # Email alert recipients (per-org). The list itself is the switch: email
 # alerts fire only when the org has at least one enabled address AND the
 # operator configured SMTP (BRAIMSEC_SMTP_*). Delivery happens on the same
