@@ -104,6 +104,7 @@
   .sev-error { background: rgba(248,81,73,.15); color: var(--red); }
   .sev-warning { background: rgba(210,153,34,.15); color: var(--amber); }
   .sev-note { background: rgba(88,166,255,.15); color: var(--blue); }
+  .sev-info { background: rgba(63,185,80,.15); color: var(--green); }
   .verdict { font-size: 0.78rem; padding: 0.2rem 0.6rem; border-radius: 6px; white-space: nowrap; }
   .v-true_positive { background: rgba(248,81,73,.15); color: var(--red); }
   .v-false_positive { background: rgba(63,185,80,.15); color: var(--green); }
@@ -406,6 +407,8 @@
         <option value="vcs.alert">نتائج جديدة (مستودع)</option>
         <option value="vcs.failed">فشل الفحص (مستودع)</option>
         <option value="cert.expiry">🔒 انتهاء شهادة TLS</option>
+        <option value="uptime.down">🔴 توقف الموقع</option>
+        <option value="uptime.recovered">🟢 عودة الموقع</option>
       </select>
       <select id="notif-f-status" onchange="loadNotifications()" aria-label="فلتر الحالة">
         <option value="">كل الحالات</option>
@@ -434,6 +437,26 @@
       <button class="btn-ghost" onclick="loadCertDomains()">↻ تحديث</button>
     </div>
     <div id="cert-wrap"></div>
+  </section>
+
+  <!-- مراقبة الجهوزية: فحص HTTP دوري وتنبيه فوري عند التوقف والعودة -->
+  <section id="uptime-section">
+    <h3 style="margin: 1.6rem 0 1rem;">🌐 مراقبة الجهوزية (Uptime)</h3>
+    <p style="font-size:0.85rem;opacity:0.75;margin-bottom:0.7rem">
+      فحص HTTP دوري للروابط المسجلة — تنبيه فوري عند التوقف (بعد فشلين متتاليين
+      لتفادي الإنذارات الكاذبة) وتنبيه عند عودة الموقع للعمل.
+    </p>
+    <div class="row" style="gap:0.6rem;flex-wrap:wrap;margin-bottom:0.8rem">
+      <input id="up-host" placeholder="example.com" dir="ltr" style="min-width:170px" aria-label="النطاق">
+      <input id="up-port" type="number" value="443" min="1" max="65535" style="width:90px" dir="ltr" aria-label="المنفذ">
+      <input id="up-path" placeholder="/health" dir="ltr" style="width:130px" aria-label="المسار">
+      <label style="font-size:0.85rem"><input type="checkbox" id="up-https" checked> HTTPS</label>
+      <input id="up-kw" placeholder="كلمة مفتاحية (اختياري)" style="width:150px" aria-label="كلمة مفتاحية">
+      <input id="up-wh" placeholder="Webhook URL (اختياري)" dir="ltr" style="min-width:190px" aria-label="Webhook URL">
+      <button class="btn" onclick="addUptimeTarget()">＋ إضافة رابط</button>
+      <button class="btn-ghost" onclick="loadUptimeTargets()">↻ تحديث</button>
+    </div>
+    <div id="uptime-wrap"></div>
   </section>
 
   <!-- التقارير التنفيذية المجدولة: PDF يُرسل بالإيميل تلقائياً -->
@@ -822,7 +845,7 @@ function showView(name) {
   clearInterval(pollTimer);
   if (name === "scans") loadScans();
   if (name === "trends") loadTrends();
-  if (name === "sched") { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); loadCertDomains(); }
+  if (name === "sched") { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); loadCertDomains(); loadUptimeTargets(); }
   if (name === "reports") loadReportSchedules();
   if (name === "vcs") loadVcsRepos();
   if (name === "billing") loadBilling();
@@ -1628,7 +1651,8 @@ async function loadNotifications() {
   }
   const evAr = { "schedule.alert": "نتائج جديدة", "schedule.failed": "فشل الفحص",
     "vcs.alert": "نتائج جديدة (مستودع)", "vcs.failed": "فشل الفحص (مستودع)",
-    "cert.expiry": "🔒 انتهاء شهادة TLS" };
+    "cert.expiry": "🔒 انتهاء شهادة TLS",
+    "uptime.down": "🔴 توقف الموقع", "uptime.recovered": "🟢 عودة الموقع" };
   const chAr = { "webhook": "🔗 ويبهوك", "email": "📧 إيميل",
     "telegram": "✈️ تيليجرام", "slack": "💬 Slack", "teams": "👔 Teams" };
   const stBadge = s => s === "sent" ? `<span class="badge b-done">أُرسل</span>`
@@ -1743,6 +1767,83 @@ async function toggleCertDomain(id, enabled) {
   await api(`/cert-domains/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ enabled: !!enabled }) });
   loadCertDomains();
+}
+
+/* ---------- مراقبة الجهوزية (Uptime) ---------- */
+const UP_ST = { up: "🟢 يعمل", down: "🔴 متوقف", error: "❌ خطأ", never: "— لم يُفحص بعد" };
+
+async function loadUptimeTargets() {
+  const el = document.getElementById("uptime-wrap");
+  let rows;
+  try {
+    rows = await api("/uptime-targets");
+  } catch (e) {
+    el.innerHTML = `<div class="empty"><p>تعذّر التحميل: ${esc(e.message)}</p></div>`;
+    return;
+  }
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty"><p>لا روابط مسجلة — أضف رابطاً ليبدأ الفحص الدوري 🌐</p></div>`;
+    return;
+  }
+  el.innerHTML = `<table><thead><tr>
+      <th>الرابط</th><th>الحالة</th><th>كود</th><th>زمن الاستجابة</th><th>آخر فحص</th><th>إجراءات</th>
+    </tr></thead><tbody>` + rows.map(t => {
+    const scheme = t.use_https ? "https" : "http";
+    const url = `${scheme}://${esc(t.hostname)}:${t.port}${esc(t.path)}`;
+    return `
+    <tr>
+      <td dir="ltr">${url}</td>
+      <td>${UP_ST[t.last_status] || esc(t.last_status)}${t.enabled ? "" : " ⏸️"}</td>
+      <td dir="ltr">${t.last_http_code ?? "—"}</td>
+      <td dir="ltr">${t.last_latency_ms == null ? "—" : t.last_latency_ms + "ms"}</td>
+      <td dir="ltr">${t.last_checked_at ? esc(t.last_checked_at.slice(0, 16).replace("T", " ")) : "—"}</td>
+      <td style="white-space:nowrap">
+        <button class="btn-ghost" onclick="checkUptimeTarget(${t.id})" title="فحص الآن">🔍</button>
+        <button class="btn-ghost" onclick="toggleUptimeTarget(${t.id}, ${t.enabled ? 0 : 1})" title="${t.enabled ? "إيقاف مؤقت" : "تفعيل"}">${t.enabled ? "⏸️" : "▶️"}</button>
+        <button class="btn-ghost" onclick="delUptimeTarget(${t.id})" title="حذف">🗑️</button>
+      </td>
+    </tr>`; }).join("") + `</tbody></table>`;
+}
+
+async function addUptimeTarget() {
+  const hostname = document.getElementById("up-host").value.trim();
+  const port = parseInt(document.getElementById("up-port").value, 10) || 443;
+  const path = document.getElementById("up-path").value.trim() || "/";
+  const use_https = document.getElementById("up-https").checked;
+  const keyword = document.getElementById("up-kw").value.trim();
+  const webhook_url = document.getElementById("up-wh").value.trim();
+  if (!hostname) return;
+  try {
+    await api("/uptime-targets", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hostname, port, path, use_https, keyword, webhook_url }) });
+    document.getElementById("up-host").value = "";
+    document.getElementById("up-kw").value = "";
+    document.getElementById("up-wh").value = "";
+    loadUptimeTargets();
+  } catch (e) { alert("تعذّرت الإضافة: " + e.message); }
+}
+
+async function delUptimeTarget(id) {
+  if (!confirm("إيقاف مراقبة هذا الرابط؟")) return;
+  await api(`/uptime-targets/${id}`, { method: "DELETE" });
+  loadUptimeTargets();
+}
+
+async function checkUptimeTarget(id) {
+  try {
+    const r = await api(`/uptime-targets/${id}/check`, { method: "POST" });
+    loadUptimeTargets();
+    const s = r._live || {};
+    alert(s.status === "up" ? `🟢 الموقع يعمل — ${s.http_status} خلال ${s.latency_ms}ms`
+      : s.status === "down" ? `🔴 الموقع متوقف: ${s.error || ""}`
+      : `❌ تعذّر الفحص: ${s.error || ""}`);
+  } catch (e) { alert("تعذّر الفحص: " + e.message); }
+}
+
+async function toggleUptimeTarget(id, enabled) {
+  await api(`/uptime-targets/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: !!enabled }) });
+  loadUptimeTargets();
 }
 
 /* ---------- المستودعات: فحص تلقائي عند push ---------- */
@@ -2204,7 +2305,7 @@ function obRenderSummary() {
 loadScans();
 setInterval(() => {
   if (!document.getElementById("view-scans").hidden && document.getElementById("view-detail").hidden) loadScans();
-  if (!document.getElementById("view-sched").hidden) { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); loadCertDomains(); }
+  if (!document.getElementById("view-sched").hidden) { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); loadCertDomains(); loadUptimeTargets(); }
 }, 5000);
 </script>
 </body>
