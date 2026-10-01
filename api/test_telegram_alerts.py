@@ -313,7 +313,7 @@ def test_telegram_crud_audited(ctx):
 def test_telegram_sent_on_new_findings(ctx, _tg, monkeypatch):
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     db = get_db()
     _add_chat(db, ctx["org"], "111")
     _add_chat(db, ctx["org"], "-222")
@@ -352,7 +352,7 @@ def test_telegram_sent_on_new_findings(ctx, _tg, monkeypatch):
 def test_no_chats_no_telegram_rows(ctx, _tg, monkeypatch):
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     db = get_db()
     old, new = _new_finding_pair()
     so, sn = "tn_old_" + _uid(), "tn_new_" + _uid()
@@ -397,7 +397,7 @@ def test_telegram_skipped_without_token(ctx, monkeypatch):
 def test_telegram_silent_without_new_findings(ctx, _tg, monkeypatch):
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     db = get_db()
     _add_chat(db, ctx["org"], "444")
     old, _ = _new_finding_pair()
@@ -442,7 +442,7 @@ def test_token_never_in_logs_or_errors(ctx, _tg, caplog):
 def test_failed_scan_telegram(ctx, _tg, monkeypatch):
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     db = get_db()
     _add_chat(db, ctx["org"], "888")
     sb = "sbad_" + _uid()
@@ -474,7 +474,7 @@ def test_failed_scan_telegram(ctx, _tg, monkeypatch):
 def test_vcs_telegram_alert(ctx, _tg, monkeypatch):
     monkeypatch.setattr(
         vcs, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     db = get_db()
     _add_chat(db, ctx["org"], "999")
     old, new = _new_finding_pair()
@@ -500,7 +500,7 @@ def test_vcs_telegram_org_isolation(ctx, _tg, monkeypatch):
     """A chat registered under org A never fires for org B's scans."""
     monkeypatch.setattr(
         vcs, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     db = get_db()
     _add_chat(db, ctx["org"], "1010")  # only the first org has a chat
     old, new = _new_finding_pair()
