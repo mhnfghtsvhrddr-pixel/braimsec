@@ -94,7 +94,7 @@ def compliance_map():
 
 
 def lookup_compliance(rule_id, tool):
-    """-> {owasp, cwe, pci, soc2, map_version} or None (unmapped)."""
+    """-> {owasp, cwe, pci, soc2, iso, map_version} or None (unmapped)."""
     cmap = compliance_map()
     for m in cmap.get("mappings", []):
         if m.get("tool") and tool == m["tool"]:
@@ -108,7 +108,7 @@ def lookup_compliance(rule_id, tool):
         return None
     return {
         "owasp": m.get("owasp"), "cwe": m.get("cwe"),
-        "pci": m.get("pci"), "soc2": m.get("soc2"),
+        "pci": m.get("pci"), "soc2": m.get("soc2"), "iso": m.get("iso"),
         "map_version": cmap.get("version", "unknown"),
         "provenance": "deterministic",
     }
@@ -307,15 +307,22 @@ def build_report(scan, findings, prev=None, target_dir=None,
         raise ReportError("refusing: honesty appendix incomplete")
 
     # --- 4. compliance rollup ---------------------------------------------
-    by_owasp, unmapped = {}, 0
+    by_owasp, by_soc2, by_iso, unmapped = {}, {}, {}, 0
     for f in findings:
         comp = lookup_compliance(f.get("rule_id"), f.get("tool"))
         if comp and comp.get("owasp"):
             code = comp["owasp"]["code"]
             by_owasp[code] = by_owasp.get(code, 0) + 1
+            if comp.get("soc2"):
+                scode = comp["soc2"]["code"]
+                by_soc2[scode] = by_soc2.get(scode, 0) + 1
+            if comp.get("iso"):
+                icode = comp["iso"]["code"]
+                by_iso[icode] = by_iso.get(icode, 0) + 1
         else:
             unmapped += 1
-    compliance = {"by_owasp": by_owasp, "unmapped": unmapped,
+    compliance = {"by_owasp": by_owasp, "by_soc2": by_soc2, "by_iso": by_iso,
+                  "unmapped": unmapped,
                   "map_version": compliance_map().get("version"),
                   "provenance": "deterministic"}
 
