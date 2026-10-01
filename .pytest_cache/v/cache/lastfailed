@@ -2,5 +2,6 @@
   "scanner/test_incremental.py": true,
   "api/test_billing.py": true,
   "api/test_subscriptions.py": true,
-  "api/test_vcs.py::test_register_repo_validation[payload6-missing webhook]": true
+  "api/test_vcs.py::test_register_repo_validation[payload6-missing webhook]": true,
+  "api/test_scheduled_reports.py::test_project_scoped_key_pinned": true
 }
