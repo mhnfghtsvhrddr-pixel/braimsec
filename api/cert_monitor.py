@@ -213,32 +213,17 @@ def _alert_due(domain: dict) -> bool:
         >= REPEAT_ALERT_S
 
 
-def _record(db, org_id: str, domain: dict, days_left: int, channel: str,
-            recipient: str, status: str, attempts: int, err: str | None):
-    db.execute(
-        "INSERT INTO notifications (org_id, scan_id, event, severity,"
-        " new_count, webhook_url, channel, recipient, status, attempts,"
-        " response_code, error, payload, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (org_id, f"cert:{domain['id']}", "cert.expiry",
-         _severity_for(days_left), days_left,
-         domain.get("webhook_url") or "", channel, recipient, status,
-         attempts, None, err,
-         f'{{"hostname": "{domain["hostname"]}",'
-         f' "port": {domain["port"]},'
-         f' "days_left": {days_left}}}',
-         _now_iso()))
-
-
-def _texts(domain: dict, days_left: int, expires: datetime) -> dict:
-    hostport = f"{domain['hostname']}:{domain['port']}"
-    exp = expires.strftime("%Y-%m-%d")
+def _texts(payload: dict) -> dict:
+    """Human texts for a cert.expiry payload (also used by resend)."""
+    hostport = f"{payload['hostname']}:{payload['port']}"
+    days_left = payload["days_left"]
+    exp = str(payload["expires_at"])[:10]
     return {
         "telegram": (f"🔒 BraimSec: شهادة TLS على وشك الانتهاء\n"
                      f"«{hostport}»\nتنتهي في {exp} — بقي {days_left} يوم ⏳"),
         "slack": (f":lock: *BraimSec: شهادة TLS على وشك الانتهاء*\n"
                   f"`{hostport}`\nتنتهي في {exp} — بقي {days_left} يوم"),
-        "email_subject": (f"🔒 BraimSec: شهادة {domain['hostname']} تنتهي "
+        "email_subject": (f"🔒 BraimSec: شهادة {payload['hostname']} تنتهي "
                           f"خلال {days_left} يوم"),
         "email_text": (f"BraimSec: شهادة TLS على وشك الانتهاء\n\n"
                        f"النطاق: {hostport}\nتنتهي في: {exp}\n"
@@ -249,88 +234,26 @@ def _texts(domain: dict, days_left: int, expires: datetime) -> dict:
                        f'<p>تنتهي في: <b>{exp}</b> (بقي {days_left} يوم)</p>'
                        f'</body></html>'),
         "teams_title": "🔒 BraimSec: شهادة TLS على وشك الانتهاء",
+        "teams_facts": [("النطاق", hostport),
+                        ("تنتهي في", exp),
+                        ("المتبقي", f"{days_left} يوم")],
     }
 
 
+from alert_fanout import register_text_builder as _register  # noqa: E402
+_register("cert.expiry", _texts)
+
+
 def _fan_out(db, domain: dict, days_left: int, expires: datetime):
-    """Send the expiry alert on every channel the org configured."""
-    from scheduler import send_alert  # noqa: E402
-    from telegram_alerts import send_telegram  # noqa: E402
-    from slack_alerts import _decrypt as _decrypt_slack, send_slack  # noqa: E402
-    from teams_alerts import _decrypt as _decrypt_teams, send_teams  # noqa: E402
-    from email_alerts import send_email  # noqa: E402
-
-    org_id = domain["org_id"]
-    t = _texts(domain, days_left, expires)
-    hostport = f"{domain['hostname']}:{domain['port']}"
-
-    # 1) the domain's own webhook URL (exact payload replay on resend)
-    if domain.get("webhook_url"):
-        payload = {"event": "cert.expiry", "hostname": domain["hostname"],
-                   "port": domain["port"], "days_left": days_left,
-                   "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%S+00:00")}
-        ok, attempts, code, err = send_alert(domain["webhook_url"], payload,
-                                             org_id=org_id)
-        _record(db, org_id, domain, days_left, "webhook", "",
-                "sent" if ok else "failed", attempts, err)
-
-    # 2) telegram chats
-    for r in db.execute("SELECT chat_id FROM telegram_chats WHERE org_id=?",
-                        (org_id,)).fetchall():
-        ok, attempts, err = send_telegram(r["chat_id"], t["telegram"])
-        _record(db, org_id, domain, days_left, "telegram", r["chat_id"],
-                "sent" if ok else "failed", attempts, err)
-
-    # 3) slack webhooks
-    for r in db.execute("SELECT webhook_url_enc, label FROM slack_webhooks"
-                        " WHERE org_id=?", (org_id,)).fetchall():
-        try:
-            url = _decrypt_slack(r["webhook_url_enc"])
-        except Exception as e:  # noqa: BLE001 - corrupt row must not kill fan-out
-            log.warning("slack webhook undecryptable: %s", e)
-            _record(db, org_id, domain, days_left, "slack", r["label"] or "",
-                    "skipped", 0, "stored webhook URL undecryptable")
-            continue
-        ok, attempts, err = send_slack(url, t["slack"])
-        _record(db, org_id, domain, days_left, "slack", r["label"] or "",
-                "sent" if ok else "failed", attempts, err)
-
-    # 4) teams webhooks
-    for r in db.execute("SELECT webhook_url_enc, label FROM teams_webhooks"
-                        " WHERE org_id=?", (org_id,)).fetchall():
-        try:
-            url = _decrypt_teams(r["webhook_url_enc"])
-        except Exception as e:  # noqa: BLE001 - corrupt row must not kill fan-out
-            log.warning("teams webhook undecryptable: %s", e)
-            _record(db, org_id, domain, days_left, "teams", r["label"] or "",
-                    "skipped", 0, "stored webhook URL undecryptable")
-            continue
-        card = {"@type": "MessageCard",
-                "@context": "http://schema.org/extensions",
-                "themeColor": "FF0000",
-                "summary": t["teams_title"],
-                "sections": [{
-                    "activityTitle": t["teams_title"],
-                    "facts": [
-                        {"name": "النطاق", "value": hostport},
-                        {"name": "تنتهي في",
-                         "value": expires.strftime("%Y-%m-%d")},
-                        {"name": "المتبقي", "value": f"{days_left} يوم"},
-                    ],
-                    "markdown": True}]}
-        ok, attempts, err = send_teams(url, card)
-        _record(db, org_id, domain, days_left, "teams", r["label"] or "",
-                "sent" if ok else "failed", attempts, err)
-
-    # 5) email recipients
-    for r in db.execute("SELECT email FROM alert_emails"
-                        " WHERE org_id=? AND enabled=1", (org_id,)).fetchall():
-        ok, attempts, err = send_email(r["email"], t["email_subject"],
-                                       t["email_text"], t["email_html"])
-        _record(db, org_id, domain, days_left, "email", r["email"],
-                "sent" if ok else "failed", attempts, err)
-
-    db.commit()
+    """Build the webhook payload and hand off to the shared fan-out."""
+    from alert_fanout import fan_out  # noqa: E402
+    payload = {"event": "cert.expiry", "hostname": domain["hostname"],
+               "port": domain["port"], "days_left": days_left,
+               "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%S+00:00")}
+    fan_out(db, domain["org_id"], event="cert.expiry",
+            scan_id=f"cert:{domain['id']}",
+            severity=_severity_for(days_left), count=days_left,
+            webhook_url=domain.get("webhook_url") or "", payload=payload)
 
 
 def run_cert_checks_once(db=None) -> dict:
