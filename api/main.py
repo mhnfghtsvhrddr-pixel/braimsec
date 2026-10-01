@@ -2056,6 +2056,85 @@ def delete_telegram_chat(request: Request, chat_row_id: int):
     return {"id": chat_row_id, "deleted": True}
 
 
+@app.get("/api/slack-webhooks")
+@limiter.limit("60/minute")
+def list_slack_webhooks(request: Request):
+    """List the org's Slack alert webhooks (viewer+, org scope).
+
+    Webhook URLs are never returned — only a masked tail. The secret lives
+    encrypted in the DB.
+    """
+    from slack_alerts import get_org_webhooks  # noqa: E402
+    require_org_scope(request)
+    return {"webhooks": get_org_webhooks(request.state.org_id)}
+
+
+@app.post("/api/slack-webhooks")
+@limiter.limit("30/minute")
+async def add_slack_webhook(request: Request):
+    """Register one Slack incoming-webhook URL (member+, org scope).
+
+    Body: {"webhook_url": "https://hooks.slack.com/services/...",
+           "label": "optional, e.g. #security"}.
+    The URL is Fernet-encrypted at rest and never returned by the API.
+    """
+    import hashlib  # noqa: E402
+    from slack_alerts import (get_org_webhooks, validate_webhook_url,  # noqa: E402
+                              _encrypt)
+    require_role(request, "member")
+    require_org_scope(request)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    try:
+        url = validate_webhook_url(body.get("webhook_url"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    label = str(body.get("label") or "")[:80]
+    label = " ".join(label.split())
+    url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    db = get_db()
+    dup = db.execute(
+        "SELECT id FROM slack_webhooks WHERE org_id=? AND url_hash=?",
+        (request.state.org_id, url_hash)).fetchone()
+    if dup:
+        db.close()
+        raise HTTPException(409, "Webhook already registered")
+    cur = db.execute(
+        "INSERT INTO slack_webhooks (org_id, webhook_url_enc, url_hash,"
+        " label, created_at) VALUES (?,?,?,?,?)",
+        (request.state.org_id, _encrypt(url), url_hash, label, now()))
+    row_id = cur.lastrowid
+    db.commit()
+    db.close()
+    _audit(request, "slack_webhook.added", "slack_webhook", row_id,
+           {"label": label})
+    webhooks = get_org_webhooks(request.state.org_id)
+    return next(w for w in webhooks if w["id"] == row_id)
+
+
+@app.delete("/api/slack-webhooks/{webhook_row_id}")
+@limiter.limit("30/minute")
+def delete_slack_webhook(request: Request, webhook_row_id: int):
+    """Remove one registered Slack webhook (member+, org scope)."""
+    require_role(request, "member")
+    require_org_scope(request)
+    db = get_db()
+    row = db.execute(
+        "SELECT label FROM slack_webhooks WHERE id=? AND org_id=?",
+        (webhook_row_id, request.state.org_id)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Webhook not found")
+    db.execute("DELETE FROM slack_webhooks WHERE id=?", (webhook_row_id,))
+    db.commit()
+    db.close()
+    _audit(request, "slack_webhook.removed", "slack_webhook", webhook_row_id,
+           {"label": row["label"]})
+    return {"id": webhook_row_id, "deleted": True}
+
+
 def _fix_payload(row):
     """Serialize the cached AI fix-suggestion columns of a finding row."""
     try:
