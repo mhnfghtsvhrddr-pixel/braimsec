@@ -148,7 +148,7 @@
   .modal.wide { max-width: 760px; }
   .modal h3 { margin-bottom: 1.2rem; }
   .modal label { display: block; color: var(--muted); font-size: 0.88rem; margin: 1rem 0 0.4rem; }
-  .modal input[type=text], .modal select {
+  .modal input[type=text], .modal input[type=time], .modal select {
     width: 100%; background: var(--bg); border: 1px solid var(--border);
     border-radius: 8px; color: var(--text); padding: 0.65rem 0.9rem; font-size: 0.95rem;
   }
@@ -220,6 +220,7 @@
 
 <nav>
   <button id="nav-scans" class="active" onclick="showView('scans')">📋 الفحوصات</button>
+  <button id="nav-sched" onclick="showView('sched')">⏰ الجدولة</button>
   <button id="nav-billing" onclick="showView('billing')">💳 الاشتراك والاستخدام</button>
   <button id="nav-keys" onclick="showView('keys')">🔑 مفاتيح API</button>
 </nav>
@@ -256,6 +257,17 @@
     <div id="findings-wrap"></div>
   </section>
 
+  <!-- الجدولة والتنبيهات -->
+  <section id="view-sched" hidden>
+    <div class="toolbar">
+      <h2>⏰ الفحوصات المجدولة</h2>
+      <button class="btn" onclick="openSchedModal()">+ جدولة جديدة</button>
+    </div>
+    <div id="sched-wrap"></div>
+    <h3 style="margin: 1.6rem 0 1rem;">🔔 سجل التنبيهات</h3>
+    <div id="notif-wrap"></div>
+  </section>
+
   <!-- الاشتراك والاستخدام -->
   <section id="view-billing" hidden>
     <div class="toolbar"><h2>💳 الاشتراك والاستخدام</h2></div>
@@ -274,6 +286,48 @@
     <div id="keys-wrap"></div>
   </section>
 </main>
+
+<!-- نافذة جدولة -->
+<div id="sched-back" class="modal-back" hidden>
+  <div class="modal">
+    <h3 id="sched-modal-title">⏰ جدولة جديدة</h3>
+    <label>الاسم</label>
+    <input type="text" id="sched-name" placeholder="فحص ليلي للـAPI">
+    <label>مسار مجلد الكود (على السيرفر)</label>
+    <input type="text" id="sched-target" placeholder="/data/braimsec/scans/myapp" dir="ltr">
+    <label>التكرار</label>
+    <select id="sched-freq" onchange="document.getElementById('sched-weekday-wrap').style.display = this.value === 'weekly' ? 'block' : 'none'">
+      <option value="daily">يومي</option>
+      <option value="weekly">أسبوعي</option>
+    </select>
+    <div id="sched-weekday-wrap" style="display:none">
+      <label>اليوم</label>
+      <select id="sched-weekday">
+        <option value="0">الإثنين</option><option value="1">الثلاثاء</option>
+        <option value="2">الأربعاء</option><option value="3">الخميس</option>
+        <option value="4">الجمعة</option><option value="5">السبت</option>
+        <option value="6">الأحد</option>
+      </select>
+    </div>
+    <label>الوقت (HH:MM)</label>
+    <input type="time" id="sched-time" value="02:00" dir="ltr">
+    <label>المنطقة الزمنية</label>
+    <input type="text" id="sched-tz" value="UTC" dir="ltr" placeholder="UTC أو Asia/Beirut">
+    <label>حد التنبيه (خطورة النتائج الجديدة)</label>
+    <select id="sched-sev">
+      <option value="error">حرجة فقط</option>
+      <option value="warning" selected>متوسطة فأعلى</option>
+      <option value="note">الكل</option>
+    </select>
+    <label>Webhook للتنبيهات (Slack/Discord)</label>
+    <input type="text" id="sched-webhook" placeholder="https://hooks.slack.com/..." dir="ltr">
+    <div class="row">
+      <button class="btn" onclick="saveSchedule()">حفظ</button>
+      <button class="btn-ghost" onclick="document.getElementById('sched-back').hidden = true">إلغاء</button>
+    </div>
+    <p id="sched-err" style="color: var(--red); font-size: 0.85rem; margin-top: 0.8rem;"></p>
+  </div>
+</div>
 
 <!-- نافذة فحص جديد -->
 <div id="modal-back" class="modal-back" hidden>
@@ -366,15 +420,17 @@ const myPrefix = () => (localStorage.getItem("braimsec_key") || "").slice(0, 8);
 
 /* ---------- التنقل ---------- */
 function showView(name) {
-  ["scans", "billing", "keys"].forEach(v => {
+  ["scans", "sched", "billing", "keys"].forEach(v => {
     document.getElementById("nav-" + v).classList.toggle("active", v === name);
   });
   document.getElementById("view-scans").hidden = name !== "scans";
   document.getElementById("view-detail").hidden = true;
+  document.getElementById("view-sched").hidden = name !== "sched";
   document.getElementById("view-billing").hidden = name !== "billing";
   document.getElementById("view-keys").hidden = name !== "keys";
   clearInterval(pollTimer);
   if (name === "scans") loadScans();
+  if (name === "sched") { loadSchedules(); loadNotifications(); }
   if (name === "billing") loadBilling();
   if (name === "keys") loadKeys();
 }
@@ -690,9 +746,146 @@ async function revokeKey(id) {
   } catch (e) { alert("تعذر الإلغاء: " + e.message); }
 }
 
+/* ---------- الجدولة والتنبيهات ---------- */
+const FREQ_AR = { daily: "يومي", weekly: "أسبوعي" };
+const SEV_TH_AR = { error: "حرجة فقط", warning: "متوسطة فأعلى", note: "الكل" };
+const WD_AR = ["الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"];
+let editingSched = null;
+
+async function loadSchedules() {
+  let rows;
+  try { rows = await api("/schedules"); }
+  catch (e) {
+    document.getElementById("sched-wrap").innerHTML =
+      `<div class="empty"><p>تعذر التحميل: ${esc(e.message)}</p></div>`;
+    return;
+  }
+  const el = document.getElementById("sched-wrap");
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty"><div class="big">⏰</div><p>لا توجد جدولة بعد — أنشئ أول فحص دوري!</p></div>`;
+    return;
+  }
+  el.innerHTML = rows.map(s => {
+    const freq = FREQ_AR[s.frequency] + (s.frequency === "weekly" && s.weekday != null ? " (" + WD_AR[s.weekday] + ")" : "");
+    return `
+    <div class="scan-card">
+      <div>
+        <div class="name">⏰ ${esc(s.name)}</div>
+        <div class="meta"><code dir="ltr">${esc(s.target_path)}</code></div>
+        <div class="meta">${freq} — ${esc(s.run_time)} (${esc(s.timezone)}) — تنبيه: ${SEV_TH_AR[s.alert_severity] || s.alert_severity}</div>
+        <div class="meta">التالي: ${fmtDT(s.next_run_at)}${s.last_run_at ? " — آخر تشغيل: " + fmtDT(s.last_run_at) : ""}</div>
+        ${s.last_error ? `<div class="meta" style="color:var(--red)">⚠️ ${esc(s.last_error)}</div>` : ""}
+      </div>
+      <div class="left" style="flex-wrap: wrap; gap: 0.4rem;">
+        <span class="badge ${s.enabled ? "b-done" : "b-queued"}">${s.enabled ? "مفعّلة" : "موقوفة"}</span>
+        <button class="btn-ghost" onclick="runSchedNow('${s.id}')">▶ تشغيل الآن</button>
+        <button class="btn-ghost" onclick='openSchedModal(${JSON.stringify(s.id)})'>تعديل</button>
+        <button class="btn-ghost" onclick="toggleSched('${s.id}', ${s.enabled ? 0 : 1})">${s.enabled ? "إيقاف" : "تفعيل"}</button>
+        <button class="btn-ghost" onclick="deleteSched('${s.id}')">حذف</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+async function loadNotifications() {
+  let rows;
+  try { rows = await api("/notifications?limit=30"); }
+  catch (e) {
+    document.getElementById("notif-wrap").innerHTML =
+      `<div class="empty"><p>تعذر التحميل: ${esc(e.message)}</p></div>`;
+    return;
+  }
+  const el = document.getElementById("notif-wrap");
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty"><p>لا تنبيهات بعد — ستظهر هنا عند اكتشاف نتائج جديدة 🔕</p></div>`;
+    return;
+  }
+  const evAr = { "schedule.alert": "نتائج جديدة", "schedule.failed": "فشل الفحص" };
+  el.innerHTML = `<table><thead><tr>
+      <th>الوقت</th><th>الحدث</th><th>الخطورة</th><th>جديد</th><th>الحالة</th><th>محاولات</th>
+    </tr></thead><tbody>` + rows.map(n => `
+    <tr>
+      <td>${fmtDT(n.created_at)}</td>
+      <td>${evAr[n.event] || esc(n.event)}</td>
+      <td><span class="sev sev-${n.severity}">${esc(n.severity)}</span></td>
+      <td>${n.new_count}</td>
+      <td><span class="badge ${n.status === "sent" ? "b-done" : "b-failed"}">${n.status === "sent" ? "أُرسل" : "فشل"}</span></td>
+      <td>${n.attempts}${n.error ? ` <span title="${esc(n.error)}" style="color:var(--red)">⚠️</span>` : ""}</td>
+    </tr>`).join("") + `</tbody></table>`;
+}
+
+function openSchedModal(id) {
+  editingSched = id || null;
+  document.getElementById("sched-err").textContent = "";
+  document.getElementById("sched-modal-title").textContent = id ? "✏️ تعديل الجدولة" : "⏰ جدولة جديدة";
+  const set = (k, v) => document.getElementById("sched-" + k).value = v ?? "";
+  if (id) {
+    api(`/schedules/${id}`).then(s => {
+      set("name", s.name); set("target", s.target_path);
+      set("freq", s.frequency); set("time", s.run_time); set("tz", s.timezone);
+      set("sev", s.alert_severity); set("webhook", s.webhook_url);
+      document.getElementById("sched-weekday").value = s.weekday ?? 0;
+      document.getElementById("sched-weekday-wrap").style.display = s.frequency === "weekly" ? "block" : "none";
+      document.getElementById("sched-back").hidden = false;
+    }).catch(e => alert("تعذر التحميل: " + e.message));
+  } else {
+    set("name", ""); set("target", ""); set("freq", "daily");
+    set("time", "02:00"); set("tz", "UTC"); set("sev", "warning"); set("webhook", "");
+    document.getElementById("sched-weekday").value = 0;
+    document.getElementById("sched-weekday-wrap").style.display = "none";
+    document.getElementById("sched-back").hidden = false;
+  }
+}
+
+async function saveSchedule() {
+  const err = document.getElementById("sched-err");
+  err.textContent = "";
+  const freq = document.getElementById("sched-freq").value;
+  const body = {
+    name: document.getElementById("sched-name").value.trim(),
+    target_path: document.getElementById("sched-target").value.trim(),
+    frequency: freq,
+    run_time: document.getElementById("sched-time").value,
+    timezone: document.getElementById("sched-tz").value.trim() || "UTC",
+    alert_severity: document.getElementById("sched-sev").value,
+    webhook_url: document.getElementById("sched-webhook").value.trim(),
+  };
+  if (freq === "weekly") body.weekday = parseInt(document.getElementById("sched-weekday").value, 10);
+  try {
+    if (editingSched) await api(`/schedules/${editingSched}`, { method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+    else await api("/schedules", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+    document.getElementById("sched-back").hidden = true;
+    loadSchedules();
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function toggleSched(id, enabled) {
+  try {
+    await api(`/schedules/${id}`, { method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ enabled: !!enabled }) });
+    loadSchedules();
+  } catch (e) { alert("تعذر التحديث: " + e.message); }
+}
+
+async function runSchedNow(id) {
+  try {
+    const r = await api(`/schedules/${id}/run`, { method: "POST" });
+    alert("بدأ الفحص ✅");
+    loadSchedules();
+  } catch (e) { alert("تعذر التشغيل: " + e.message); }
+}
+
+async function deleteSched(id) {
+  if (!confirm("حذف هذه الجدولة وسجل تنبيهاتها؟\n\nهل أنت متأكد؟")) return;
+  try {
+    await api(`/schedules/${id}`, { method: "DELETE" });
+    loadSchedules(); loadNotifications();
+  } catch (e) { alert("تعذر الحذف: " + e.message); }
+}
+
 loadScans();
 setInterval(() => {
   if (!document.getElementById("view-scans").hidden && document.getElementById("view-detail").hidden) loadScans();
+  if (!document.getElementById("view-sched").hidden) { loadSchedules(); loadNotifications(); }
 }, 5000);
 </script>
 </body>
