@@ -229,6 +229,7 @@
 <nav>
   <button id="nav-scans" class="active" onclick="showView('scans')">📋 الفحوصات</button>
   <button id="nav-sched" onclick="showView('sched')">⏰ الجدولة</button>
+  <button id="nav-vcs" onclick="showView('vcs')">🔗 المستودعات</button>
   <button id="nav-billing" onclick="showView('billing')">💳 الاشتراك والاستخدام</button>
   <button id="nav-keys" onclick="showView('keys')">🔑 مفاتيح API</button>
 </nav>
@@ -286,6 +287,16 @@
     <div id="sched-wrap"></div>
     <h3 style="margin: 1.6rem 0 1rem;">🔔 سجل التنبيهات</h3>
     <div id="notif-wrap"></div>
+  </section>
+
+  <!-- المستودعات: فحص تلقائي عند كل push -->
+  <section id="view-vcs" hidden>
+    <div class="toolbar">
+      <h2>🔗 المستودعات المربوطة</h2>
+      <button class="btn" onclick="openVcsModal()">+ ربط مستودع</button>
+    </div>
+    <p style="color: var(--muted); font-size: 0.9rem; margin: 0 0 1rem;">ادفع كودك إلى الفرع المراقب فيُفحص تلقائياً، وتُرسل التنبيهات عند النتائج الجديدة.</p>
+    <div id="vcs-wrap"></div>
   </section>
 
   <!-- الاشتراك والاستخدام -->
@@ -346,6 +357,52 @@
       <button class="btn-ghost" onclick="document.getElementById('sched-back').hidden = true">إلغاء</button>
     </div>
     <p id="sched-err" style="color: var(--red); font-size: 0.85rem; margin-top: 0.8rem;"></p>
+  </div>
+</div>
+
+<!-- نافذة ربط مستودع -->
+<div id="vcs-back" class="modal-back" hidden>
+  <div class="modal">
+    <h3>🔗 ربط مستودع جديد</h3>
+    <label>المزود</label>
+    <select id="vcs-provider">
+      <option value="github">GitHub</option>
+      <option value="gitlab">GitLab</option>
+    </select>
+    <label>رابط المستودع (https)</label>
+    <input type="text" id="vcs-url" placeholder="https://github.com/org/repo" dir="ltr">
+    <label>الفرع المراقب</label>
+    <input type="text" id="vcs-branch" value="main" dir="ltr">
+    <label>حد التنبيه (خطورة النتائج الجديدة)</label>
+    <select id="vcs-sev">
+      <option value="error">حرجة فقط</option>
+      <option value="warning" selected>متوسطة فأعلى</option>
+      <option value="note">الكل</option>
+    </select>
+    <label>Webhook للتنبيهات (Slack/Discord)</label>
+    <input type="text" id="vcs-webhook" placeholder="https://hooks.slack.com/..." dir="ltr">
+    <div class="row">
+      <button class="btn" onclick="saveVcsRepo()">ربط</button>
+      <button class="btn-ghost" onclick="document.getElementById('vcs-back').hidden = true">إلغاء</button>
+    </div>
+    <p id="vcs-err" style="color: var(--red); font-size: 0.85rem; margin-top: 0.8rem;"></p>
+  </div>
+</div>
+
+<!-- نافذة سر الويبهوك (يُعرض مرة واحدة) -->
+<div id="vcssecret-back" class="modal-back" hidden>
+  <div class="modal">
+    <h3>⚠️ احفظ سر الويبهوك الآن</h3>
+    <p class="warn">لن يظهر السر الكامل مجدداً أبداً — الصقه في إعدادات الويبهوك لدى المزود.</p>
+    <label>رابط الاستقبال (Payload URL)</label>
+    <div class="keybox" id="vcssecret-url" dir="ltr"></div>
+    <div class="row"><button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('vcssecret-url').textContent).then(() => alert('تم النسخ ✅'))">📋 نسخ الرابط</button></div>
+    <label>السر (Webhook secret / token)</label>
+    <div class="keybox" id="vcssecret-value" dir="ltr"></div>
+    <div class="row">
+      <button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('vcssecret-value').textContent).then(() => alert('تم النسخ ✅'))">📋 نسخ السر</button>
+      <button class="btn-ghost" onclick="document.getElementById('vcssecret-back').hidden = true">تم، حفظته</button>
+    </div>
   </div>
 </div>
 
@@ -445,17 +502,19 @@ const myPrefix = () => (localStorage.getItem("braimsec_key") || "").slice(0, 8);
 
 /* ---------- التنقل ---------- */
 function showView(name) {
-  ["scans", "sched", "billing", "keys"].forEach(v => {
+  ["scans", "sched", "vcs", "billing", "keys"].forEach(v => {
     document.getElementById("nav-" + v).classList.toggle("active", v === name);
   });
   document.getElementById("view-scans").hidden = name !== "scans";
   document.getElementById("view-detail").hidden = true;
   document.getElementById("view-sched").hidden = name !== "sched";
+  document.getElementById("view-vcs").hidden = name !== "vcs";
   document.getElementById("view-billing").hidden = name !== "billing";
   document.getElementById("view-keys").hidden = name !== "keys";
   clearInterval(pollTimer);
   if (name === "scans") loadScans();
   if (name === "sched") { loadSchedules(); loadNotifications(); }
+  if (name === "vcs") loadVcsRepos();
   if (name === "billing") loadBilling();
   if (name === "keys") loadKeys();
 }
@@ -872,7 +931,8 @@ async function loadNotifications() {
     el.innerHTML = `<div class="empty"><p>لا تنبيهات بعد — ستظهر هنا عند اكتشاف نتائج جديدة 🔕</p></div>`;
     return;
   }
-  const evAr = { "schedule.alert": "نتائج جديدة", "schedule.failed": "فشل الفحص" };
+  const evAr = { "schedule.alert": "نتائج جديدة", "schedule.failed": "فشل الفحص",
+    "vcs.alert": "نتائج جديدة (مستودع)", "vcs.failed": "فشل الفحص (مستودع)" };
   el.innerHTML = `<table><thead><tr>
       <th>الوقت</th><th>الحدث</th><th>الخطورة</th><th>جديد</th><th>الحالة</th><th>محاولات</th>
     </tr></thead><tbody>` + rows.map(n => `
@@ -884,6 +944,112 @@ async function loadNotifications() {
       <td><span class="badge ${n.status === "sent" ? "b-done" : "b-failed"}">${n.status === "sent" ? "أُرسل" : "فشل"}</span></td>
       <td>${n.attempts}${n.error ? ` <span title="${esc(n.error)}" style="color:var(--red)">⚠️</span>` : ""}</td>
     </tr>`).join("") + `</tbody></table>`;
+}
+
+/* ---------- المستودعات: فحص تلقائي عند push ---------- */
+const VCS_AR = { github: "GitHub", gitlab: "GitLab" };
+
+async function loadVcsRepos() {
+  let rows;
+  try { rows = await api("/vcs/repos"); }
+  catch (e) {
+    document.getElementById("vcs-wrap").innerHTML =
+      `<div class="empty"><p>تعذر التحميل: ${esc(e.message)}</p></div>`;
+    return;
+  }
+  const el = document.getElementById("vcs-wrap");
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty"><div class="big">🔗</div>
+      <p>لا مستودعات مربوطة بعد — اربط مستودعاً ليُفحص تلقائياً عند كل push.</p></div>`;
+    return;
+  }
+  el.innerHTML = `<table><thead><tr>
+      <th>المستودع</th><th>المزود</th><th>الفرع</th><th>الحالة</th>
+      <th>آخر فحص</th><th>نتائج</th><th>إجراءات</th>
+    </tr></thead><tbody>` + rows.map(r => `
+    <tr>
+      <td dir="ltr" style="text-align:left">${esc(r.full_name)}</td>
+      <td>${VCS_AR[r.provider] || esc(r.provider)}</td>
+      <td dir="ltr">${esc(r.branch)}</td>
+      <td>${r.enabled ? '<span class="badge b-done">مفعّل</span>'
+                      : '<span class="badge b-failed">معطّل</span>'}
+          ${r.last_error ? ` <span title="${esc(r.last_error)}" style="color:var(--red)">⚠️</span>` : ""}</td>
+      <td>${r.last_scan_id ? `<a href="#" onclick="showView('scans');return false">${fmtDT(r.last_scan_at)}</a>` : "—"}</td>
+      <td>${r.last_scan_id ? `<button class="btn-ghost" onclick="viewVcsScan('${r.id}')">عرض</button>` : "—"}</td>
+      <td>
+        <button class="btn-ghost" onclick="toggleVcsRepo('${r.id}', ${r.enabled ? 0 : 1})">${r.enabled ? "تعطيل" : "تفعيل"}</button>
+        <button class="btn-ghost" onclick="rotateVcsSecret('${r.id}')">🔑 تدوير السر</button>
+        <button class="btn-ghost" style="color:var(--red)" onclick="deleteVcsRepo('${r.id}')">حذف</button>
+      </td>
+    </tr>`).join("") + `</tbody></table>`;
+}
+
+async function viewVcsScan(repoId) {
+  const r = await api(`/vcs/repos/${repoId}`).catch(e => { alert("تعذر التحميل: " + e.message); return null; });
+  if (!r || !r.last_scan) return;
+  alert(`آخر فحص: ${r.last_scan.status} — ${r.last_scan.total_findings} نتيجة\n` +
+        `commit: ${(r.last_scan.commit_sha || "").slice(0, 12)}\n` +
+        `انتهى: ${fmtDT(r.last_scan.finished_at)}`);
+}
+
+function openVcsModal() {
+  document.getElementById("vcs-err").textContent = "";
+  document.getElementById("vcs-provider").value = "github";
+  document.getElementById("vcs-url").value = "";
+  document.getElementById("vcs-branch").value = "main";
+  document.getElementById("vcs-sev").value = "warning";
+  document.getElementById("vcs-webhook").value = "";
+  document.getElementById("vcs-back").hidden = false;
+}
+
+function showVcsSecret(url, secret) {
+  document.getElementById("vcssecret-url").textContent = url;
+  document.getElementById("vcssecret-value").textContent = secret;
+  document.getElementById("vcs-back").hidden = true;
+  document.getElementById("vcssecret-back").hidden = false;
+}
+
+async function saveVcsRepo() {
+  const err = document.getElementById("vcs-err");
+  err.textContent = "";
+  const body = {
+    provider: document.getElementById("vcs-provider").value,
+    repo_url: document.getElementById("vcs-url").value.trim(),
+    branch: document.getElementById("vcs-branch").value.trim() || "main",
+    alert_severity: document.getElementById("vcs-sev").value,
+    webhook_url: document.getElementById("vcs-webhook").value.trim(),
+  };
+  if (!body.repo_url) { err.textContent = "أدخل رابط المستودع"; return; }
+  if (!body.webhook_url) { err.textContent = "أدخل Webhook للتنبيهات"; return; }
+  try {
+    const r = await api("/vcs/repos", { method: "POST", body: JSON.stringify(body) });
+    showVcsSecret(r.receiver_url, r.webhook_secret);
+    loadVcsRepos();
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function toggleVcsRepo(id, enabled) {
+  try {
+    await api(`/vcs/repos/${id}`, { method: "PATCH", body: JSON.stringify({ enabled: !!enabled }) });
+    loadVcsRepos();
+  } catch (e) { alert("تعذر التحديث: " + e.message); }
+}
+
+async function rotateVcsSecret(id) {
+  if (!confirm("تدوير السر يُبطل السر الحالي فوراً — حدّث إعدادات الويبهوك لدى المزود.\n\nهل تريد المتابعة؟")) return;
+  try {
+    const r = await api(`/vcs/repos/${id}/rotate-secret`, { method: "POST" });
+    showVcsSecret(r.receiver_url, r.webhook_secret);
+    loadVcsRepos();
+  } catch (e) { alert("تعذر التدوير: " + e.message); }
+}
+
+async function deleteVcsRepo(id) {
+  if (!confirm("حذف المستودع يوقف الفحص التلقائي نهائياً.\n\nهل أنت متأكد؟")) return;
+  try {
+    await api(`/vcs/repos/${id}`, { method: "DELETE" });
+    loadVcsRepos();
+  } catch (e) { alert("تعذر الحذف: " + e.message); }
 }
 
 function openSchedModal(id) {
