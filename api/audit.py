@@ -41,6 +41,10 @@ ACTIONS = frozenset({
     "project.created",
     "project.deleted",
     "audit_log.archived",
+    "schedule.created",
+    "schedule.updated",
+    "schedule.deleted",
+    "schedule.run",
 })
 
 # Archival never touches recent history: the window must be at least
