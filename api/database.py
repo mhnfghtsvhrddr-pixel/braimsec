@@ -127,6 +127,50 @@ CREATE TABLE IF NOT EXISTS audit_archives (
     last_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_archives_org ON audit_archives(org_id, created_at DESC);
+-- Scheduled scans + new-findings alerts (webhooks only; email deliberately
+-- out of scope). A schedule re-scans a server-local target_path on a
+-- daily/weekly cadence; each run incrementalizes against the previous
+-- scheduled scan. last_error surfaces the latest driver failure in the UI.
+CREATE TABLE IF NOT EXISTS schedules (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    name TEXT NOT NULL,
+    target_path TEXT NOT NULL,
+    frequency TEXT NOT NULL DEFAULT 'daily',
+    run_time TEXT NOT NULL DEFAULT '02:00',
+    weekday INTEGER,
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    alert_severity TEXT NOT NULL DEFAULT 'warning',
+    webhook_url TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_run_at TEXT,
+    next_run_at TEXT NOT NULL,
+    last_scan_id TEXT,
+    prev_scan_id TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at);
+CREATE INDEX IF NOT EXISTS idx_schedules_org ON schedules(org_id);
+-- Alert delivery log: one row per fired (or attempted) notification.
+CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    schedule_id TEXT NOT NULL REFERENCES schedules(id),
+    scan_id TEXT NOT NULL,
+    event TEXT NOT NULL DEFAULT 'schedule.alert',
+    severity TEXT NOT NULL,
+    new_count INTEGER NOT NULL DEFAULT 0,
+    webhook_url TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    response_code INTEGER,
+    error TEXT,
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_sched ON notifications(schedule_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_org ON notifications(org_id, created_at DESC);
 """
 
 
