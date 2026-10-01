@@ -1614,6 +1614,9 @@ async function loadNotifications() {
   const stBadge = s => s === "sent" ? `<span class="badge b-done">أُرسل</span>`
     : s === "skipped" ? `<span class="badge b-queued">متخطاة</span>`
     : `<span class="badge b-failed">فشل</span>`;
+  const resendBtn = n => n.status === "failed"
+    ? ` <button class="btn-ghost" style="padding:0.15rem 0.5rem;font-size:0.8rem" onclick="resendNotification(${n.id}, this)">↻ إعادة</button>`
+    : "";
   el.innerHTML = `<table><thead><tr>
       <th>الوقت</th><th>الحدث</th><th>القناة</th><th>الخطورة</th><th>جديد</th><th>الحالة</th><th>محاولات</th>
     </tr></thead><tbody>` + rows.map(n => `
@@ -1623,7 +1626,7 @@ async function loadNotifications() {
       <td title="${esc(n.recipient || n.webhook_url || "")}">${chAr[n.channel] || esc(n.channel || "webhook")}</td>
       <td><span class="sev sev-${n.severity}">${esc(n.severity)}</span></td>
       <td>${n.new_count}</td>
-      <td>${stBadge(n.status)}</td>
+      <td>${stBadge(n.status)}${resendBtn(n)}</td>
       <td>${n.attempts}${n.error ? ` <span title="${esc(n.error)}" style="color:var(--red)">⚠️</span>` : ""}</td>
     </tr>`).join("") + `</tbody></table>`;
 }
@@ -1632,6 +1635,22 @@ function resetNotifFilters() {
   document.getElementById("notif-f-channel").value = "";
   document.getElementById("notif-f-event").value = "";
   document.getElementById("notif-f-status").value = "";
+  loadNotifications();
+}
+
+async function resendNotification(id, btn) {
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "…";
+  try {
+    const r = await api("/notifications/" + id + "/resend", { method: "POST" });
+    alert(r.status === "sent" ? "تمت إعادة الإرسال بنجاح ✅"
+                              : "أُعيدت المحاولة لكنها فشلت مجدداً ⚠️");
+  } catch (e) {
+    alert("تعذّرت إعادة الإرسال: " + e.message);
+  }
+  btn.disabled = false;
+  btn.textContent = old;
   loadNotifications();
 }
 
