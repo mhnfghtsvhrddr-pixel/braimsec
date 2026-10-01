@@ -581,7 +581,7 @@ def scan_results(request: Request, scan_id: str, severity: str | None = None):
     if not exists:
         db.close()
         raise HTTPException(404, "Scan not found")
-    q = ("SELECT tool, rule_id, severity, message, file, line, col, "
+    q = ("SELECT id, tool, rule_id, severity, message, file, line, col, "
          "ai_verdict, ai_confidence, ai_explanation, ai_fix, "
          "(fix_generated_at IS NOT NULL) AS has_fix "
          "FROM findings WHERE scan_id=?")
