@@ -220,9 +220,12 @@ def test_create_validation(ctx, target):
     r = _create(c, ctx["member"], target_path=target,
                 webhook_url="http://127.0.0.1/hook")
     assert r.status_code == 400
-    # missing webhook -> 400
+    # missing webhook -> 200 (email-only schedule; webhook alerts disabled)
     r = _create(c, ctx["member"], target_path=target, webhook_url="")
-    assert r.status_code == 400
+    assert r.status_code == 200
+    assert r.json()["schedule_id"]
+    c.delete(f"/api/schedules/{r.json()['schedule_id']}",
+             headers=_h(ctx["member"]))
     # bad severity -> 400
     r = _create(c, ctx["member"], target_path=target, alert_severity="crit")
     assert r.status_code == 400
