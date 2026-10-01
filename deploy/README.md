@@ -34,24 +34,28 @@ never execute target code).
 | `Dockerfile.prod` | Full image: API + worker + semgrep 1.178.0 + gitleaks 8.28.0 (both pinned to the versions our rules/evals were validated against) + Docker CLI (worker spawns the sandbox) + all code (`api/`, `scanner/`, `ai/`, `reports/`, `dashboard/`). The old root `Dockerfile` only copied `api/`+`dashboard/` and no engines — it cannot run a real scan. |
 | `docker/scan-runner.Dockerfile` | Minimal sandbox image: semgrep 1.178.0 + gitleaks 8.28.0 (both sha256-pinned) + vendored ruleset snapshot + `runner-entrypoint.py`. Built once per server (see Deploy stages). |
 | `docker-compose.prod.yml` | `redis` (AOF persistence), `api` (uvicorn), `worker` (celery, concurrency 2), `caddy` (auto-TLS reverse proxy). api+worker share the host data dir at the same path (required: worker must see the same scan targets and the same `BRAIMSEC_DB`, and sandbox mounts use absolute paths). |
+| `deploy.sh` | **One-command provision + deploy + smoke test** (run as root on the server): installs Docker (official repo), bootstraps `.env` (auto-detects the public IP for stage 1, generates the master API key), creates the data dir, builds the scan-runner image, starts the stack, waits for health, then runs the smoke test (health, plans, end-to-end scan with findings, sandbox proof from worker logs). `--domain api.braimsec.world` for stage 2, `--rebuild-runner`, `--skip-smoke`, `--smoke-only`. |
 | `Caddyfile` | Templated by `SITE_ADDRESS`: `http://<ip>` for smoke test, `api.braimsec.world` for production (automatic Let's Encrypt). |
 | `.env.example` | Copy to `.env`; never commit real secrets. |
 
 ## Deploy stages
 
 1. **Server**: Hetzner CX22, Ubuntu 24.04, Falkenstein. SSH as root.
-   Install Docker (official `docker-ce` repo), then:
+   Copy the repo's `deploy/` to the server (or clone the repo), then:
    ```sh
-   sudo mkdir -p /data/braimsec
-   docker build -f deploy/docker/scan-runner.Dockerfile \
-       -t braimsec/scan-runner:1.0 .
+   cd deploy && sudo ./deploy.sh
    ```
+   The script installs Docker, creates `/data/braimsec`, builds the
+   scan-runner image, starts the stack and runs the full smoke test.
 2. **Stage 1 — smoke test on IP**: `SITE_ADDRESS=http://<server-ip>`,
-   `docker compose up -d --build`, then `GET /api/health` must return 200
-   with `"status": "ok"` (it checks the DB and the Redis broker), `GET
-   /api/plans` must return 200, and a small scan must complete end-to-end
-   (queued → done, engines produce findings **from inside the sandbox** —
-   verify with `docker ps -a` that `braimsec-scan-*` containers ran).
+   `sudo ./deploy.sh` (provisions Docker, builds the runner image, starts
+   the stack and runs the smoke test), then verify: `GET /api/health`
+   must return 200 with `"status": "ok"` (it checks the DB and the Redis
+   broker), `GET /api/plans` must return 200, and a small scan must
+   complete end-to-end (queued → done, engines produce findings **from
+   inside the sandbox** — the worker logs a `sandbox scan ok:
+   container=braimsec-scan-*` line per scan; the containers are `--rm`,
+   so `docker ps -a` cannot show them afterwards).
 3. **Stage 2 — production domain**: point `api.braimsec.world` (A record) at the
    server IP, set `SITE_ADDRESS=api.braimsec.world`, `docker compose up -d`
    (Caddy fetches the TLS certificate automatically).
