@@ -556,9 +556,11 @@ def check_schedules():
     from scheduler import run_scheduler_once  # noqa: E402
     from scheduled_reports import run_report_scheduler_once  # noqa: E402
     from cert_monitor import run_cert_checks_once  # noqa: E402
+    from uptime_monitor import run_uptime_checks_once  # noqa: E402
     return {"scans": run_scheduler_once(),
             "reports": run_report_scheduler_once(),
-            "certs": run_cert_checks_once()}
+            "certs": run_cert_checks_once(),
+            "uptime": run_uptime_checks_once()}
 
 
 def enqueue_vcs_ingest(repo_id: str, sha: str,
