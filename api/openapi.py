@@ -1439,6 +1439,53 @@ _doc("DELETE", "/api/teams-webhooks/{webhook_row_id}",
          "429": _err429(),
      })
 
+_doc("GET", "/api/webhook-signing",
+     tag="Alerts",
+     summary="Webhook signing status",
+     description=("Whether this org has an HMAC-SHA256 signing secret for "
+                  "outgoing scheduled/VCS alert webhooks. The secret itself "
+                  "is never returned. When configured, every alert POST "
+                  "carries `X-BraimSec-Signature: t=<ts>,v1=<hex>` (HMAC of "
+                  "`\"<ts>.<raw_body>\"`) and `X-BraimSec-Timestamp`; "
+                  "receivers should reject timestamps older than 5 minutes. "
+                  "Viewer+, org scope."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="60/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("Signing status.",
+                      {"configured": True,
+                       "created_at": "2026-10-02T12:00:00+00:00",
+                       "scheme": "HMAC-SHA256",
+                       "signature_header": "X-BraimSec-Signature",
+                       "timestamp_header": "X-BraimSec-Timestamp",
+                       "replay_tolerance_seconds": 300}),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/webhook-signing/rotate",
+     tag="Alerts",
+     summary="Rotate webhook signing secret",
+     description=("Generate a new HMAC-SHA256 signing secret for the org's "
+                  "outgoing alert webhooks. The secret is returned exactly "
+                  "once — store it at the receiver; it is never retrievable "
+                  "again. The previous secret stops working immediately. "
+                  "Member+, org scope."),
+     auth="key", min_role="member", org_scope=True, rate_limit="10/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("New secret (shown once).",
+                      {"signing_secret": "whsec_…",
+                       "warning": "Shown once — it will never be displayed "
+                                  "again."}),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
 # ============================ Keys =========================================
 
 _doc("POST", "/api/keys",
