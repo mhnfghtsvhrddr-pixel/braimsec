@@ -44,7 +44,8 @@ from urllib.parse import urlsplit
 
 from database import get_db
 from scheduler import (SEVERITY_ORDER, _scan_findings, _send_email_alerts,
-                       _suppressed_fps, finding_fingerprint, send_alert)
+                       _send_telegram_alerts, _suppressed_fps,
+                       finding_fingerprint, send_alert)
 from ssrf_guard import _resolve_checked  # noqa: F401  (fail-closed DNS check)
 
 log = logging.getLogger("braimsec.vcs")
@@ -491,6 +492,13 @@ def _alert_vcs_failure(db, repo: dict, scan: dict) -> dict:
         subheading=(f"فرع {repo['branch']} — "
                     f"{(scan['error'] or 'unknown error')[:200]}"),
         findings=[])
+    telegram_out = _send_telegram_alerts(
+        db, org_id=repo["org_id"], schedule_id=None, vcs_repo_id=repo["id"],
+        scan_id=scan["id"], event="vcs.failed", severity="error",
+        new_count=0, heading=f"المستودع {repo['full_name']}",
+        subheading=(f"فرع {repo['branch']} — "
+                    f"{(scan['error'] or 'unknown error')[:200]}"),
+        findings=[])
     if webhook_url:
         ok, attempts, code, err = send_alert(webhook_url, payload)
         db.execute(
@@ -506,8 +514,10 @@ def _alert_vcs_failure(db, repo: dict, scan: dict) -> dict:
     else:
         ok, err = False, None
     emailed = bool(email_out.get("emailed"))
-    return {"alerted": bool(ok) or emailed, "event": "vcs.failed",
-            "error": err, "email": email_out}
+    telegrammed = bool(telegram_out.get("telegrammed"))
+    return {"alerted": bool(ok) or emailed or telegrammed,
+            "event": "vcs.failed",
+            "error": err, "email": email_out, "telegram": telegram_out}
 
 
 def evaluate_vcs_alerts(scan_id: str) -> dict:
@@ -566,6 +576,17 @@ def evaluate_vcs_alerts(scan_id: str) -> dict:
             findings=[{"severity": f["severity"], "rule_id": f["rule_id"],
                        "file": f["file"], "line": f["line"],
                        "message": f["message"]} for f in new_findings])
+        telegram_out = _send_telegram_alerts(
+            db, org_id=repo["org_id"], schedule_id=None, vcs_repo_id=repo["id"],
+            scan_id=scan_id, event="vcs.alert",
+            severity=payload["highest_severity"],
+            new_count=len(new_findings),
+            heading=f"المستودع {repo['full_name']}",
+            subheading=(f"فرع {repo['branch']} — "
+                        f"commit {(scan.get('commit_sha') or '')[:8]}"),
+            findings=[{"severity": f["severity"], "rule_id": f["rule_id"],
+                       "file": f["file"], "line": f["line"],
+                       "message": f["message"]} for f in new_findings])
         if webhook_url:
             ok, attempts, code, err = send_alert(webhook_url, payload)
             db.execute(
@@ -583,8 +604,9 @@ def evaluate_vcs_alerts(scan_id: str) -> dict:
             # Email-only repo: no webhook configured, nothing to send/record.
             ok, attempts, err = False, 0, None
         emailed = bool(email_out.get("emailed"))
-        return {"alerted": bool(ok) or emailed,
+        telegrammed = bool(telegram_out.get("telegrammed"))
+        return {"alerted": bool(ok) or emailed or telegrammed,
                 "new_count": len(new_findings), "attempts": attempts,
-                "error": err, "email": email_out}
+                "error": err, "email": email_out, "telegram": telegram_out}
     finally:
         db.close()
