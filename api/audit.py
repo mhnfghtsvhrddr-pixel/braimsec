@@ -68,6 +68,10 @@ ACTIONS = frozenset({
     "teams_webhook.removed",
     "webhook_signing.rotated",
     "notification.resent",
+    "cert_domain.added",
+    "cert_domain.updated",
+    "cert_domain.removed",
+    "cert_domain.alerted",
 })
 
 # Archival never touches recent history: the window must be at least
