@@ -176,12 +176,15 @@ def build_email(event: str, heading: str, subheading: str,
 # ---------------------------------------------------------------------------
 
 def send_email(to_addr: str, subject: str, text_body: str,
-               html_body: str) -> tuple[bool, int, str | None]:
+               html_body: str,
+               attachments: list[tuple[str, bytes, str]] | None = None
+               ) -> tuple[bool, int, str | None]:
     """Send one message; returns (ok, attempts, error).
 
-    Best-effort by design (mirrors send_alert): exceptions are caught and
-    retried, never raised. The SMTP password is never included in the
-    returned error or any log line.
+    ``attachments`` is an optional list of (filename, data, mime_type)
+    tuples, e.g. the executive-report PDF. Best-effort by design (mirrors
+    send_alert): exceptions are caught and retried, never raised. The SMTP
+    password is never included in the returned error or any log line.
     """
     cfg = smtp_settings()
     if not cfg:
@@ -195,6 +198,11 @@ def send_email(to_addr: str, subject: str, text_body: str,
     msg["X-BraimSec-Event"] = "alert"
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
+    for filename, data, mime_type in (attachments or []):
+        maintype, _, subtype = (mime_type or "application/octet-stream").partition("/")
+        msg.add_attachment(data, maintype=maintype or "application",
+                           subtype=subtype or "octet-stream",
+                           filename=_header_safe(filename) or "attachment")
     attempts = 0
     last_err = None
     for attempt in range(1, EMAIL_ATTEMPTS + 1):
@@ -291,3 +299,61 @@ def get_org_emails(org_id: str) -> list[dict]:
             " WHERE org_id=? ORDER BY email", (org_id,)).fetchall()]
     finally:
         db.close()
+
+
+def dispatch_report_emails(db, *, org_id: str, report_schedule_id: str,
+                           scan_id: str, subject: str, text_body: str,
+                           html_body: str, pdf_bytes: bytes, filename: str,
+                           severity: str) -> dict:
+    """Email a scheduled executive report (PDF attachment) to the org.
+
+    Mirrors :func:`dispatch_email_alerts`: one ``notifications`` row per
+    recipient with ``channel='email_report'`` and the report schedule id.
+    No SMTP configured -> every recipient is recorded as ``skipped``,
+    never silently dropped. Returns a small outcome dict.
+    """
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    recipients = [r["email"] for r in db.execute(
+        "SELECT email FROM alert_emails WHERE org_id=? AND enabled=1"
+        " ORDER BY email", (org_id,)).fetchall()]
+    if not recipients:
+        return {"emailed": False, "reason": "no recipients"}
+    if not smtp_configured():
+        for rcpt in recipients:
+            db.execute(
+                "INSERT INTO notifications (org_id, schedule_id,"
+                " report_schedule_id, vcs_repo_id, scan_id, event, severity,"
+                " new_count, webhook_url, channel, recipient, status,"
+                " attempts, response_code, error, payload, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (org_id, None, report_schedule_id, None, scan_id,
+                 "report.scheduled", severity, 0, "", "email_report", rcpt,
+                 "skipped", 0, None,
+                 "SMTP not configured: set BRAIMSEC_SMTP_HOST (and friends)",
+                 "{}", now_iso))
+        db.commit()
+        return {"emailed": False, "reason": "smtp not configured",
+                "recipients": len(recipients)}
+    sent, failed = 0, 0
+    for rcpt in recipients:
+        ok, attempts, err = send_email(
+            rcpt, subject, text_body, html_body,
+            attachments=[(filename, pdf_bytes, "application/pdf")])
+        db.execute(
+            "INSERT INTO notifications (org_id, schedule_id,"
+            " report_schedule_id, vcs_repo_id, scan_id, event, severity,"
+            " new_count, webhook_url, channel, recipient, status,"
+            " attempts, response_code, error, payload, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (org_id, None, report_schedule_id, None, scan_id,
+             "report.scheduled", severity, 0, "", "email_report", rcpt,
+             "sent" if ok else "failed", attempts, None, err,
+             '{"subject": %s}' % json.dumps(subject, ensure_ascii=False),
+             now_iso))
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+    db.commit()
+    return {"emailed": sent > 0, "sent": sent, "failed": failed,
+            "recipients": len(recipients)}
