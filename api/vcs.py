@@ -500,7 +500,7 @@ def _alert_vcs_failure(db, repo: dict, scan: dict) -> dict:
                     f"{(scan['error'] or 'unknown error')[:200]}"),
         findings=[])
     if webhook_url:
-        ok, attempts, code, err = send_alert(webhook_url, payload)
+        ok, attempts, code, err = send_alert(webhook_url, payload, org_id=repo["org_id"])
         db.execute(
             "INSERT INTO notifications (org_id, schedule_id, vcs_repo_id, scan_id,"
             " event, severity, new_count, webhook_url, channel, status, attempts,"
@@ -588,7 +588,7 @@ def evaluate_vcs_alerts(scan_id: str) -> dict:
                        "file": f["file"], "line": f["line"],
                        "message": f["message"]} for f in new_findings])
         if webhook_url:
-            ok, attempts, code, err = send_alert(webhook_url, payload)
+            ok, attempts, code, err = send_alert(webhook_url, payload, org_id=repo["org_id"])
             db.execute(
                 "INSERT INTO notifications (org_id, schedule_id, vcs_repo_id,"
                 " scan_id, event, severity, new_count, webhook_url, channel,"
