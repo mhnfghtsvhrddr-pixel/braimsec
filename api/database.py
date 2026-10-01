@@ -265,6 +265,14 @@ CREATE TABLE IF NOT EXISTS teams_webhooks (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_teams_webhooks_org_hash
     ON teams_webhooks(org_id, url_hash);
 CREATE INDEX IF NOT EXISTS idx_teams_webhooks_org ON teams_webhooks(org_id);
+-- Per-org HMAC signing secrets for outgoing alert webhooks. The secret is
+-- generated server-side, Fernet-encrypted at rest, and shown to the org
+-- owner exactly once at rotation time (never returned by the API again).
+CREATE TABLE IF NOT EXISTS webhook_signing_secrets (
+    org_id TEXT PRIMARY KEY REFERENCES organizations(id),
+    secret_enc TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_notifications_sched ON notifications(schedule_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_org ON notifications(org_id, created_at DESC);
 -- idx_notifications_vcs is created post-migration in init_db(): the column
