@@ -2214,6 +2214,53 @@ def delete_teams_webhook(request: Request, webhook_row_id: int):
     return {"id": webhook_row_id, "deleted": True}
 
 
+@app.get("/api/webhook-signing")
+@limiter.limit("60/minute")
+def get_webhook_signing(request: Request):
+    """Show the org's outgoing-webhook signing status (viewer+, org scope).
+
+    The secret itself is never returned — it is shown exactly once at
+    rotation time. When configured, every scheduled/VCS alert webhook
+    POST carries ``X-BraimSec-Signature: t=<ts>,v1=<hex>`` (HMAC-SHA256
+    over ``"<ts>.<raw_body>"``) plus ``X-BraimSec-Timestamp``, so
+    receivers can verify authenticity and reject replays older than
+    5 minutes.
+    """
+    require_org_scope(request)
+    db = get_db()
+    row = db.execute(
+        "SELECT created_at FROM webhook_signing_secrets WHERE org_id=?",
+        (request.state.org_id,)).fetchone()
+    db.close()
+    return {"configured": bool(row),
+            "created_at": row["created_at"] if row else None,
+            "scheme": "HMAC-SHA256",
+            "signature_header": "X-BraimSec-Signature",
+            "timestamp_header": "X-BraimSec-Timestamp",
+            "replay_tolerance_seconds": 300}
+
+
+@app.post("/api/webhook-signing/rotate")
+@limiter.limit("10/minute")
+def rotate_webhook_signing(request: Request):
+    """Generate a new signing secret for the org (member+, org scope).
+
+    Returns ``{"signing_secret": "whsec_…"}`` — the ONLY time the secret
+    is ever exposed. Store it where the webhook receiver can read it;
+    the previous secret stops working immediately.
+    """
+    from webhook_signing import rotate_org_signing_secret  # noqa: E402
+    require_role(request, "member")
+    require_org_scope(request)
+    db = get_db()
+    secret = rotate_org_signing_secret(db, request.state.org_id)
+    db.close()
+    _audit(request, "webhook_signing.rotated", "webhook_signing",
+           request.state.org_id, {})
+    return {"signing_secret": secret,
+            "warning": "Shown once — it will never be displayed again."}
+
+
 def _fix_payload(row):
     """Serialize the cached AI fix-suggestion columns of a finding row."""
     try:
