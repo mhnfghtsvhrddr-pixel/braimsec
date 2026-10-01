@@ -346,6 +346,24 @@ def _send_email_alerts(db, *, org_id: str, schedule_id: str | None,
         return {"emailed": False, "reason": "dispatch crashed"}
 
 
+def _send_telegram_alerts(db, *, org_id: str, schedule_id: str | None,
+                          vcs_repo_id: str | None, scan_id: str, event: str,
+                          severity: str, new_count: int, heading: str,
+                          subheading: str, findings: list[dict]) -> dict:
+    """Telegram twin of a webhook alert (deferred import keeps the worker's
+    import graph light). Never raises: alerting must never break scans."""
+    try:
+        from telegram_alerts import dispatch_telegram_alerts  # noqa: E402
+        return dispatch_telegram_alerts(
+            db, org_id=org_id, schedule_id=schedule_id,
+            vcs_repo_id=vcs_repo_id, scan_id=scan_id, event=event,
+            severity=severity, new_count=new_count, heading=heading,
+            subheading=subheading, findings=findings)
+    except Exception:  # noqa: BLE001 - best-effort by design
+        log.exception("telegram alert dispatch crashed for %s", scan_id)
+        return {"telegrammed": False, "reason": "dispatch crashed"}
+
+
 def _scan_findings(db, scan_id: str) -> list[dict]:
     return [dict(r) for r in db.execute(
         "SELECT tool, rule_id, severity, message, file, line "
@@ -420,6 +438,14 @@ def evaluate_schedule_alerts(scan_id: str) -> dict:
             heading=f"فحص مجدول: {sched['name']}",
             subheading=f"الهدف: {scan['target_name']}",
             findings=_email_row(new_findings))
+        telegram_out = _send_telegram_alerts(
+            db, org_id=sched["org_id"], schedule_id=sched["id"],
+            vcs_repo_id=None, scan_id=scan_id, event="schedule.alert",
+            severity=payload["highest_severity"],
+            new_count=len(new_findings),
+            heading=f"فحص مجدول: {sched['name']}",
+            subheading=f"الهدف: {scan['target_name']}",
+            findings=_email_row(new_findings))
         if webhook_url:
             ok, attempts, code, err = send_alert(webhook_url, payload)
             db.execute(
@@ -437,8 +463,11 @@ def evaluate_schedule_alerts(scan_id: str) -> dict:
             # Email-only org: no webhook configured, nothing to send/record.
             ok, attempts, err = False, 0, None
         emailed = bool(email_out.get("emailed"))
-        return {"alerted": bool(ok) or emailed, "new_count": len(new_findings),
-                "attempts": attempts, "error": err, "email": email_out}
+        telegrammed = bool(telegram_out.get("telegrammed"))
+        return {"alerted": bool(ok) or emailed or telegrammed,
+                "new_count": len(new_findings),
+                "attempts": attempts, "error": err, "email": email_out,
+                "telegram": telegram_out}
     finally:
         db.close()
 
@@ -466,6 +495,14 @@ def _alert_failure(db, sched: dict, scan: dict) -> dict:
         subheading=(f"الهدف: {scan['target_name']} — "
                     f"{(scan['error'] or 'unknown error')[:200]}"),
         findings=[])
+    telegram_out = _send_telegram_alerts(
+        db, org_id=sched["org_id"], schedule_id=sched["id"],
+        vcs_repo_id=None, scan_id=scan["id"], event="schedule.failed",
+        severity="error", new_count=0,
+        heading=f"فحص مجدول: {sched['name']}",
+        subheading=(f"الهدف: {scan['target_name']} — "
+                    f"{(scan['error'] or 'unknown error')[:200]}"),
+        findings=[])
     if webhook_url:
         ok, attempts, code, err = send_alert(webhook_url, payload)
         db.execute(
@@ -481,5 +518,7 @@ def _alert_failure(db, sched: dict, scan: dict) -> dict:
     else:
         ok, err = False, None
     emailed = bool(email_out.get("emailed"))
-    return {"alerted": bool(ok) or emailed, "event": "schedule.failed",
-            "error": err, "email": email_out}
+    telegrammed = bool(telegram_out.get("telegrammed"))
+    return {"alerted": bool(ok) or emailed or telegrammed,
+            "event": "schedule.failed",
+            "error": err, "email": email_out, "telegram": telegram_out}
