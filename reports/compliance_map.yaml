@@ -2,36 +2,135 @@
 #
 # Policy (proposal §4): map ONLY rule -> standard pairs we are confident
 # about. Anything else is "unmapped" — never invent a mapping to make a
-# report look more complete. PCI-DSS and SOC 2 columns exist but stay
-# empty until a mapping earns its place here.
+# report look more complete.
+#
+# SOC 2 / ISO 27001 columns are populated only where the control genuinely
+# describes the vulnerability class:
+# - SOC 2 CC6.1 (logical access security): the finding lets an attacker
+#   cross a trust boundary or act with ungranted privilege.
+# - SOC 2 CC8.1 (change management): the finding lets unreviewed code enter
+#   the build/release path.
+# - ISO 27001:2022 A.8.28 (secure coding): injection / input-validation
+#   flaws — the control explicitly covers secure coding principles.
+# - ISO 27001:2022 A.8.26 (application security requirements): insecure
+#   application design decisions (e.g. unrestricted upload).
+# - ISO 27001:2022 A.8.20 (network security): network-boundary abuse (SSRF).
+# - ISO 27001:2022 A.8.3 (information access restriction): access beyond
+#   the intended directory/scope.
+# - ISO 27001:2022 A.8.9 (configuration management): insecure CI/CD
+#   configuration.
+# - ISO 27001:2022 A.5.17 (authentication information): hard-coded secrets.
 #
 # Matching: a finding matches `rule` when check_id == rule or
 # check_id endswith rule (semgrep prefixes local rule ids with the file
 # path, e.g. ".../rules.braimsec.taint.ssrf-requests"). A `tool` entry
 # matches every finding from that tool.
 
-version: "1.0.0"
+version: "2.0.0"
 
 changelog:
+  - "2.0.0 (2026-10-01): SOC 2 + ISO 27001:2022 columns added for every mapped rule; braimsec.inject.* pack mapped. Conservative anchors only."
   - "1.0.0 (2026-09-30): initial conservative mapping - BraimSec taint rules + gitleaks only. Registry rules intentionally unmapped."
 
 mappings:
   - rule: braimsec.taint.ssrf-requests
     owasp: { code: "A10:2021", title: "Server-Side Request Forgery (SSRF)" }
     cwe: { id: "CWE-918", title: "Server-Side Request Forgery (SSRF)" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.20", title: "Networks security" }
 
   - rule: braimsec.taint.ssrf-urllib
     owasp: { code: "A10:2021", title: "Server-Side Request Forgery (SSRF)" }
     cwe: { id: "CWE-918", title: "Server-Side Request Forgery (SSRF)" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.20", title: "Networks security" }
 
   - rule: braimsec.taint.unrestricted-file-upload
     owasp: { code: "A04:2021", title: "Insecure Design" }
     cwe: { id: "CWE-434", title: "Unrestricted Upload of File with Dangerous Type" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.26", title: "Application security requirements" }
 
   - rule: braimsec.taint.path-traversal-open
     owasp: { code: "A01:2021", title: "Broken Access Control" }
     cwe: { id: "CWE-22", title: "Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.3", title: "Information access restriction" }
+
+  - rule: braimsec.gha.script-injection
+    owasp: { code: "A03:2021", title: "Injection" }
+    cwe: { id: "CWE-94", title: "Improper Control of Generation of Code ('Code Injection')" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.9", title: "Configuration management" }
+
+  - rule: braimsec.gha.unpinned-action
+    owasp: { code: "A08:2021", title: "Software and Data Integrity Failures" }
+    cwe: { id: "CWE-829", title: "Inclusion of Functionality from Untrusted Control Sphere" }
+    soc2: { code: "CC8.1", title: "Change management" }
+    iso: { code: "A.8.9", title: "Configuration management" }
+
+  - rule: braimsec.gha.broad-permissions
+    owasp: { code: "A01:2021", title: "Broken Access Control" }
+    cwe: { id: "CWE-732", title: "Incorrect Permission Assignment for Critical Resource" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.3", title: "Information access restriction" }
+
+  - rule: braimsec.inject.command-injection
+    owasp: { code: "A03:2021", title: "Injection" }
+    cwe: { id: "CWE-78", title: "Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.28", title: "Secure coding" }
+
+  - rule: braimsec.inject.xxe-unsafe-parser
+    owasp: { code: "A05:2021", title: "Security Misconfiguration" }
+    cwe: { id: "CWE-611", title: "Improper Restriction of XML External Entity Reference" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.28", title: "Secure coding" }
+
+  - rule: braimsec.inject.xxe-tainted-parse
+    owasp: { code: "A05:2021", title: "Security Misconfiguration" }
+    cwe: { id: "CWE-611", title: "Improper Restriction of XML External Entity Reference" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.28", title: "Secure coding" }
+
+  - rule: braimsec.inject.deserialization
+    owasp: { code: "A08:2021", title: "Software and Data Integrity Failures" }
+    cwe: { id: "CWE-502", title: "Deserialization of Untrusted Data" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.28", title: "Secure coding" }
+
+  - rule: braimsec.inject.sqli
+    owasp: { code: "A03:2021", title: "Injection" }
+    cwe: { id: "CWE-89", title: "Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.28", title: "Secure coding" }
+
+  - rule: braimsec.inject.xss-render-template-string
+    owasp: { code: "A03:2021", title: "Injection" }
+    cwe: { id: "CWE-79", title: "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.28", title: "Secure coding" }
+
+  - rule: braimsec.inject.js-code-eval
+    owasp: { code: "A03:2021", title: "Injection" }
+    cwe: { id: "CWE-95", title: "Improper Neutralization of Directives in Dynamically Evaluated Code ('Eval Injection')" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.28", title: "Secure coding" }
+
+  - rule: braimsec.inject.js-dom-xss
+    owasp: { code: "A03:2021", title: "Injection" }
+    cwe: { id: "CWE-79", title: "Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.28", title: "Secure coding" }
+
+  - rule: braimsec.inject.python-code-eval
+    owasp: { code: "A03:2021", title: "Injection" }
+    cwe: { id: "CWE-95", title: "Improper Neutralization of Directives in Dynamically Evaluated Code ('Eval Injection')" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.28", title: "Secure coding" }
 
   - tool: gitleaks
     owasp: { code: "A07:2021", title: "Identification and Authentication Failures" }
     cwe: { id: "CWE-798", title: "Use of Hard-coded Credentials" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.5.17", title: "Authentication information" }
