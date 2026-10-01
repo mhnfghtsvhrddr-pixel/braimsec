@@ -287,6 +287,35 @@ CREATE TABLE IF NOT EXISTS cert_domains (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cert_domains_org_host
     ON cert_domains(org_id, hostname, port);
 CREATE INDEX IF NOT EXISTS idx_cert_domains_org ON cert_domains(org_id);
+-- HTTP(S) uptime monitoring: per-org URL targets probed by the beat worker
+-- (each at most every check_interval_s). last_status: never|up|down|error.
+-- consecutive_failures gates the down alert (anti-flap); last_alert_event
+-- tracks which alert fired last ('uptime.down' -> a recovery alert is due).
+CREATE TABLE IF NOT EXISTS uptime_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    hostname TEXT NOT NULL,
+    port INTEGER NOT NULL DEFAULT 443,
+    path TEXT NOT NULL DEFAULT '/',
+    use_https INTEGER NOT NULL DEFAULT 1,
+    expected_status INTEGER,
+    keyword TEXT NOT NULL DEFAULT '',
+    check_interval_s INTEGER NOT NULL DEFAULT 300,
+    webhook_url TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_checked_at TEXT,
+    last_status TEXT NOT NULL DEFAULT 'never',
+    last_http_code INTEGER,
+    last_latency_ms INTEGER,
+    last_error TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    last_alerted_at TEXT,
+    last_alert_event TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_uptime_targets_org_host
+    ON uptime_targets(org_id, hostname, port, path);
+CREATE INDEX IF NOT EXISTS idx_uptime_targets_org ON uptime_targets(org_id);
 -- Per-org HMAC signing secrets for outgoing alert webhooks. The secret is
 -- generated server-side, Fernet-encrypted at rest, and shown to the org
 -- owner exactly once at rotation time (never returned by the API again).
