@@ -92,6 +92,15 @@ celery_app.conf.update(
     task_ignore_result=True,        # scan state lives in SQLite, not the backend
     task_default_queue="scans",
     broker_transport_options=_transport_options,
+    timezone="UTC",                 # schedule cadences are stored UTC-aware
+    beat_schedule={
+        # Every minute: claim due schedules and enqueue their scans.
+        # Idempotent via the DB claim in scheduler.run_scheduler_once.
+        "braimsec.check-schedules": {
+            "task": "braimsec.check_schedules",
+            "schedule": 60.0,
+        },
+    },
 )
 
 WEBHOOK_TIMEOUT_S = 10
@@ -353,6 +362,15 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
             shutil.rmtree(cleanup_dir, ignore_errors=True)
     if not will_retry:
         _deliver_webhook(scan_id)
+        # Scheduled scans: diff vs the previous scheduled run and fire the
+        # new-findings alert webhook. Best-effort: alerting must never break
+        # scan completion.
+        try:
+            from scheduler import evaluate_schedule_alerts  # noqa: E402
+            evaluate_schedule_alerts(scan_id)
+        except Exception:  # noqa: BLE001
+            log.exception("schedule alert evaluation failed for scan %s",
+                          scan_id)
 
 
 @celery_app.task(name="braimsec.run_ai_review", bind=True, max_retries=2,
@@ -516,3 +534,15 @@ def enqueue_ai_review(scan_id: str, background_tasks=None) -> str:
     else:
         run_ai_review(scan_id)
     return "inline"
+
+
+@celery_app.task(name="braimsec.check_schedules")
+def check_schedules():
+    """Celery beat (every 60s): run due scheduled scans.
+
+    Idempotent: ``scheduler.run_scheduler_once`` claims each due schedule
+    with a conditional UPDATE, so overlapping beat instances never
+    double-run. In dev without a broker, call it directly instead.
+    """
+    from scheduler import run_scheduler_once  # noqa: E402
+    return run_scheduler_once()
