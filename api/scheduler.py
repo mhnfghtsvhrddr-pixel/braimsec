@@ -155,13 +155,36 @@ def build_alert_payload(schedule: dict, scan: dict,
 # Alert delivery (SSRF-guarded, retried, recorded)
 # ---------------------------------------------------------------------------
 
-def send_alert(webhook_url: str, payload: dict) -> tuple[bool, int, int | None,
-                                                        str | None]:
-    """POST the payload; returns (ok, attempts, http_code, error)."""
+def send_alert(webhook_url: str, payload: dict,
+               org_id: str | None = None) -> tuple[bool, int, int | None,
+                                                  str | None]:
+    """POST the payload; returns (ok, attempts, http_code, error).
+
+    When the org has a signing secret configured (``POST
+    /api/webhook-signing/rotate``), the payload is HMAC-SHA256-signed and
+    ``X-BraimSec-Signature`` / ``X-BraimSec-Timestamp`` headers are sent so
+    receivers can verify authenticity and reject replays. Signing is
+    best-effort: a corrupt secret row is logged and the alert goes out
+    unsigned rather than being dropped.
+    """
     body = json.dumps(payload, separators=(",", ":"),
                       ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json; charset=utf-8",
                "X-BraimSec-Event": payload.get("event", "schedule.alert")}
+    if org_id:
+        try:
+            from webhook_signing import (get_org_signing_secret,
+                                         signing_headers)
+            db = get_db()
+            try:
+                secret = get_org_signing_secret(db, org_id)
+            finally:
+                db.close()
+            if secret:
+                headers.update(signing_headers(secret, body))
+        except Exception as e:  # noqa: BLE001 - best effort by design
+            log.warning("webhook signing unavailable for org %s: %s",
+                        org_id, str(e)[:150])
     attempts = 0
     last_err = None
     for attempt in range(1, ALERT_ATTEMPTS + 1):
@@ -499,7 +522,7 @@ def evaluate_schedule_alerts(scan_id: str) -> dict:
             subheading=f"الهدف: {scan['target_name']}",
             findings=_email_row(new_findings))
         if webhook_url:
-            ok, attempts, code, err = send_alert(webhook_url, payload)
+            ok, attempts, code, err = send_alert(webhook_url, payload, org_id=sched["org_id"])
             db.execute(
                 "INSERT INTO notifications (org_id, schedule_id, vcs_repo_id,"
                 " scan_id, event, severity, new_count, webhook_url, channel,"
@@ -576,7 +599,7 @@ def _alert_failure(db, sched: dict, scan: dict) -> dict:
                     f"{(scan['error'] or 'unknown error')[:200]}"),
         findings=[])
     if webhook_url:
-        ok, attempts, code, err = send_alert(webhook_url, payload)
+        ok, attempts, code, err = send_alert(webhook_url, payload, org_id=sched["org_id"])
         db.execute(
             "INSERT INTO notifications (org_id, schedule_id, vcs_repo_id,"
             " scan_id, event, severity, new_count, webhook_url, channel,"
