@@ -241,7 +241,10 @@
     <div id="scans-list-wrap">
       <div class="toolbar">
         <h2>📋 عمليات الفحص</h2>
-        <button class="btn" onclick="openModal()">+ فحص جديد</button>
+        <div>
+          <button class="btn-ghost" onclick="openExecModal()">📊 تقرير تنفيذي</button>
+          <button class="btn" onclick="openModal()">+ فحص جديد</button>
+        </div>
       </div>
       <div id="scans-list"></div>
     </div>
@@ -343,6 +346,26 @@
     <div id="keys-wrap"></div>
   </section>
 </main>
+
+<!-- نافذة التقرير التنفيذي -->
+<div id="exec-back" class="modal-back" hidden>
+  <div class="modal">
+    <h3>📊 تقرير تنفيذي للمديرين</h3>
+    <p style="color:var(--muted);font-size:0.85rem;margin:0 0 1rem">تقرير PDF بالعربية بلغة مبسطة: الوضع العام، أهم الثغرات مع توصيات عملية، ووضع الامتثال.</p>
+    <label>المشروع</label>
+    <select id="exec-project"><option value="">كل المشاريع</option></select>
+    <label>المدة</label>
+    <select id="exec-days">
+      <option value="30">آخر 30 يوم</option>
+      <option value="90" selected>آخر 90 يوم</option>
+      <option value="0">الكل</option>
+    </select>
+    <div class="row" style="margin-top:1rem;display:flex;gap:0.5rem">
+      <button class="btn" id="exec-dl-btn" onclick="downloadExecutive()">⬇ تحميل PDF</button>
+      <button class="btn-ghost" onclick="document.getElementById('exec-back').hidden=true">إلغاء</button>
+    </div>
+  </div>
+</div>
 
 <!-- نافذة جدولة -->
 <div id="sched-back" class="modal-back" hidden>
@@ -736,6 +759,43 @@ async function downloadPdf() {
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   } catch (e) { alert("تعذر تحميل التقرير: " + e.message); }
+  btn.disabled = false;
+}
+
+/* ---------- التقرير التنفيذي ---------- */
+async function openExecModal() {
+  try {
+    const projs = await api("/projects").catch(() => []);
+    document.getElementById("exec-project").innerHTML =
+      `<option value="">كل المشاريع</option>` +
+      projs.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+  } catch (e) { /* keep the default option */ }
+  document.getElementById("exec-back").hidden = false;
+}
+async function downloadExecutive() {
+  const btn = document.getElementById("exec-dl-btn");
+  btn.disabled = true;
+  try {
+    const body = { days: +document.getElementById("exec-days").value };
+    const pid = document.getElementById("exec-project").value;
+    if (pid) body.project_id = pid;
+    const r = await fetch(API + "/reports/executive", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": localStorage.getItem("braimsec_key") || ""
+      },
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || ("خطأ " + r.status)); }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "braimsec-executive-report.pdf";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    document.getElementById("exec-back").hidden = true;
+  } catch (e) { alert("تعذر توليد التقرير: " + e.message); }
   btn.disabled = false;
 }
 
