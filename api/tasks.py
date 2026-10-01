@@ -371,6 +371,13 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
         except Exception:  # noqa: BLE001
             log.exception("schedule alert evaluation failed for scan %s",
                           scan_id)
+        # VCS (push-triggered) scans: same treatment vs the previous push scan.
+        try:
+            from vcs import evaluate_vcs_alerts  # noqa: E402
+            evaluate_vcs_alerts(scan_id)
+        except Exception:  # noqa: BLE001
+            log.exception("vcs alert evaluation failed for scan %s",
+                          scan_id)
 
 
 @celery_app.task(name="braimsec.run_ai_review", bind=True, max_retries=2,
@@ -546,3 +553,32 @@ def check_schedules():
     """
     from scheduler import run_scheduler_once  # noqa: E402
     return run_scheduler_once()
+
+
+def enqueue_vcs_ingest(repo_id: str, sha: str,
+                       background_tasks=None) -> str:
+    """Route a VCS push ingest to the durable queue, or inline when unconfigured.
+
+    Returns "celery" or "inline" so callers (and tests) can observe routing.
+    """
+    if queue_enabled():
+        vcs_ingest.delay(repo_id, sha)
+        return "celery"
+    if background_tasks is not None:
+        background_tasks.add_task(_vcs_ingest_inline, repo_id, sha)
+    else:
+        _vcs_ingest_inline(repo_id, sha)
+    return "inline"
+
+
+def _vcs_ingest_inline(repo_id: str, sha: str):
+    from vcs import _ingest_vcs_push  # noqa: E402
+    return _ingest_vcs_push(repo_id, sha)
+
+
+@celery_app.task(name="braimsec.vcs_ingest", bind=True, max_retries=0,
+                 soft_time_limit=600)
+def vcs_ingest(self, repo_id: str, sha: str):
+    """Celery task: clone a pushed commit and create a scan for it."""
+    from vcs import _ingest_vcs_push  # noqa: E402
+    return _ingest_vcs_push(repo_id, sha)
