@@ -1374,6 +1374,71 @@ _doc("DELETE", "/api/slack-webhooks/{webhook_row_id}",
          "429": _err429(),
      })
 
+_doc("GET", "/api/teams-webhooks",
+     tag="Alerts",
+     summary="List Teams webhooks",
+     description=("The org's Microsoft Teams alert webhooks. URLs are never "
+                  "returned — only a masked form (the secret is "
+                  "Fernet-encrypted at rest). Viewer+, org scope."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="60/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("Webhook rows (masked).",
+                      {"webhooks": [
+                          {"id": 4, "label": "Security",
+                           "webhook_url_masked":
+                           "https://outlook.office.com/…a1b2c3",
+                           "created_at": "2026-10-01T12:00:00+00:00"}]}),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/teams-webhooks",
+     tag="Alerts",
+     summary="Register Teams webhook",
+     description=("Register one Teams incoming-webhook URL for alerts. Only "
+                  "*.office.com and *.logic.azure.com URLs are accepted. "
+                  "The URL is Fernet-encrypted at rest, never returned. "
+                  "409 when already registered. Member+, org scope."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[],
+     request_body=_body(
+         "Webhook registration.",
+         {"webhook_url": "https://outlook.office.com/webhook/…",
+          "label": "Security"}),
+     responses={
+         "200": _resp("Created webhook row (masked).",
+                      {"id": 4, "label": "Security",
+                       "webhook_url_masked":
+                       "https://outlook.office.com/…a1b2c3",
+                       "created_at": "2026-10-01T12:00:00+00:00"}),
+         "400": _err400("Invalid Teams webhook URL"),
+         "401": _err401(),
+         "403": _err403(),
+         "409": _err409("Webhook already registered"),
+         "429": _err429(),
+     })
+
+_doc("DELETE", "/api/teams-webhooks/{webhook_row_id}",
+     tag="Alerts",
+     summary="Remove Teams webhook",
+     description="Remove one registered Teams webhook. Member+, org scope.",
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[_param("webhook_row_id", "path", "integer", "Webhook row id.",
+                   True, example=4)],
+     request_body=None,
+     responses={
+         "200": _resp("Deletion receipt.",
+                      {"id": 4, "deleted": True}),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Webhook not found"),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
 # ============================ Keys =========================================
 
 _doc("POST", "/api/keys",
