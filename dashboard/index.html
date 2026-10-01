@@ -285,6 +285,15 @@
       <button class="btn" onclick="openSchedModal()">+ جدولة جديدة</button>
     </div>
     <div id="sched-wrap"></div>
+    <h3 style="margin: 1.6rem 0 1rem;">📧 تنبيهات الإيميل</h3>
+    <div class="scan-card" style="flex-direction: column; align-items: stretch;">
+      <div id="email-status" class="meta"></div>
+      <div class="row" style="margin-top: 0.6rem;">
+        <input type="email" id="email-new" placeholder="name@company.com" dir="ltr" style="flex: 1;">
+        <button class="btn" onclick="addAlertEmail()">+ إضافة</button>
+      </div>
+      <div id="email-wrap" style="margin-top: 0.6rem;"></div>
+    </div>
     <h3 style="margin: 1.6rem 0 1rem;">🔔 سجل التنبيهات</h3>
     <div id="notif-wrap"></div>
   </section>
@@ -513,7 +522,7 @@ function showView(name) {
   document.getElementById("view-keys").hidden = name !== "keys";
   clearInterval(pollTimer);
   if (name === "scans") loadScans();
-  if (name === "sched") { loadSchedules(); loadNotifications(); }
+  if (name === "sched") { loadSchedules(); loadAlertEmails(); loadNotifications(); }
   if (name === "vcs") loadVcsRepos();
   if (name === "billing") loadBilling();
   if (name === "keys") loadKeys();
@@ -918,6 +927,57 @@ async function loadSchedules() {
   }).join("");
 }
 
+/* ---------- تنبيهات الإيميل ---------- */
+async function loadAlertEmails() {
+  let data;
+  try { data = await api("/alert-emails"); }
+  catch (e) {
+    document.getElementById("email-wrap").innerHTML =
+      `<div class="empty"><p>تعذر التحميل: ${esc(e.message)}</p></div>`;
+    return;
+  }
+  const st = document.getElementById("email-status");
+  st.innerHTML = data.smtp_configured
+    ? `✅ خادم البريد مهيأ — التنبيهات تُرسل عند النتائج الجديدة.`
+    : `⚠️ خادم البريد <b>غير مهيأ</b> — اضبط <code dir="ltr">BRAIMSEC_SMTP_HOST</code> على السيرفر لتفعيل الإرسال (ستُسجَّل التنبيهات كـ«متخطاة» حتى ذلك الحين).`;
+  const el = document.getElementById("email-wrap");
+  if (!data.emails.length) {
+    el.innerHTML = `<div class="empty"><p>لا عناوين بعد — أضف بريد الفريق ليصله تنبيه النتائج الجديدة.</p></div>`;
+    return;
+  }
+  el.innerHTML = data.emails.map(m => `
+    <div class="scan-card">
+      <div class="name" dir="ltr" style="text-align: left;">${esc(m.email)}</div>
+      <div class="left" style="gap: 0.4rem;">
+        <span class="badge ${m.enabled ? "b-done" : "b-queued"}">${m.enabled ? "مفعّل" : "موقوف"}</span>
+        <button class="btn-ghost" onclick="toggleAlertEmail(${m.id}, ${m.enabled ? 0 : 1})">${m.enabled ? "إيقاف" : "تفعيل"}</button>
+        <button class="btn-ghost" onclick="deleteAlertEmail(${m.id})">حذف</button>
+      </div>
+    </div>`).join("");
+}
+
+async function addAlertEmail() {
+  const inp = document.getElementById("email-new");
+  const email = inp.value.trim();
+  if (!email) return;
+  try {
+    await api("/alert-emails", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email }) });
+    inp.value = "";
+    loadAlertEmails();
+  } catch (e) { alert("تعذر الإضافة: " + e.message); }
+}
+
+async function toggleAlertEmail(id, enabled) {
+  await api(`/alert-emails/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: !!enabled }) });
+  loadAlertEmails();
+}
+
+async function deleteAlertEmail(id) {
+  if (!confirm("حذف هذا العنوان من تنبيهات الإيميل؟")) return;
+  await api(`/alert-emails/${id}`, { method: "DELETE" });
+  loadAlertEmails();
+}
+
 async function loadNotifications() {
   let rows;
   try { rows = await api("/notifications?limit=30"); }
@@ -933,15 +993,20 @@ async function loadNotifications() {
   }
   const evAr = { "schedule.alert": "نتائج جديدة", "schedule.failed": "فشل الفحص",
     "vcs.alert": "نتائج جديدة (مستودع)", "vcs.failed": "فشل الفحص (مستودع)" };
+  const chAr = { "webhook": "🔗 ويبهوك", "email": "📧 إيميل" };
+  const stBadge = s => s === "sent" ? `<span class="badge b-done">أُرسل</span>`
+    : s === "skipped" ? `<span class="badge b-queued">متخطاة</span>`
+    : `<span class="badge b-failed">فشل</span>`;
   el.innerHTML = `<table><thead><tr>
-      <th>الوقت</th><th>الحدث</th><th>الخطورة</th><th>جديد</th><th>الحالة</th><th>محاولات</th>
+      <th>الوقت</th><th>الحدث</th><th>القناة</th><th>الخطورة</th><th>جديد</th><th>الحالة</th><th>محاولات</th>
     </tr></thead><tbody>` + rows.map(n => `
     <tr>
       <td>${fmtDT(n.created_at)}</td>
       <td>${evAr[n.event] || esc(n.event)}</td>
+      <td title="${esc(n.recipient || n.webhook_url || "")}">${chAr[n.channel] || esc(n.channel || "webhook")}</td>
       <td><span class="sev sev-${n.severity}">${esc(n.severity)}</span></td>
       <td>${n.new_count}</td>
-      <td><span class="badge ${n.status === "sent" ? "b-done" : "b-failed"}">${n.status === "sent" ? "أُرسل" : "فشل"}</span></td>
+      <td>${stBadge(n.status)}</td>
       <td>${n.attempts}${n.error ? ` <span title="${esc(n.error)}" style="color:var(--red)">⚠️</span>` : ""}</td>
     </tr>`).join("") + `</tbody></table>`;
 }
@@ -1123,7 +1188,7 @@ async function deleteSched(id) {
 loadScans();
 setInterval(() => {
   if (!document.getElementById("view-scans").hidden && document.getElementById("view-detail").hidden) loadScans();
-  if (!document.getElementById("view-sched").hidden) { loadSchedules(); loadNotifications(); }
+  if (!document.getElementById("view-sched").hidden) { loadSchedules(); loadAlertEmails(); loadNotifications(); }
 }, 5000);
 </script>
 </body>
