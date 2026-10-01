@@ -1491,6 +1491,34 @@ _doc("GET", "/api/audit-log",
          "429": _err429(),
      })
 
+_doc("GET", "/api/audit-log/export.csv",
+     tag="Audit",
+     summary="Audit trail as CSV",
+     description=("CSV export of the org's audit trail for compliance "
+                  "handoffs. Newest-first, up to 5,000 rows per export "
+                  "(use archives for deeper history). Same visibility as "
+                  "GET /api/audit-log: org-scoped, viewers may read; "
+                  "project-scoped keys are rejected. `detail` is embedded "
+                  "as a JSON string (RFC 4180 quoting). Downloads as "
+                  "braimsec-audit-<org_id>.csv."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="10/minute",
+     params=[
+         _param("action", "query", "string", "Filter by action name.", False,
+                example="scan.created"),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("CSV bytes.",
+                      {"note": "binary text/csv; Content-Disposition: "
+                               "attachment; filename="
+                               "\"braimsec-audit-<org_id>.csv\""},
+                      content_type="text/csv"),
+         "401": _err401(),
+         "403": _err403("Project-scoped keys cannot access org-level "
+                        "resources"),
+         "429": _err429(),
+     })
+
 _doc("POST", "/api/audit-log/archive",
      tag="Audit",
      summary="Archive audit log",
