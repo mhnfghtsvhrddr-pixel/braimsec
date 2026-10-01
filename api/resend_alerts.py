@@ -66,6 +66,19 @@ def _build_content(db, row: dict, channel: str):
     from telegram_alerts import (build_telegram_message,  # noqa: E402
                                  send_telegram)
 
+    if row["event"] in ("cert.expiry", "uptime.down", "uptime.recovered"):
+        # Monitor alerts carry everything in the stored payload; rebuild
+        # the exact human text from it instead of the findings machinery.
+        import cert_monitor  # noqa: E402,F401 - registers text builders
+        import uptime_monitor  # noqa: E402,F401 - registers text builders
+        from alert_fanout import build_texts  # noqa: E402
+        payload = json.loads(row["payload"] or "{}")
+        texts = build_texts(row["event"], payload)
+        if channel == "telegram":
+            return send_telegram, (row["recipient"], texts["telegram"])
+        return send_email, (row["recipient"], texts["email_subject"],
+                            texts["email_text"], texts["email_html"])
+
     findings = _top_findings(db, row["scan_id"])
     heading, subheading = _context(db, row)
     if channel == "telegram":
