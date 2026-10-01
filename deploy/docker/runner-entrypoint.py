@@ -24,6 +24,10 @@ GHA_RULES = os.environ.get("BRAIMSEC_GHA_RULES",
                            "/opt/rules-braimsec/braimsec-gha.yaml")
 INJECT_RULES = os.environ.get("BRAIMSEC_INJECT_RULES",
                               "/opt/rules-braimsec/braimsec-inject.yaml")
+DOCKERFILE_RULES = os.environ.get("BRAIMSEC_DOCKERFILE_RULES",
+                                  "/opt/rules-braimsec/braimsec-dockerfile.yaml")
+TERRAFORM_RULES = os.environ.get("BRAIMSEC_TERRAFORM_RULES",
+                                 "/opt/rules-braimsec/braimsec-terraform.yaml")
 
 sys.path.insert(0, "/opt/scanner")
 os.environ["SEMGREP_BIN"] = SEMGREP_BIN
@@ -31,6 +35,8 @@ os.environ["GITLEAKS_BIN"] = GITLEAKS_BIN
 os.environ["BRAIMSEC_TAINT_RULES"] = TAINT_RULES
 os.environ["BRAIMSEC_GHA_RULES"] = GHA_RULES
 os.environ["BRAIMSEC_INJECT_RULES"] = INJECT_RULES
+os.environ["BRAIMSEC_DOCKERFILE_RULES"] = DOCKERFILE_RULES
+os.environ["BRAIMSEC_TERRAFORM_RULES"] = TERRAFORM_RULES
 # The sandbox runs with --network none: no metrics, no registry, no proxy.
 os.environ["SEMGREP_SEND_METRICS"] = "off"
 for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy",
