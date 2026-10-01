@@ -1842,31 +1842,51 @@ async def gitlab_webhook(request: Request, background_tasks: BackgroundTasks):
 def list_notifications(request: Request, schedule_id: str | None = None,
                        vcs_repo_id: str | None = None,
                        report_schedule_id: str | None = None,
+                       channel: str | None = None, event: str | None = None,
+                       status: str | None = None,
                        limit: int = 50):
-    """Alert delivery log (viewer+, org scope). Newest first."""
+    """Alert delivery log (viewer+, org scope). Newest first.
+
+    Optional filters: ``channel`` (webhook|email|telegram|slack|teams),
+    ``event`` (schedule.alert|schedule.failed|vcs.alert|vcs.failed),
+    ``status`` (sent|failed|skipped). Unknown values -> 400.
+    """
     require_org_scope(request)
     limit = max(1, min(limit, 200))
-    db = get_db()
+    _channels = {"webhook", "email", "telegram", "slack", "teams"}
+    _events = {"schedule.alert", "schedule.failed", "vcs.alert", "vcs.failed"}
+    _statuses = {"sent", "failed", "skipped"}
+    if channel is not None and channel not in _channels:
+        raise HTTPException(400, f"Unknown channel (one of: "
+                                 f"{','.join(sorted(_channels))})")
+    if event is not None and event not in _events:
+        raise HTTPException(400, f"Unknown event (one of: "
+                                 f"{','.join(sorted(_events))})")
+    if status is not None and status not in _statuses:
+        raise HTTPException(400, f"Unknown status (one of: "
+                                 f"{','.join(sorted(_statuses))})")
+    conds = ["org_id=?"]
+    args: list = [request.state.org_id]
     if schedule_id:
-        rows = db.execute(
-            "SELECT * FROM notifications WHERE org_id=? AND schedule_id=?"
-            " ORDER BY id DESC LIMIT ?",
-            (request.state.org_id, schedule_id, limit)).fetchall()
+        conds.append("schedule_id=?")
+        args.append(schedule_id)
     elif vcs_repo_id:
-        rows = db.execute(
-            "SELECT * FROM notifications WHERE org_id=? AND vcs_repo_id=?"
-            " ORDER BY id DESC LIMIT ?",
-            (request.state.org_id, vcs_repo_id, limit)).fetchall()
+        conds.append("vcs_repo_id=?")
+        args.append(vcs_repo_id)
     elif report_schedule_id:
-        rows = db.execute(
-            "SELECT * FROM notifications WHERE org_id=?"
-            " AND report_schedule_id=? ORDER BY id DESC LIMIT ?",
-            (request.state.org_id, report_schedule_id, limit)).fetchall()
-    else:
-        rows = db.execute(
-            "SELECT * FROM notifications WHERE org_id=?"
-            " ORDER BY id DESC LIMIT ?",
-            (request.state.org_id, limit)).fetchall()
+        conds.append("report_schedule_id=?")
+        args.append(report_schedule_id)
+    for col, val in (("channel", channel), ("event", event),
+                     ("status", status)):
+        if val is not None:
+            conds.append(f"{col}=?")
+            args.append(val)
+    args.append(limit)
+    db = get_db()
+    rows = db.execute(
+        f"SELECT * FROM notifications WHERE {' AND '.join(conds)}"
+        " ORDER BY id DESC LIMIT ?",
+        args).fetchall()
     db.close()
     return [dict(r) for r in rows]
 
