@@ -229,7 +229,7 @@ def _other_org_finding(tmp_path):
 
 def _stub_llm(monkeypatch, payload=None, configured=True, fail=False):
     stub = StubClient(payload or _fix_json(), configured, fail)
-    monkeypatch.setattr(main, "LLMClient", lambda: stub)
+    monkeypatch.setattr(main, "make_llm_client", lambda: stub)
     return stub
 
 
