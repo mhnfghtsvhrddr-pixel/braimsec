@@ -546,14 +546,17 @@ def enqueue_ai_review(scan_id: str, background_tasks=None) -> str:
 
 @celery_app.task(name="braimsec.check_schedules")
 def check_schedules():
-    """Celery beat (every 60s): run due scheduled scans.
+    """Celery beat (every 60s): run due scheduled scans and reports.
 
-    Idempotent: ``scheduler.run_scheduler_once`` claims each due schedule
-    with a conditional UPDATE, so overlapping beat instances never
-    double-run. In dev without a broker, call it directly instead.
+    Idempotent: ``scheduler.run_scheduler_once`` and
+    ``scheduled_reports.run_report_scheduler_once`` claim each due
+    schedule with a conditional UPDATE, so overlapping beat instances
+    never double-run. In dev without a broker, call it directly instead.
     """
     from scheduler import run_scheduler_once  # noqa: E402
-    return run_scheduler_once()
+    from scheduled_reports import run_report_scheduler_once  # noqa: E402
+    return {"scans": run_scheduler_once(),
+            "reports": run_report_scheduler_once()}
 
 
 def enqueue_vcs_ingest(repo_id: str, sha: str,
