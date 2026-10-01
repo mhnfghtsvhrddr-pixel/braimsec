@@ -27,10 +27,15 @@ so callers (api/tasks.py) can swap the engine invocation without any
 other change.
 """
 import json
+import logging
 import os
 import shutil
 import subprocess
 import tempfile
+import time
+import uuid
+
+log = logging.getLogger(__name__)
 
 DOCKER_BIN = os.environ.get("BRAIMSEC_DOCKER_BIN", "docker")
 RUNNER_IMAGE = os.environ.get("BRAIMSEC_SCAN_RUNNER_IMAGE",
@@ -57,10 +62,16 @@ def _docker_available() -> bool:
 
 
 def build_command(target_dir: str, out_dir: str,
-                  image: str = RUNNER_IMAGE) -> list:
+                  image: str = RUNNER_IMAGE, name: str | None = None) -> list:
     """The hardened `docker run` invocation. Pure function, unit-tested."""
     cmd = [
         DOCKER_BIN, "run", "--rm",
+    ]
+    if name:
+        # Named braimsec-scan-* so sandbox runs are greppable in
+        # `docker ps` while running and in `docker events` afterwards.
+        cmd += ["--name", name]
+    cmd += [
         "--network", "none",
         "--read-only",
         "--cap-drop", "ALL",
@@ -100,13 +111,15 @@ def run_scan_isolated(target_dir: str, scope=None) -> list:
         raise ContainerError(f"target not a directory: {target_abs}")
 
     out_dir = tempfile.mkdtemp(prefix="braimsec-sandbox-out-")
+    container_name = f"braimsec-scan-{uuid.uuid4().hex[:12]}"
     try:
         if scope:
             rel_scope = [os.path.relpath(p, target_abs) for p in scope]
             with open(os.path.join(out_dir, "scope.json"), "w") as f:
                 json.dump(rel_scope, f)
 
-        cmd = build_command(target_abs, out_dir)
+        cmd = build_command(target_abs, out_dir, name=container_name)
+        started = time.time()
         try:
             proc = subprocess.run(
                 cmd, capture_output=True, text=True,
@@ -135,6 +148,12 @@ def run_scan_isolated(target_dir: str, scope=None) -> list:
                                             fp[len("/target/"):])
             elif fp == "/target":
                 item["file"] = target_abs
+        # Ops proof that the engines ran inside the sandbox (containers are
+        # --rm, so `docker ps -a` can't show them afterwards).
+        log.info("sandbox scan ok: container=%s image=%s target=%s "
+                 "findings=%d (%.1fs)",
+                 container_name, RUNNER_IMAGE, target_abs,
+                 len(findings), time.time() - started)
         return findings
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
