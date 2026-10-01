@@ -53,6 +53,9 @@ ACTIONS = frozenset({
     "vcs.repo.deleted",
     "vcs.repo.secret_rotated",
     "vcs.scan.created",
+    "alert_email.added",
+    "alert_email.toggled",
+    "alert_email.removed",
 })
 
 # Archival never touches recent history: the window must be at least
