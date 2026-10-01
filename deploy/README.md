@@ -17,6 +17,14 @@ is frozen into the image (no `--config auto`, which needs the network).
 SCA stays on the host (manifest parsing + OSV lookups need the network and
 never execute target code).
 
+BraimSec's own rule packs (`scanner/rules/braimsec-{taint,gha,inject}.yaml`)
+are also frozen into the image at `/opt/rules-braimsec/` (copied by
+`docker/scan-runner.Dockerfile`, wired via `runner-entrypoint.py`, and
+**validated at build time** with `semgrep --validate` — a broken pack fails
+the build). After changing any rule file, rebuild the runner image on the
+server: `deploy.sh --rebuild-runner` (the image is cached otherwise, so
+rule edits do NOT take effect until you rebuild).
+
 - `BRAIMSEC_SCAN_SANDBOX=docker` (default in compose; `local` = dev only)
 - `BRAIMSEC_SCAN_RUNNER_IMAGE=braimsec/scan-runner:1.0`
 - Fail-closed: a container error fails the scan loudly — never a silent
