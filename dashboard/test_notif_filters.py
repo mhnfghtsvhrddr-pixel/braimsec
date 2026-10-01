@@ -91,3 +91,22 @@ def test_dashboard_js_syntax_valid():
                            text=True)
         Path(tmp).unlink(missing_ok=True)
         assert r.returncode == 0, f"JS syntax error in script {i}: {r.stderr}"
+
+
+def test_resend_button_only_for_failed_rows():
+    html = _read()
+    fn = re.search(r"async function loadNotifications\(\) \{(.*?)\n\}",
+                   html, re.S).group(1)
+    assert "resendNotification" in fn
+    assert 'n.status === "failed"' in fn
+
+
+def test_resend_function_posts_to_endpoint():
+    html = _read()
+    fn = re.search(r"async function resendNotification\(id, btn\) \{(.*?)\n\}",
+                   html, re.S)
+    assert fn, "resendNotification not found"
+    body = fn.group(1)
+    assert '"/notifications/" + id + "/resend"' in body
+    assert '"POST"' in body
+    assert "loadNotifications()" in body  # refreshes the log afterwards
