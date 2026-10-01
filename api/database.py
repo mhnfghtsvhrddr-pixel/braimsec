@@ -171,6 +171,43 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_sched ON notifications(schedule_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_org ON notifications(org_id, created_at DESC);
+-- Team finding triage: one row per finding with its workflow status,
+-- assignee (an api_keys.id of the same org) and a note. Change history
+-- is append-only in triage_history.
+CREATE TABLE IF NOT EXISTS finding_triage (
+    finding_id INTEGER PRIMARY KEY REFERENCES findings(id),
+    status TEXT NOT NULL DEFAULT 'open',
+    assigned_to TEXT,
+    note TEXT NOT NULL DEFAULT '',
+    updated_by TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_triage_status ON finding_triage(status);
+CREATE INDEX IF NOT EXISTS idx_triage_assignee ON finding_triage(assigned_to);
+CREATE TABLE IF NOT EXISTS triage_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    finding_id INTEGER NOT NULL REFERENCES findings(id),
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    changed_by TEXT NOT NULL DEFAULT '',
+    changed_at TEXT NOT NULL,
+    from_status TEXT NOT NULL DEFAULT '',
+    to_status TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_triage_hist ON triage_history(finding_id, changed_at DESC);
+-- False-positive suppressions: per-org fingerprints (tool|rule_id|file|message,
+-- same scheme as scheduler.finding_fingerprint) triaged as false_positive.
+-- The scheduler's new-findings diff skips these, so a triaged false
+-- positive never re-alerts on later scheduled runs. Leaving
+-- false_positive (any other status) deletes the suppression row.
+CREATE TABLE IF NOT EXISTS finding_suppressions (
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    fingerprint TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (org_id, fingerprint)
+);
 """
 
 
