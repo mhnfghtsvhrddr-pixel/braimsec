@@ -26,9 +26,10 @@
 # path, e.g. ".../rules.braimsec.taint.ssrf-requests"). A `tool` entry
 # matches every finding from that tool.
 
-version: "2.0.0"
+version: "2.1.0"
 
 changelog:
+  - "2.1.0 (2026-10-01): braimsec.dockerfile.* + braimsec.terraform.* packs mapped. Conservative anchors only; soc2/iso populated only where the anchor policy covers the class."
   - "2.0.0 (2026-10-01): SOC 2 + ISO 27001:2022 columns added for every mapped rule; braimsec.inject.* pack mapped. Conservative anchors only."
   - "1.0.0 (2026-09-30): initial conservative mapping - BraimSec taint rules + gitleaks only. Registry rules intentionally unmapped."
 
@@ -134,3 +135,71 @@ mappings:
     cwe: { id: "CWE-798", title: "Use of Hard-coded Credentials" }
     soc2: { code: "CC6.1", title: "Logical access security" }
     iso: { code: "A.5.17", title: "Authentication information" }
+
+  # --- BraimSec IaC packs (v2.1.0): conservative anchors only. soc2/iso are
+  # populated only where the file's anchor policy (header) genuinely covers
+  # the class; otherwise the pair stays unmapped (None), never invented.
+
+  - rule: braimsec.dockerfile.explicit-root-user
+    owasp: { code: "A05:2021", title: "Security Misconfiguration" }
+    cwe: { id: "CWE-250", title: "Execution with Unnecessary Privileges" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+
+  - rule: braimsec.dockerfile.add-remote-url
+    owasp: { code: "A08:2021", title: "Software and Data Integrity Failures" }
+    cwe: { id: "CWE-494", title: "Download of Code Without Integrity Check" }
+    soc2: { code: "CC8.1", title: "Change management" }
+
+  - rule: braimsec.dockerfile.mutable-base-tag
+    owasp: { code: "A08:2021", title: "Software and Data Integrity Failures" }
+    cwe: { id: "CWE-829", title: "Inclusion of Functionality from Untrusted Control Sphere" }
+    soc2: { code: "CC8.1", title: "Change management" }
+
+  - rule: braimsec.dockerfile.secrets-in-env
+    owasp: { code: "A07:2021", title: "Identification and Authentication Failures" }
+    cwe: { id: "CWE-798", title: "Use of Hard-coded Credentials" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.5.17", title: "Authentication information" }
+
+  - rule: braimsec.dockerfile.apt-no-cleanup
+    owasp: { code: "A05:2021", title: "Security Misconfiguration" }
+    cwe: { id: "CWE-754", title: "Improper Check for Unusual or Exceptional Conditions" }
+
+  - rule: braimsec.dockerfile.exposed-sensitive-port
+    owasp: { code: "A05:2021", title: "Security Misconfiguration" }
+    cwe: { id: "CWE-200", title: "Exposure of Sensitive Information to an Unauthorized Actor" }
+
+  - rule: braimsec.dockerfile.curl-pipe-shell
+    owasp: { code: "A08:2021", title: "Software and Data Integrity Failures" }
+    cwe: { id: "CWE-494", title: "Download of Code Without Integrity Check" }
+    soc2: { code: "CC8.1", title: "Change management" }
+
+  - rule: braimsec.terraform.sg-inline-open-to-world
+    owasp: { code: "A01:2021", title: "Broken Access Control" }
+    cwe: { id: "CWE-732", title: "Incorrect Permission Assignment for Critical Resource" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.20", title: "Networks security" }
+
+  - rule: braimsec.terraform.sg-rule-open-to-world
+    owasp: { code: "A01:2021", title: "Broken Access Control" }
+    cwe: { id: "CWE-732", title: "Incorrect Permission Assignment for Critical Resource" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.20", title: "Networks security" }
+
+  - rule: braimsec.terraform.s3-public-acl
+    owasp: { code: "A01:2021", title: "Broken Access Control" }
+    cwe: { id: "CWE-732", title: "Incorrect Permission Assignment for Critical Resource" }
+    soc2: { code: "CC6.1", title: "Logical access security" }
+    iso: { code: "A.8.3", title: "Information access restriction" }
+
+  - rule: braimsec.terraform.rds-no-encryption
+    owasp: { code: "A02:2021", title: "Cryptographic Failures" }
+    cwe: { id: "CWE-311", title: "Missing Encryption of Sensitive Data" }
+
+  - rule: braimsec.terraform.rds-no-backup
+    owasp: { code: "A05:2021", title: "Security Misconfiguration" }
+    cwe: { id: "CWE-754", title: "Improper Check for Unusual or Exceptional Conditions" }
+
+  - rule: braimsec.terraform.ebs-no-encryption
+    owasp: { code: "A02:2021", title: "Cryptographic Failures" }
+    cwe: { id: "CWE-311", title: "Missing Encryption of Sensitive Data" }
