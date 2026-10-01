@@ -149,3 +149,39 @@ def test_build_command_default_limits_present(tmp_path):
     assert "--pids-limit" in cmd
     assert "--memory" in cmd
     assert "--cpus" in cmd
+
+
+def test_build_command_name_flag(tmp_path):
+    cmd = build_command(str(tmp_path), str(tmp_path), name="braimsec-scan-abc123")
+    assert "--name" in cmd
+    i = cmd.index("--name")
+    assert cmd[i + 1] == "braimsec-scan-abc123"
+
+
+def test_build_command_no_name_by_default(tmp_path):
+    cmd = build_command(str(tmp_path), str(tmp_path))
+    assert "--name" not in cmd
+
+
+def test_run_isolated_names_container_and_logs(tmp_path, monkeypatch, caplog):
+    import re
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        out = [a for a in cmd if a.endswith(":/out")][0].split(":")[0]
+        with open(os.path.join(out, "findings.json"), "w") as f:
+            json.dump([{"tool": "gitleaks", "rule_id": "r", "file": "/target/a.py"}], f)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(docker_runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(docker_runner, "_docker_available", lambda: True)
+    target = tmp_path / "t"
+    target.mkdir()
+    with caplog.at_level("INFO", logger="docker_runner"):
+        findings = run_scan_isolated(str(target))
+    assert len(findings) == 1
+    i = seen["cmd"].index("--name")
+    assert re.fullmatch(r"braimsec-scan-[0-9a-f]{12}", seen["cmd"][i + 1])
+    assert any("sandbox scan ok" in r.message and "braimsec-scan-" in r.message
+               for r in caplog.records)
