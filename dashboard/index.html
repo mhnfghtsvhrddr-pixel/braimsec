@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BraimSec 🛡️ — لوحة تحكم الفحص الأمني</title>
+<title>BraimSec 🛡️ — لوحة تحكم العميل</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -38,8 +38,22 @@
   header h1 { font-size: 1.4rem; }
   header h1 span { color: var(--accent); }
   header p { color: var(--muted); font-size: 0.85rem; }
+  nav {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 0 2rem;
+    display: flex;
+    gap: 0.4rem;
+  }
+  nav button {
+    background: none; border: none; color: var(--muted);
+    padding: 0.85rem 1.2rem; font-size: 0.95rem; cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  nav button:hover { color: var(--text); }
+  nav button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: bold; }
   main { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
-  .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
+  .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 0.8rem; }
   .toolbar h2 { font-size: 1.2rem; }
   .btn {
     background: linear-gradient(135deg, var(--accent), var(--accent2));
@@ -48,12 +62,26 @@
     cursor: pointer; transition: transform 0.15s, opacity 0.15s;
   }
   .btn:hover { transform: translateY(-2px); opacity: 0.92; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   .btn-ghost {
     background: var(--bg3); color: var(--text);
     border: 1px solid var(--border); border-radius: 10px;
     padding: 0.55rem 1.1rem; font-size: 0.95rem; cursor: pointer;
   }
   .btn-ghost:hover { border-color: var(--accent); }
+  .btn-danger {
+    background: rgba(248,81,73,.12); color: var(--red);
+    border: 1px solid var(--red); border-radius: 8px;
+    padding: 0.4rem 0.9rem; font-size: 0.85rem; cursor: pointer;
+  }
+  .btn-danger:hover { background: rgba(248,81,73,.22); }
+  .btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-small {
+    background: var(--bg3); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 0.35rem 0.8rem; font-size: 0.82rem; cursor: pointer;
+  }
+  .btn-small:hover { border-color: var(--accent); }
   .scan-card {
     background: var(--bg2); border: 1px solid var(--border);
     border-radius: 14px; padding: 1.2rem 1.4rem; margin-bottom: 1rem;
@@ -66,16 +94,22 @@
   .scan-card .left { display: flex; align-items: center; gap: 0.8rem; }
   .badge {
     display: inline-block; padding: 0.25rem 0.75rem; border-radius: 999px;
-    font-size: 0.78rem; font-weight: bold;
+    font-size: 0.78rem; font-weight: bold; white-space: nowrap;
   }
-  .b-done { background: rgba(63,185,80,.15); color: var(--green); border: 1px solid var(--green); }
-  .b-running { background: rgba(88,166,255,.15); color: var(--blue); border: 1px solid var(--blue); }
+  .b-done, .b-active { background: rgba(63,185,80,.15); color: var(--green); border: 1px solid var(--green); }
+  .b-running, .b-trialing { background: rgba(88,166,255,.15); color: var(--blue); border: 1px solid var(--blue); }
   .b-queued { background: rgba(139,148,158,.15); color: var(--muted); border: 1px solid var(--muted); }
-  .b-failed { background: rgba(248,81,73,.15); color: var(--red); border: 1px solid var(--red); }
-  .sev { font-weight: bold; font-size: 0.8rem; padding: 0.2rem 0.6rem; border-radius: 6px; }
+  .b-failed, .b-past_due, .b-canceled, .b-expired { background: rgba(248,81,73,.15); color: var(--red); border: 1px solid var(--red); }
+  .sev { font-weight: bold; font-size: 0.8rem; padding: 0.2rem 0.6rem; border-radius: 6px; white-space: nowrap; }
   .sev-error { background: rgba(248,81,73,.15); color: var(--red); }
   .sev-warning { background: rgba(210,153,34,.15); color: var(--amber); }
   .sev-note { background: rgba(88,166,255,.15); color: var(--blue); }
+  .verdict { font-size: 0.78rem; padding: 0.2rem 0.6rem; border-radius: 6px; white-space: nowrap; }
+  .v-true_positive { background: rgba(248,81,73,.15); color: var(--red); }
+  .v-false_positive { background: rgba(63,185,80,.15); color: var(--green); }
+  .v-needs_review { background: rgba(210,153,34,.15); color: var(--amber); }
+  .v-skipped { background: rgba(139,148,158,.12); color: var(--muted); }
+  .v-error { background: rgba(248,81,73,.15); color: var(--red); }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
   .card {
     background: var(--bg2); border: 1px solid var(--border);
@@ -94,25 +128,27 @@
   }
   .filter-btn.active { color: #0d1117; background: var(--accent); border-color: var(--accent); font-weight: bold; }
   table { width: 100%; border-collapse: collapse; background: var(--bg2); border-radius: 14px; overflow: hidden; }
-  th, td { padding: 0.8rem 1rem; text-align: right; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+  th, td { padding: 0.8rem 1rem; text-align: right; border-bottom: 1px solid var(--border); font-size: 0.9rem; vertical-align: top; }
   th { background: var(--bg3); color: var(--muted); font-weight: 600; }
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: rgba(34,211,238,.04); }
-  td code { font-family: Consolas, monospace; font-size: 0.82rem; color: var(--accent2); }
-  .msg { color: var(--muted); font-size: 0.85rem; max-width: 380px; }
+  td code, .mono { font-family: Consolas, monospace; font-size: 0.82rem; color: var(--accent2); }
+  .msg { color: var(--muted); font-size: 0.85rem; max-width: 320px; }
   .empty { text-align: center; color: var(--muted); padding: 3rem; background: var(--bg2); border-radius: 14px; border: 1px dashed var(--border); }
   .empty .big { font-size: 3rem; margin-bottom: 0.5rem; }
   .modal-back {
     position: fixed; inset: 0; background: rgba(0,0,0,.65);
     display: flex; align-items: center; justify-content: center; z-index: 50;
+    padding: 1rem;
   }
   .modal {
     background: var(--bg2); border: 1px solid var(--border); border-radius: 16px;
-    padding: 2rem; width: 90%; max-width: 480px;
+    padding: 2rem; width: 90%; max-width: 480px; max-height: 90vh; overflow-y: auto;
   }
+  .modal.wide { max-width: 760px; }
   .modal h3 { margin-bottom: 1.2rem; }
   .modal label { display: block; color: var(--muted); font-size: 0.88rem; margin: 1rem 0 0.4rem; }
-  .modal input[type=text] {
+  .modal input[type=text], .modal select {
     width: 100%; background: var(--bg); border: 1px solid var(--border);
     border-radius: 8px; color: var(--text); padding: 0.65rem 0.9rem; font-size: 0.95rem;
   }
@@ -124,12 +160,45 @@
     animation: spin 0.8s linear infinite; vertical-align: middle;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .detail-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+  .detail-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; flex-wrap: wrap; gap: 0.6rem; }
   .detail-head h2 { font-size: 1.25rem; }
+  .detail-actions { display: flex; gap: 0.6rem; }
+  .panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; padding: 1.4rem; margin-bottom: 1.2rem; }
+  .panel h3 { margin-bottom: 1rem; font-size: 1.05rem; }
+  .kv { display: flex; justify-content: space-between; padding: 0.45rem 0; border-bottom: 1px dashed var(--border); font-size: 0.92rem; }
+  .kv:last-child { border-bottom: none; }
+  .kv .k { color: var(--muted); }
+  .usage-bar { background: var(--bg3); border-radius: 999px; height: 10px; overflow: hidden; margin-top: 0.5rem; }
+  .usage-bar > div { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 999px; }
+  .usage-bar.hot > div { background: linear-gradient(90deg, var(--amber), var(--red)); }
+  .plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
+  .plan-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; padding: 1.3rem; }
+  .plan-card.current { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .plan-card .pname { font-weight: bold; font-size: 1.1rem; }
+  .plan-card .pprice { color: var(--accent); font-size: 1.5rem; font-weight: bold; margin: 0.4rem 0; }
+  .plan-card ul { list-style: none; margin-top: 0.6rem; }
+  .plan-card li { color: var(--muted); font-size: 0.86rem; padding: 0.25rem 0; }
+  .plan-card li::before { content: "✓ "; color: var(--green); }
+  .keybox {
+    background: var(--bg); border: 1px dashed var(--amber); border-radius: 10px;
+    padding: 1rem; margin: 1rem 0; word-break: break-all; direction: ltr; text-align: left;
+    font-family: Consolas, monospace; font-size: 0.9rem; color: var(--amber);
+  }
+  .warn { color: var(--amber); font-size: 0.88rem; }
+  .notice { background: rgba(210,153,34,.1); border: 1px solid var(--amber); color: var(--amber);
+    border-radius: 12px; padding: 1rem 1.3rem; margin-bottom: 1.2rem; font-size: 0.92rem; }
+  pre.diff {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 1rem; overflow-x: auto; direction: ltr; text-align: left;
+    font-family: Consolas, monospace; font-size: 0.82rem; max-height: 320px; overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  .fix-meta { color: var(--muted); font-size: 0.88rem; margin: 0.8rem 0; line-height: 1.7; }
   footer { text-align: center; color: var(--muted); font-size: 0.8rem; padding: 2rem; }
   @media (max-width: 640px) {
     .scan-card { flex-direction: column; align-items: flex-start; gap: 0.8rem; }
     th:nth-child(4), td:nth-child(4) { display: none; }
+    nav { padding: 0 1rem; overflow-x: auto; }
   }
 </style>
 </head>
@@ -149,21 +218,32 @@
   </div>
 </header>
 
+<nav>
+  <button id="nav-scans" class="active" onclick="showView('scans')">📋 الفحوصات</button>
+  <button id="nav-billing" onclick="showView('billing')">💳 الاشتراك والاستخدام</button>
+  <button id="nav-keys" onclick="showView('keys')">🔑 مفاتيح API</button>
+</nav>
+
 <main>
   <!-- قائمة الفحوصات -->
   <section id="view-scans">
-    <div class="toolbar">
-      <h2>📋 عمليات الفحص</h2>
-      <button class="btn" onclick="openModal()">+ فحص جديد</button>
+    <div id="scans-list-wrap">
+      <div class="toolbar">
+        <h2>📋 عمليات الفحص</h2>
+        <button class="btn" onclick="openModal()">+ فحص جديد</button>
+      </div>
+      <div id="scans-list"></div>
     </div>
-    <div id="scans-list"></div>
   </section>
 
   <!-- تفاصيل الفحص -->
   <section id="view-detail" hidden>
     <div class="detail-head">
       <h2 id="detail-title"></h2>
-      <button class="btn-ghost" onclick="showScans()">→ رجوع للقائمة</button>
+      <div class="detail-actions">
+        <button class="btn-ghost" id="pdf-btn" onclick="downloadPdf()" hidden>📄 تحميل تقرير PDF</button>
+        <button class="btn-ghost" onclick="showScans()">→ رجوع للقائمة</button>
+      </div>
     </div>
     <div id="detail-status"></div>
     <div class="cards" id="severity-cards"></div>
@@ -174,6 +254,24 @@
       <button class="filter-btn" data-sev="note" onclick="setFilter('note')">🔵 منخفضة</button>
     </div>
     <div id="findings-wrap"></div>
+  </section>
+
+  <!-- الاشتراك والاستخدام -->
+  <section id="view-billing" hidden>
+    <div class="toolbar"><h2>💳 الاشتراك والاستخدام</h2></div>
+    <div id="billing-wrap"></div>
+    <h3 style="margin: 1.6rem 0 1rem;">📦 الخطط المتاحة</h3>
+    <div class="plan-grid" id="plans-grid"></div>
+  </section>
+
+  <!-- مفاتيح API -->
+  <section id="view-keys" hidden>
+    <div class="toolbar">
+      <h2>🔑 مفاتيح API</h2>
+      <button class="btn" id="new-key-btn" onclick="openKeyModal()">+ مفتاح جديد</button>
+    </div>
+    <div id="keys-notice"></div>
+    <div id="keys-wrap"></div>
   </section>
 </main>
 
@@ -193,14 +291,64 @@
   </div>
 </div>
 
-<footer>BraimSec v0.1.0 — نموذج أولي</footer>
+<!-- نافذة اقتراح الإصلاح -->
+<div id="fix-back" class="modal-back" hidden>
+  <div class="modal wide">
+    <h3>🤖 اقتراح الإصلاح</h3>
+    <div id="fix-body"></div>
+    <div class="row">
+      <button class="btn-ghost" onclick="document.getElementById('fix-back').hidden = true">إغلاق</button>
+    </div>
+  </div>
+</div>
 
+<!-- نافذة مفتاح جديد -->
+<div id="key-back" class="modal-back" hidden>
+  <div class="modal">
+    <h3>🔑 إنشاء مفتاح API</h3>
+    <label>اسم المفتاح</label>
+    <input type="text" id="key-name" placeholder="مثال: مفتاح فريق التطوير" dir="rtl">
+    <label>الدور</label>
+    <select id="key-role" dir="rtl">
+      <option value="viewer">مشاهد — قراءة فقط</option>
+      <option value="member" selected>عضو — فحص ومراجعة</option>
+      <option value="admin">مدير — إدارة المفاتيح أيضاً</option>
+      <option value="owner">مالك — كل الصلاحيات</option>
+    </select>
+    <div class="row">
+      <button class="btn" onclick="createKey()">إنشاء</button>
+      <button class="btn-ghost" onclick="document.getElementById('key-back').hidden = true">إلغاء</button>
+    </div>
+    <p id="key-err" style="color: var(--red); font-size: 0.85rem; margin-top: 0.8rem;"></p>
+  </div>
+</div>
+
+<!-- نافذة عرض المفتاح الخام -->
+<div id="rawkey-back" class="modal-back" hidden>
+  <div class="modal">
+    <h3>⚠️ احفظ هذا المفتاح الآن</h3>
+    <p class="warn">لن يظهر المفتاح الكامل مجدداً أبداً — انسخه واحفظه في مكان آمن.</p>
+    <div class="keybox" id="rawkey-value"></div>
+    <div class="row">
+      <button class="btn" onclick="copyRawKey()">📋 نسخ</button>
+      <button class="btn-ghost" onclick="document.getElementById('rawkey-back').hidden = true">تم، حفظته</button>
+    </div>
+  </div>
+</div>
+
+<footer>BraimSec v0.2.0 — لوحة تحكم العميل</footer>
 <script>
 const API = "/api";
-let currentScan = null, currentFilter = "", pollTimer = null;
+let currentScan = null, currentScanStatus = "", currentFilter = "", pollTimer = null;
 
 const SEV_AR = { error: "حرجة", warning: "متوسطة", note: "منخفضة" };
 const STATUS_AR = { queued: "في الانتظار", running: "جارٍ الفحص", done: "مكتمل", failed: "فشل" };
+const SUB_AR = { active: "نشط", trialing: "تجريبي", past_due: "الدفع متأخر", canceled: "ملغي", expired: "منتهي" };
+const ROLE_AR = { viewer: "مشاهد", member: "عضو", admin: "مدير", owner: "مالك" };
+const VERDICT_AR = {
+  true_positive: "ثغرة مؤكدة", false_positive: "إنذار كاذب",
+  needs_review: "يحتاج مراجعة", skipped: "بدون مراجعة", error: "خطأ"
+};
 
 async function api(path, opts) {
   opts = opts || {};
@@ -208,28 +356,52 @@ async function api(path, opts) {
     "X-API-Key": localStorage.getItem("braimsec_key") || ""
   });
   const r = await fetch(API + path, opts);
-  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || r.statusText); }
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || ("خطأ " + r.status)); }
   return r.json();
 }
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtDT = s => s ? s.slice(0, 16).replace("T", " ") : "—";
+const fmtD = s => s ? s.slice(0, 10) : "—";
+const myPrefix = () => (localStorage.getItem("braimsec_key") || "").slice(0, 8);
 
+/* ---------- التنقل ---------- */
+function showView(name) {
+  ["scans", "billing", "keys"].forEach(v => {
+    document.getElementById("nav-" + v).classList.toggle("active", v === name);
+  });
+  document.getElementById("view-scans").hidden = name !== "scans";
+  document.getElementById("view-detail").hidden = true;
+  document.getElementById("view-billing").hidden = name !== "billing";
+  document.getElementById("view-keys").hidden = name !== "keys";
+  clearInterval(pollTimer);
+  if (name === "scans") loadScans();
+  if (name === "billing") loadBilling();
+  if (name === "keys") loadKeys();
+}
+
+/* ---------- الفحوصات ---------- */
 async function loadScans() {
-  const scans = await api("/scans");
+  const scans = await api("/scans").catch(e => { showErr("scans-list", e); return null; });
+  if (!scans) return;
   const el = document.getElementById("scans-list");
   if (!scans.length) {
     el.innerHTML = `<div class="empty"><div class="big">🔍</div><p>لا توجد فحوصات بعد — ابدأ أول فحص لك!</p></div>`;
     return;
   }
   el.innerHTML = scans.map(s => `
-    <div class="scan-card" onclick="openDetail('${s.id}')">
+    <div class="scan-card" onclick="openDetail('${esc(s.id)}')">
       <div>
         <div class="name">📁 ${esc(s.target_name)}</div>
-        <div class="meta">${esc(s.created_at.slice(0,16).replace("T"," "))} — ${s.total_findings} نتيجة</div>
+        <div class="meta">${fmtDT(s.created_at)} — ${s.total_findings || 0} نتيجة</div>
       </div>
       <div class="left">
-        <span class="badge b-${s.status}">${s.status === "running" ? '<span class="spinner"></span> ' : ""}${STATUS_AR[s.status] || s.status}</span>
+        <span class="badge b-${s.status}">${s.status === "running" ? '<span class="spinner"></span> ' : ""}${STATUS_AR[s.status] || esc(s.status)}</span>
       </div>
     </div>`).join("");
+}
+function showErr(elId, e) {
+  document.getElementById(elId).innerHTML =
+    `<div class="notice">⚠️ ${esc(e.message)} — تأكد من إدخال مفتاح API صحيح أعلى الصفحة.</div>`;
 }
 
 async function openDetail(id) {
@@ -240,22 +412,26 @@ async function openDetail(id) {
   await refreshDetail();
   clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
-    const s = await api(`/scans/${id}`);
-    if (s.status === "done" || s.status === "failed") { clearInterval(pollTimer); await refreshDetail(); }
-    else { document.getElementById("detail-status").innerHTML = statusLine(s); }
+    try {
+      const s = await api(`/scans/${id}`);
+      if (s.status === "done" || s.status === "failed") { clearInterval(pollTimer); await refreshDetail(); }
+      else { document.getElementById("detail-status").innerHTML = statusLine(s); }
+    } catch (e) { /* تجاهل أخطاء الاستطلاع */ }
   }, 3000);
 }
 
 function statusLine(s) {
   const spin = (s.status === "running" || s.status === "queued") ? '<span class="spinner"></span> ' : "";
-  return `<p style="color:var(--muted);margin:0.4rem 0">${spin}<span class="badge b-${s.status}">${STATUS_AR[s.status]}</span>
+  return `<p style="color:var(--muted);margin:0.4rem 0">${spin}<span class="badge b-${s.status}">${STATUS_AR[s.status] || esc(s.status)}</span>
     ${s.error ? ` — <span style="color:var(--red)">${esc(s.error)}</span>` : ""}</p>`;
 }
 
 async function refreshDetail() {
   const s = await api(`/scans/${currentScan}`);
+  currentScanStatus = s.status;
   document.getElementById("detail-title").textContent = "📁 " + s.target_name;
   document.getElementById("detail-status").innerHTML = statusLine(s);
+  document.getElementById("pdf-btn").hidden = s.status !== "done";
   const sum = s.severity_summary || {};
   const total = s.total_findings || 0;
   document.getElementById("severity-cards").innerHTML = `
@@ -266,20 +442,34 @@ async function refreshDetail() {
   await loadFindings();
 }
 
+function verdictBadge(f) {
+  if (!f.ai_verdict) return '<span class="verdict v-skipped">—</span>';
+  const cls = VERDICT_AR[f.ai_verdict] ? `v-${f.ai_verdict}` : "v-skipped";
+  const lbl = VERDICT_AR[f.ai_verdict] || f.ai_verdict;
+  const conf = (f.ai_confidence != null && f.ai_confidence !== "") ? ` (${Math.round(f.ai_confidence * 100)}٪)` : "";
+  return `<span class="verdict ${cls}" title="${esc(f.ai_explanation || "")}">${esc(lbl)}${conf}</span>`;
+}
+
 async function loadFindings() {
   const q = currentFilter ? `?severity=${currentFilter}` : "";
-  const rows = await api(`/scans/${currentScan}/results${q}`);
+  const rows = await api(`/scans/${currentScan}/results${q}`).catch(() => []);
   const el = document.getElementById("findings-wrap");
   if (!rows.length) { el.innerHTML = `<div class="empty"><p>لا توجد نتائج بهذا التصنيف 🎉</p></div>`; return; }
   el.innerHTML = `<table><thead><tr>
-      <th>الخطورة</th><th>الأداة / القاعدة</th><th>الموقع</th><th>الوصف</th>
-    </tr></thead><tbody>` + rows.map(f => `
+      <th>الخطورة</th><th>الأداة / القاعدة</th><th>الموقع</th><th>حكم الذكاء الاصطناعي</th><th>الوصف</th><th></th>
+    </tr></thead><tbody>` + rows.map(f => {
+    const loc = (f.file ? esc(String(f.file).split("/").pop()) : "—") + (f.line != null ? `:${f.line}` : "");
+    const fixBtn = `<button class="btn-small" onclick="askFix(${f.id}, ${f.has_fix ? 1 : 0})">${f.has_fix ? "👁 عرض الاقتراح" : "🤖 اقتراح إصلاح"}</button>`;
+    return `
     <tr>
-      <td><span class="sev sev-${f.severity}">${SEV_AR[f.severity] || f.severity}</span></td>
-      <td><code>${esc(f.tool)}/${esc(f.rule_id.split(".").pop())}</code></td>
-      <td><code dir="ltr">${esc(f.file.split("/").pop())}:${f.line}</code></td>
-      <td class="msg">${esc(f.message.slice(0, 140))}</td>
-    </tr>`).join("") + `</tbody></table>`;
+      <td><span class="sev sev-${f.severity}">${SEV_AR[f.severity] || esc(f.severity)}</span></td>
+      <td><code>${esc(f.tool)}/${esc(String(f.rule_id || "").split(".").pop())}</code></td>
+      <td><code dir="ltr">${loc}</code></td>
+      <td>${verdictBadge(f)}</td>
+      <td class="msg">${esc((f.message || "").slice(0, 140))}</td>
+      <td>${fixBtn}</td>
+    </tr>`;
+  }).join("") + `</tbody></table>`;
 }
 
 function setFilter(sev) {
@@ -316,8 +506,194 @@ async function startScan() {
   } catch (e) { err.textContent = e.message; }
 }
 
+async function downloadPdf() {
+  const btn = document.getElementById("pdf-btn");
+  btn.disabled = true;
+  try {
+    const r = await fetch(API + `/scans/${currentScan}/report.pdf`, {
+      headers: { "X-API-Key": localStorage.getItem("braimsec_key") || "" }
+    });
+    if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || ("خطأ " + r.status)); }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `braimsec-${currentScan}-report.pdf`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch (e) { alert("تعذر تحميل التقرير: " + e.message); }
+  btn.disabled = false;
+}
+
+/* ---------- اقتراح الإصلاح ---------- */
+async function askFix(findingId, hasFix) {
+  if (!hasFix) {
+    const ok = confirm("توليد اقتراح إصلاح جديد يستهلك وحدتين من حصة المراجعة الذكية الشهرية.\n\nهل تريد المتابعة؟");
+    if (!ok) return;
+  }
+  const body = document.getElementById("fix-body");
+  body.innerHTML = `<p style="color:var(--muted)"><span class="spinner"></span> جارٍ تجهيز الاقتراح…</p>`;
+  document.getElementById("fix-back").hidden = false;
+  try {
+    const r = await api(`/findings/${findingId}/fix-suggestion`, { method: "POST" });
+    renderFix(r.suggestion, r.cached);
+  } catch (e) {
+    body.innerHTML = `<div class="notice">⚠️ ${esc(e.message)}</div>`;
+  }
+}
+function renderFix(s, cached) {
+  const conf = s.confidence != null ? Math.round(s.confidence * 100) + "٪" : "—";
+  const checks = s.checks || {};
+  const okIcon = v => v ? "✅" : "❌";
+  document.getElementById("fix-body").innerHTML = `
+    <p class="fix-meta">
+      ${cached ? "💾 <b>اقتراح محفوظ</b> (بدون استهلاك حصة)" : "✨ <b>اقتراح جديد</b>"} —
+      الثقة: <b>${conf}</b><br>
+      الفحص الآلي: يطبَّق ${okIcon(checks.applies)} · سلامة نحوية ${okIcon(checks.syntax_ok)}
+      ${s.generated_at ? `<br>وُلّد في: ${fmtDT(s.generated_at)}` : ""}
+    </p>
+    ${s.explanation ? `<p style="margin-bottom:1rem;line-height:1.8">${esc(s.explanation)}</p>` : ""}
+    ${s.caveats ? `<div class="notice">⚠️ ${esc(s.caveats)}</div>` : ""}
+    ${s.diff ? `<h4 style="margin:1rem 0 0.5rem">📝 الفرق المقترح</h4><pre class="diff">${esc(s.diff)}</pre>`
+             : `<p class="warn">لا يوجد فرق متاح لهذه النتيجة.</p>`}`;
+}
+
+/* ---------- الاشتراك والاستخدام ---------- */
+async function loadBilling() {
+  const wrap = document.getElementById("billing-wrap");
+  wrap.innerHTML = `<p style="color:var(--muted)"><span class="spinner"></span> جارٍ التحميل…</p>`;
+  try {
+    const [sub, usage, plans] = await Promise.all([
+      api("/subscription"), api("/usage"), api("/plans")
+    ]);
+    const lim = v => v < 0 ? "غير محدود" : "حتى " + v;
+    const stCls = { active: "b-active", trialing: "b-trialing", past_due: "b-past_due", canceled: "b-canceled", expired: "b-expired" }[sub.status] || "b-queued";
+    const trial = sub.status === "trialing" && sub.trial_ends_at
+      ? `<div class="kv"><span class="k">نهاية التجربة</span><span>${fmtD(sub.trial_ends_at)}</span></div>` : "";
+    const usageRow = (label, u) => {
+      if (u.unlimited) return `<div class="kv"><span class="k">${label}</span><span>∞ غير محدود</span></div>`;
+      const pct = u.quota > 0 ? Math.min(100, Math.round(u.used / u.quota * 100)) : 0;
+      return `<div style="margin:0.7rem 0"><div class="kv"><span class="k">${label}</span>
+        <span><b>${u.used}</b> / ${u.quota}</span></div>
+        <div class="usage-bar${pct >= 80 ? " hot" : ""}"><div style="width:${pct}%"></div></div></div>`;
+    };
+    wrap.innerHTML = `
+      <div class="panel"><h3>📋 اشتراكك الحالي</h3>
+        <div class="kv"><span class="k">الخطة</span><span><b>${esc(sub.plan_name)}</b></span></div>
+        <div class="kv"><span class="k">الحالة</span><span class="badge ${stCls}">${SUB_AR[sub.status] || esc(sub.status)}</span></div>
+        <div class="kv"><span class="k">الفترة الحالية</span><span>${fmtD(sub.current_period_start)} ← ${fmtD(sub.current_period_end)}</span></div>
+        ${trial}
+        <div class="kv"><span class="k">المشاريع</span><span>${lim(sub.limits.max_projects)}</span></div>
+        <div class="kv"><span class="k">المقاعد</span><span>${lim(sub.limits.max_seats)}</span></div>
+      </div>
+      <div class="panel"><h3>📊 استخدام الشهر الحالي</h3>
+        ${usageRow("عمليات الفحص", usage.scans)}
+        ${usageRow("المراجعات الذكية", usage.ai_reviews)}
+        <p style="color:var(--muted);font-size:0.82rem;margin-top:0.6rem">الحصص لا تُرحَّل للشهر التالي.</p>
+      </div>`;
+    const grid = document.getElementById("plans-grid");
+    grid.innerHTML = plans.map(p => `
+      <div class="plan-card${p.plan_id === sub.plan_id ? " current" : ""}">
+        <div class="pname">${esc(p.name)} ${p.plan_id === sub.plan_id ? '<span class="badge b-active">خطتك</span>' : ""}</div>
+        <div class="pprice">${esc(p.price_display)}</div>
+        <ul>
+          <li>${p.scan_quota < 0 ? "فحوصات غير محدودة" : p.scan_quota + " فحص/شهر"}</li>
+          <li>${p.ai_review_quota < 0 ? "مراجعات ذكية غير محدودة" : p.ai_review_quota + " مراجعة ذكية/شهر"}</li>
+          <li>${p.max_projects < 0 ? "مشاريع غير محدودة" : "حتى " + p.max_projects + " مشاريع"}</li>
+          ${(p.features || []).map(f => `<li>${esc(f)}</li>`).join("")}
+        </ul>
+      </div>`).join("");
+  } catch (e) { showErr("billing-wrap", e); }
+}
+
+/* ---------- مفاتيح API ---------- */
+async function loadKeys() {
+  const wrap = document.getElementById("keys-wrap");
+  const notice = document.getElementById("keys-notice");
+  document.getElementById("new-key-btn").disabled = false;
+  notice.innerHTML = "";
+  wrap.innerHTML = `<p style="color:var(--muted)"><span class="spinner"></span> جارٍ التحميل…</p>`;
+  let keys;
+  try {
+    keys = await api("/keys");
+  } catch (e) {
+    wrap.innerHTML = "";
+    notice.innerHTML = `<div class="notice">🔒 ${esc(e.message)} — إدارة المفاتيح تتطلب مفتاحاً بدور <b>مدير</b> أو أعلى.</div>`;
+    document.getElementById("new-key-btn").disabled = true;
+    return;
+  }
+  if (!keys.length) {
+    wrap.innerHTML = `<div class="empty"><p>لا توجد مفاتيح بعد.</p></div>`;
+    return;
+  }
+  const me = myPrefix();
+  wrap.innerHTML = `<table><thead><tr>
+      <th>الاسم</th><th>البادئة</th><th>الدور</th><th>أُنشئ</th><th>آخر استخدام</th><th>الحالة</th><th>إجراءات</th>
+    </tr></thead><tbody>` + keys.map(k => {
+    const isMe = me && k.key_prefix === me;
+    const st = k.revoked ? '<span class="badge b-canceled">ملغي</span>'
+      : `<span class="badge b-active">نشط${isMe ? " · أنت" : ""}</span>`;
+    const acts = k.revoked ? "—" : `
+      <button class="btn-small" onclick="rotateKey('${k.id}')" title="إصدار بديل وإبطال القديم فوراً">🔄 تدوير</button>
+      <button class="btn-danger" onclick="revokeKey('${k.id}')" ${isMe ? 'disabled title="لا يمكن إلغاء المفتاح المستخدم حالياً"' : ""}>🗑 إلغاء</button>`;
+    return `<tr>
+      <td>${esc(k.name || "—")}</td>
+      <td><code dir="ltr">${esc(k.key_prefix)}…</code></td>
+      <td>${ROLE_AR[k.role] || esc(k.role)}</td>
+      <td>${fmtDT(k.created_at)}</td>
+      <td>${fmtDT(k.last_used_at)}</td>
+      <td>${st}</td>
+      <td style="white-space:nowrap">${acts}</td>
+    </tr>`;
+  }).join("") + `</tbody></table>`;
+}
+
+function openKeyModal() { document.getElementById("key-back").hidden = false; document.getElementById("key-err").textContent = ""; }
+let lastRawKey = "";
+function showRawKey(k) {
+  lastRawKey = k;
+  document.getElementById("rawkey-value").textContent = k;
+  document.getElementById("rawkey-back").hidden = false;
+}
+function copyRawKey() {
+  navigator.clipboard.writeText(lastRawKey).then(
+    () => alert("تم النسخ ✅"),
+    () => alert("تعذر النسخ التلقائي — انسخه يدوياً"));
+}
+async function createKey() {
+  const err = document.getElementById("key-err");
+  err.textContent = "";
+  const name = document.getElementById("key-name").value.trim();
+  const role = document.getElementById("key-role").value;
+  if (!name) { err.textContent = "أدخل اسماً للمفتاح"; return; }
+  try {
+    const r = await api("/keys", { method: "POST", body: JSON.stringify({ name, role }) });
+    document.getElementById("key-back").hidden = true;
+    document.getElementById("key-name").value = "";
+    showRawKey(r.key);
+    loadKeys();
+  } catch (e) { err.textContent = e.message; }
+}
+async function rotateKey(id) {
+  if (!confirm("تدوير المفتاح يُصدر بديلاً جديداً ويُبطل القديم فوراً.\n\nهل تريد المتابعة؟")) return;
+  try {
+    const r = await api(`/keys/${id}/rotate`, { method: "POST" });
+    if (r.key_prefix === myPrefix()) localStorage.setItem("braimsec_key", r.key);
+    showRawKey(r.key);
+    loadKeys();
+  } catch (e) { alert("تعذر التدوير: " + e.message); }
+}
+async function revokeKey(id) {
+  if (!confirm("إلغاء المفتاح يمنعه من العمل نهائياً.\n\nهل أنت متأكد؟")) return;
+  try {
+    await api(`/keys/${id}`, { method: "DELETE" });
+    loadKeys();
+  } catch (e) { alert("تعذر الإلغاء: " + e.message); }
+}
+
 loadScans();
-setInterval(() => { if (!document.getElementById("view-scans").hidden) loadScans(); }, 5000);
+setInterval(() => {
+  if (!document.getElementById("view-scans").hidden && document.getElementById("view-detail").hidden) loadScans();
+}, 5000);
 </script>
 </body>
 </html>
