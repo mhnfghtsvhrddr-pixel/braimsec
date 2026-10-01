@@ -1854,7 +1854,8 @@ def list_notifications(request: Request, schedule_id: str | None = None,
     require_org_scope(request)
     limit = max(1, min(limit, 200))
     _channels = {"webhook", "email", "telegram", "slack", "teams"}
-    _events = {"schedule.alert", "schedule.failed", "vcs.alert", "vcs.failed"}
+    _events = {"schedule.alert", "schedule.failed", "vcs.alert", "vcs.failed",
+               "cert.expiry"}
     _statuses = {"sent", "failed", "skipped"}
     if channel is not None and channel not in _channels:
         raise HTTPException(400, f"Unknown channel (one of: "
@@ -1911,6 +1912,149 @@ def resend_notification_endpoint(request: Request, notif_id: int):
         except ResendError as e:
             raise HTTPException(e.status_code, e.message)
         return result
+    finally:
+        db.close()
+
+
+# TLS certificate expiry monitoring (per-org). Domains are probed by the
+# beat worker (~daily); an expiring cert fans out to every alert channel
+# the org configured and is logged as event='cert.expiry'.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/cert-domains")
+@limiter.limit("60/minute")
+async def list_cert_domains(request: Request):
+    """List monitored TLS domains with their last check state (viewer+)."""
+    require_org_scope(request)
+    from cert_monitor import list_domains  # noqa: E402
+    db = get_db()
+    try:
+        return list_domains(db, request.state.org_id)
+    finally:
+        db.close()
+
+
+@app.post("/api/cert-domains")
+@limiter.limit("10/minute")
+async def add_cert_domain(request: Request):
+    """Register a hostname for TLS expiry monitoring (member+).
+
+    The domain is probed immediately so the caller sees its live state.
+    """
+    require_role(request, "member")
+    from cert_monitor import add_domain, check_domain  # noqa: E402
+    body = await request.json()
+    db = get_db()
+    try:
+        try:
+            row = add_domain(db, request.state.org_id,
+                             body.get("hostname", ""),
+                             int(body.get("port", 443)),
+                             int(body.get("warn_days", 14)),
+                             body.get("webhook_url", "") or "")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "cert_domain.added",
+                  detail={"domain_id": row["id"],
+                          "hostname": row["hostname"], "port": row["port"]},
+                  db=db)
+        db.commit()
+        # Immediate first probe (best-effort; never fails the request).
+        state = check_domain(db, row)
+        row = dict(db.execute("SELECT * FROM cert_domains WHERE id=?",
+                              (row["id"],)).fetchone())
+        row["_live"] = state
+        return row
+    finally:
+        db.close()
+
+
+@app.patch("/api/cert-domains/{domain_id}")
+@limiter.limit("30/minute")
+async def update_cert_domain(request: Request, domain_id: int):
+    """Update warn_days / webhook_url / enabled (member+)."""
+    require_role(request, "member")
+    body = await request.json()
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM cert_domains WHERE id=? AND org_id=?",
+                         (domain_id, request.state.org_id)).fetchone()
+        if row is None:
+            raise HTTPException(404, "domain not found")
+        sets, args = [], []
+        if "warn_days" in body:
+            wd = int(body["warn_days"])
+            if not (1 <= wd <= 90):
+                raise HTTPException(400, "warn_days must be 1..90")
+            sets.append("warn_days=?")
+            args.append(wd)
+        if "webhook_url" in body:
+            sets.append("webhook_url=?")
+            args.append(body["webhook_url"] or "")
+        if "enabled" in body:
+            sets.append("enabled=?")
+            args.append(1 if body["enabled"] else 0)
+        if not sets:
+            raise HTTPException(400, "nothing to update")
+        args.append(domain_id)
+        db.execute(f"UPDATE cert_domains SET {', '.join(sets)} WHERE id=?",
+                   args)
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "cert_domain.updated",
+                  detail={"domain_id": domain_id,
+                          "fields": [s.split("=")[0] for s in sets]},
+                  db=db)
+        db.commit()
+        return dict(db.execute("SELECT * FROM cert_domains WHERE id=?",
+                               (domain_id,)).fetchone())
+    finally:
+        db.close()
+
+
+@app.delete("/api/cert-domains/{domain_id}")
+@limiter.limit("30/minute")
+async def delete_cert_domain(request: Request, domain_id: int):
+    """Stop monitoring a domain (member+)."""
+    require_role(request, "member")
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM cert_domains WHERE id=? AND org_id=?",
+                         (domain_id, request.state.org_id)).fetchone()
+        if row is None:
+            raise HTTPException(404, "domain not found")
+        db.execute("DELETE FROM cert_domains WHERE id=?", (domain_id,))
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "cert_domain.removed",
+                  detail={"domain_id": domain_id,
+                          "hostname": row["hostname"]},
+                  db=db)
+        db.commit()
+        return {"deleted": domain_id}
+    finally:
+        db.close()
+
+
+@app.post("/api/cert-domains/{domain_id}/check")
+@limiter.limit("10/minute")
+async def check_cert_domain_now(request: Request, domain_id: int):
+    """Probe a domain right now (member+). Alert fires if due."""
+    require_role(request, "member")
+    from cert_monitor import check_domain  # noqa: E402
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM cert_domains WHERE id=? AND org_id=?",
+                         (domain_id, request.state.org_id)).fetchone()
+        if row is None:
+            raise HTTPException(404, "domain not found")
+        state = check_domain(db, dict(row))
+        row = dict(db.execute("SELECT * FROM cert_domains WHERE id=?",
+                              (domain_id,)).fetchone())
+        row["_live"] = state
+        return row
     finally:
         db.close()
 
