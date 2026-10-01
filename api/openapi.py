@@ -1150,7 +1150,7 @@ _doc("GET", "/api/notifications",
                   "filters: schedule_id, vcs_repo_id, report_schedule_id, "
                   "channel (webhook|email|telegram|slack|teams), event "
                   "(schedule.alert|schedule.failed|vcs.alert|vcs.failed|"
-                  "cert.expiry), "
+                  "cert.expiry|uptime.down|uptime.recovered), "
                   "status (sent|failed|skipped). Unknown filter values -> "
                   "400. limit clamped to 1..200. Viewer+, org scope."),
      auth="key", min_role="viewer", org_scope=True, rate_limit="60/minute",
@@ -1166,7 +1166,7 @@ _doc("GET", "/api/notifications",
                 False, example="telegram"),
          _param("event", "query", "string",
                 "Filter by event: schedule.alert|schedule.failed|vcs.alert|"
-                "vcs.failed|cert.expiry.", False, example="schedule.alert"),
+                "vcs.failed|cert.expiry|uptime.down|uptime.recovered.", False, example="schedule.alert"),
          _param("status", "query", "string",
                 "Filter by status: sent|failed|skipped.", False,
                 example="failed"),
@@ -1325,6 +1325,127 @@ _doc("POST", "/api/cert-domains/{domain_id}/check",
          "401": _err401(),
          "403": _err403(),
          "404": _err404("Domain"),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
+_doc("GET", "/api/uptime-targets",
+     tag="Alerts",
+     summary="List uptime targets",
+     description=("URL targets registered for uptime monitoring, with "
+                  "their last check state (up|down|error|never), HTTP "
+                  "status, latency and consecutive failures. Viewer+, org "
+                  "scope."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="60/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("Array of target rows.",
+                      [{"id": 1, "hostname": "example.com", "port": 443,
+                        "path": "/health", "use_https": 1,
+                        "last_status": "up", "last_http_code": 200,
+                        "last_latency_ms": 87}]),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/uptime-targets",
+     tag="Alerts",
+     summary="Register an uptime target",
+     description=("Register a URL for uptime monitoring. The target is "
+                  "probed immediately so the caller sees its live state "
+                  "(_live: up|down|error). The beat worker re-probes "
+                  "enabled targets at most every check_interval_s; a "
+                  "target counts as down on probe errors, HTTP >= 500, a "
+                  "status mismatch vs expected_status, or a missing "
+                  "keyword. The uptime.down alert fires after 2 consecutive "
+                  "failures (anti-flap) and uptime.recovered on the first "
+                  "success after a down alert; both fan out to every "
+                  "channel the org configured. Non-public resolved IPs are "
+                  "refused (SSRF guard). Member+, org scope."),
+     auth="key", min_role="member", org_scope=True, rate_limit="10/minute",
+     params=[],
+     request_body={
+         "application/json": {
+             "example": {"hostname": "example.com", "port": 443,
+                         "path": "/health", "use_https": True,
+                         "expected_status": 200, "keyword": "ok",
+                         "check_interval_s": 300,
+                         "webhook_url": "https://hooks.example/up"}}},
+     responses={
+         "200": _resp("Created target row with live probe state.",
+                      {"id": 1, "hostname": "example.com",
+                       "_live": {"status": "up", "http_status": 200}}),
+         "400": _err400("Invalid hostname / port / duplicate target"),
+         "401": _err401(),
+         "403": _err403(),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
+_doc("PATCH", "/api/uptime-targets/{target_id}",
+     tag="Alerts",
+     summary="Update an uptime target",
+     description=("Update keyword, expected_status (100..599, null "
+                  "clears), check_interval_s (60..3600), webhook_url or "
+                  "enabled. Member+, org scope."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[
+         _param("target_id", "path", "integer",
+                "Uptime target row id.", True, example=1),
+     ],
+     request_body={
+         "application/json": {
+             "example": {"keyword": "ok", "check_interval_s": 600}}},
+     responses={
+         "200": _resp("Updated target row.", {"id": 1, "keyword": "ok"}),
+         "400": _err400("Nothing to update / invalid value"),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Target"),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
+_doc("DELETE", "/api/uptime-targets/{target_id}",
+     tag="Alerts",
+     summary="Stop monitoring an uptime target",
+     description=("Delete a monitored target. Member+, org scope."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[
+         _param("target_id", "path", "integer",
+                "Uptime target row id.", True, example=1),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Deletion confirmation.", {"deleted": 1}),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Target"),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/uptime-targets/{target_id}/check",
+     tag="Alerts",
+     summary="Probe an uptime target now",
+     description=("Probe the target immediately (member+). The outcome is "
+                  "persisted and down/recovered alerts fire per the rules. "
+                  "Member+, org scope."),
+     auth="key", min_role="member", org_scope=True, rate_limit="10/minute",
+     params=[
+         _param("target_id", "path", "integer",
+                "Uptime target row id.", True, example=1),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Target row with live probe state.",
+                      {"id": 1, "hostname": "example.com",
+                       "_live": {"status": "up", "http_status": 200}}),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Target"),
          "422": _err422(),
          "429": _err429(),
      })
