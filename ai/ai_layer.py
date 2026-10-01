@@ -180,7 +180,8 @@ class LLMClient:
     def configured(self):
         return bool(self.api_url and self.api_key)
 
-    def chat(self, system, user, max_tokens=900, temperature=0.2):
+    def chat(self, system, user, max_tokens=900, temperature=0.2,
+             timeout=None):
         url = f"{self.api_url}/chat/completions"
         payload = json.dumps({
             "model": self.model,
@@ -196,7 +197,7 @@ class LLMClient:
             headers={"Content-Type": "application/json",
                      "Authorization": f"Bearer {self.api_key}"},
         )
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=timeout or 120) as resp:
             data = json.load(resp)
         return data["choices"][0]["message"]["content"]
 
