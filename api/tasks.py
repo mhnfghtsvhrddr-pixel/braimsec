@@ -62,7 +62,8 @@ def _audit_scan_terminal(db, scan_id: str, action: str, detail: dict):
         pass
 from scan_engine import run_gitleaks, run_semgrep, run_sca  # noqa: E402
 from docker_runner import run_scan_isolated, sandbox_mode  # noqa: E402
-from ai_layer import LLMClient, analyze_finding, read_snippet  # noqa: E402
+from ai_layer import analyze_finding, read_snippet  # noqa: E402
+from groq_provider import make_llm_client  # noqa: E402
 from sink_audit import (  # noqa: E402
     analyze_sink,
     audit_candidates,
@@ -393,7 +394,7 @@ def run_ai_review(self, scan_id: str):
 
 def _run_ai_review_impl(task_self, scan_id: str):
     """Task body as a plain function (testable without Celery machinery)."""
-    client = LLMClient()
+    client = make_llm_client()
     db = get_db()
     will_retry = False
     sink_summary = {"status": "skipped", "sites": 0, "candidates": 0,
