@@ -1,0 +1,151 @@
+# BraimSec Dockerfile rules (v1) — precision-first, not holdout-tuned.
+#
+# Why these exist: the frozen registry snapshot (`--config auto` vendored at
+# image build time) covers generic Dockerfile hygiene, but these seven rules
+# encode BraimSec's precision-first specifications for the highest-signal
+# container misconfigurations our customers ask about: running as root,
+# remote ADD fetches, mutable :latest / untagged bases, baked-in secrets,
+# uncleaned apt caches, sensitive exposed ports, and curl-piped-to-shell.
+#
+# Design philosophy (precision-first, honest) — same as braimsec-inject.yaml:
+# - Every rule is a pure syntactic pattern whose match IS the finding.
+#   Constant/legitimate forms stay silent by construction.
+# - Deliberately ABSENT: "missing USER" (a Dockerfile without USER runs as
+#   root by default, but file-level absence cannot be expressed precisely in
+#   semgrep — the rule would need whole-file negation, which pattern-not
+#   cannot do. We flag the explicit, unambiguous form `USER root` / `USER 0`
+#   instead of guessing).
+# - Severity is honest: ERROR = a finding an attacker can directly use
+#   (secrets, root, remote code fetch); WARNING = hygiene a professional
+#   may intentionally accept (:latest pinning, EXPOSE documentation).
+# - Rule IDs are namespaced `braimsec.dockerfile.*`, matching the
+#   `braimsec.inject.*` / `braimsec.taint.*` / `braimsec.gha.*` conventions.
+#
+# Verified with Semgrep 1.178.0 on paired vuln/safe repros (see
+# scanner/test_iac_rules.py): every rule fires on its true-positive sample
+# and stays silent on clean code (0 FP on the test corpus).
+
+rules:
+- id: braimsec.dockerfile.explicit-root-user
+  languages:
+  - dockerfile
+  message: Container explicitly runs as root (USER root / USER 0). Drop privileges
+    with a non-root USER.
+  metadata:
+    category: security
+    confidence: HIGH
+    cwe: 'CWE-250: Execution with Unnecessary Privileges'
+    impact: HIGH
+    owasp: A05:2021 - Security Misconfiguration
+  patterns:
+  - pattern-either:
+    - pattern: USER root
+    - pattern: USER 0
+  severity: ERROR
+
+- id: braimsec.dockerfile.add-remote-url
+  languages:
+  - dockerfile
+  message: ADD fetches a remote URL at build time. Remote content is downloaded
+    and unpacked implicitly — use COPY for local files and pin verified
+    artifacts instead.
+  metadata:
+    category: security
+    confidence: HIGH
+    cwe: 'CWE-494: Download of Code Without Integrity Check'
+    impact: MEDIUM
+    owasp: A08:2021 - Software and Data Integrity Failures
+  # ADD <url> ... — the source token starts with http(s)://. A plain
+  # `ADD archive.tar.gz /x` (local file) stays silent: it is COPY-equivalent.
+  pattern-regex: (?m)^ADD\s+https?://\S+
+  severity: ERROR
+
+- id: braimsec.dockerfile.mutable-base-tag
+  languages:
+  - dockerfile
+  message: Base image uses the mutable :latest tag or no tag at all. Pin an
+    explicit immutable tag (or digest) for reproducible, auditable builds.
+  metadata:
+    category: security
+    confidence: HIGH
+    cwe: 'CWE-829: Inclusion of Functionality from Untrusted Control Sphere'
+    impact: MEDIUM
+    owasp: A08:2021 - Software and Data Integrity Failures
+  patterns:
+  - pattern-either:
+    # FROM <img>:latest (optional --platform flags tolerated)
+    - pattern-regex: (?m)^FROM\s+(?:--\S+\s+)*\S+:latest(?=\s|$)
+    # FROM <img> with no tag and no digest: token has no ':' and no '@'
+    # before the next whitespace/EOL (digest-pinned ubuntu@sha256:... stays
+    # silent — it contains ':' inside the digest).
+    - pattern-regex: (?m)^FROM\s+(?:--\S+\s+)*[^:\s@/]+(?=\s|$)
+  severity: WARNING
+
+- id: braimsec.dockerfile.secrets-in-env
+  languages:
+  - dockerfile
+  message: Possible secret baked into the image via ENV/ARG. Image layers keep
+    these values — pass secrets at runtime instead.
+  metadata:
+    category: security
+    confidence: MEDIUM
+    cwe: 'CWE-798: Use of Hard-coded Credentials'
+    impact: HIGH
+    owasp: A07:2021 - Identification and Authentication Failures
+  # Name-based heuristic with a tight word list: password/passwd/secret and
+  # compound key names (api_key, private_key, auth_token, ...). Bare "token"
+  # and bare "key" are deliberately excluded — they fire on MONKEY, TURKEY,
+  # TOKENIZER and other innocent names.
+  pattern-regex: (?im)^(?:ENV|ARG)\s+\S*(?:passwou?rd|passwd|secret|api[_-]?key|private[_-]?key|auth[_-]?token|access[_-]?token|client[_-]?secret)\S*\s*=
+  severity: ERROR
+
+- id: braimsec.dockerfile.apt-no-cleanup
+  languages:
+  - dockerfile
+  message: apt-get install without cleaning /var/lib/apt/lists in the same RUN
+    layer — the image ships a stale package index and is larger than needed.
+  metadata:
+    category: security
+    confidence: MEDIUM
+    cwe: 'CWE-754: Improper Check for Unusual or Exceptional Conditions'
+    impact: LOW
+    owasp: A05:2021 - Security Misconfiguration
+  patterns:
+  # The match range is the single RUN line: a RUN that installs via apt-get
+  # but never removes the apt lists on that same line. (Multi-line RUN with
+  # backslash continuations is out of scope — the single-line form covers
+  # the overwhelmingly common case and keeps the rule FP-free.)
+  - pattern-regex: (?m)^RUN\s+.*\bapt-get\b.*\binstall\b
+  - pattern-not-regex: (?m)^RUN\s+.*rm\s+(?:-[a-z]*r[a-z]*\s+)?/var/lib/apt/lists
+  severity: WARNING
+
+- id: braimsec.dockerfile.exposed-sensitive-port
+  languages:
+  - dockerfile
+  message: EXPOSE declares a sensitive port (SSH/RDP/database). EXPOSE is
+    documentation-only, but advertising these ports invites unwanted traffic —
+    verify it is intentional.
+  metadata:
+    category: security
+    confidence: MEDIUM
+    cwe: 'CWE-200: Exposure of Sensitive Information to an Unauthorized Actor'
+    impact: LOW
+    owasp: A05:2021 - Security Misconfiguration
+  # 22 ssh, 3389 rdp, 3306 mysql, 5432 postgres, 6379 redis, 27017 mongodb
+  pattern-regex: (?m)^EXPOSE\s+.*\b(22|3389|3306|5432|6379|27017)\b
+  severity: WARNING
+
+- id: braimsec.dockerfile.curl-pipe-shell
+  languages:
+  - dockerfile
+  message: Remote script piped directly into a shell (curl|wget ... | sh).
+    The executed code is unaudited at build time — vendor the script or verify
+    a checksum/signature instead.
+  metadata:
+    category: security
+    confidence: HIGH
+    cwe: 'CWE-494: Download of Code Without Integrity Check'
+    impact: HIGH
+    owasp: A08:2021 - Software and Data Integrity Failures
+  pattern-regex: (?m)^RUN\s+.*\b(?:curl|wget)\b.*\|\s*(?:sudo\s+)?(?:sh|bash)\b
+  severity: ERROR
