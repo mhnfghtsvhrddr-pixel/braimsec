@@ -42,7 +42,7 @@ def test_map_versioned_and_conservative():
         "home.hatch.workspace.rules.braimsec.taint.ssrf-requests", "semgrep")
     assert hit["owasp"]["code"] == "A10:2021"
     assert hit["cwe"]["id"] == "CWE-918"
-    assert hit["map_version"] == "2.0.0"
+    assert hit["map_version"] == "2.1.0"
     assert hit["provenance"] == "deterministic"
     # v2.0.0: SOC 2 + ISO 27001 columns populated for mapped rules
     assert hit["soc2"]["code"] == "CC6.1"
@@ -55,7 +55,32 @@ def test_inject_rule_soc2_iso_mapping():
     assert hit["owasp"]["code"] == "A03:2021"
     assert hit["soc2"]["code"] == "CC6.1"
     assert hit["iso"]["code"] == "A.8.28"
-    assert hit["map_version"] == "2.0.0"
+    assert hit["map_version"] == "2.1.0"
+
+
+def test_iac_rule_soc2_iso_mapping():
+    # v2.1.0: IaC packs mapped with conservative anchors
+    hit = lookup_compliance(
+        "home.hatch.workspace.rules.braimsec.terraform.sg-inline-open-to-world",
+        "semgrep")
+    assert hit["owasp"]["code"] == "A01:2021"
+    assert hit["cwe"]["id"] == "CWE-732"
+    assert hit["soc2"]["code"] == "CC6.1"
+    assert hit["iso"]["code"] == "A.8.20"
+    assert hit["map_version"] == "2.1.0"
+    hit = lookup_compliance(
+        "home.hatch.workspace.rules.braimsec.dockerfile.secrets-in-env",
+        "semgrep")
+    assert hit["cwe"]["id"] == "CWE-798"
+    assert hit["iso"]["code"] == "A.5.17"
+    # conservative: no soc2/iso anchor covers unencrypted storage -> None
+    hit = lookup_compliance(
+        "home.hatch.workspace.rules.braimsec.terraform.rds-no-encryption",
+        "semgrep")
+    assert hit["cwe"]["id"] == "CWE-311"
+    assert hit["owasp"]["code"] == "A02:2021"
+    assert hit["soc2"] is None
+    assert hit["iso"] is None
 
 
 def test_gitleaks_tool_level_mapping():
