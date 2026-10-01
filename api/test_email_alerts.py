@@ -308,7 +308,7 @@ def _new_finding_pair():
 def test_email_sent_on_new_findings(ctx, _smtp, monkeypatch):
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     db = get_db()
     _add_recipient(db, ctx["org"], "a@x.com")
     _add_recipient(db, ctx["org"], "b@x.com")
@@ -366,7 +366,7 @@ def test_no_recipients_no_email_rows(ctx, monkeypatch):
     captured = []
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: captured.append(payload) or (True, 1, 200, None))
+        lambda url, payload, org_id=None: captured.append(payload) or (True, 1, 200, None))
     db = get_db()
     old, new = _new_finding_pair()
     so, sn = "en_old_" + _uid(), "en_new_" + _uid()
@@ -390,7 +390,7 @@ def test_email_skipped_without_smtp(ctx, monkeypatch):
     """Recipients exist but SMTP is off: recorded as skipped, no crash."""
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     db = get_db()
     _add_recipient(db, ctx["org"], "wait@x.com")
     old, new = _new_finding_pair()
@@ -415,7 +415,7 @@ def test_email_skipped_without_smtp(ctx, monkeypatch):
 def test_email_silent_without_new_findings(ctx, _smtp, monkeypatch):
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     db = get_db()
     _add_recipient(db, ctx["org"], "q@x.com")
     same = [{"tool": "semgrep", "rule_id": "r.a", "severity": "warning",
@@ -454,7 +454,7 @@ def test_email_respects_threshold(ctx, _smtp, monkeypatch):
 def test_disabled_recipient_not_emailed(ctx, _smtp, monkeypatch):
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     db = get_db()
     _add_recipient(db, ctx["org"], "off@x.com", enabled=0)
     _add_recipient(db, ctx["org"], "on@x.com", enabled=1)
@@ -473,7 +473,7 @@ def test_disabled_recipient_not_emailed(ctx, _smtp, monkeypatch):
 def test_email_retry_then_success(ctx, _smtp, monkeypatch):
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     FakeSMTP.failures_left = 2  # two failures, third attempt succeeds
     db = get_db()
     _add_recipient(db, ctx["org"], "r@x.com")
@@ -497,7 +497,7 @@ def test_email_retry_then_success(ctx, _smtp, monkeypatch):
 def test_email_records_failure(ctx, _smtp, monkeypatch):
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     FakeSMTP.failures_left = 99  # always fails
     db = get_db()
     _add_recipient(db, ctx["org"], "f@x.com")
@@ -523,7 +523,7 @@ def test_email_records_failure(ctx, _smtp, monkeypatch):
 def test_failed_scan_emails(ctx, _smtp, monkeypatch):
     monkeypatch.setattr(
         scheduler, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     db = get_db()
     _add_recipient(db, ctx["org"], "ops@x.com")
     sb = "sbad_" + _uid()
@@ -555,7 +555,7 @@ def test_failed_scan_emails(ctx, _smtp, monkeypatch):
 def test_vcs_email_alert(ctx, _smtp, monkeypatch):
     monkeypatch.setattr(
         vcs, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     db = get_db()
     _add_recipient(db, ctx["org"], "dev@x.com")
     old, new = _new_finding_pair()
@@ -585,7 +585,7 @@ def test_vcs_email_org_isolation(ctx, _smtp, monkeypatch):
     """Recipients of another org never get this org's alerts."""
     monkeypatch.setattr(
         vcs, "send_alert",
-        lambda url, payload: (True, 1, 200, None))
+        lambda url, payload, org_id=None: (True, 1, 200, None))
     db = get_db()
     _add_recipient(db, ctx["org"], "mine@x.com")  # not the alerting org
     other = create_org("EmailStrangerCo", plan="free")
