@@ -574,7 +574,9 @@ def scan_status(request: Request, scan_id: str):
 
 
 @app.get("/api/scans/{scan_id}/results")
-def scan_results(request: Request, scan_id: str, severity: str | None = None):
+def scan_results(request: Request, scan_id: str, severity: str | None = None,
+                 triage_status: str | None = None,
+                 assigned_to: str | None = None):
     db = get_db()
     pred, params = _scan_scope(request, "")
     exists = db.execute(f"SELECT 1 FROM scans WHERE id=? AND {pred}",
@@ -582,14 +584,26 @@ def scan_results(request: Request, scan_id: str, severity: str | None = None):
     if not exists:
         db.close()
         raise HTTPException(404, "Scan not found")
-    q = ("SELECT id, tool, rule_id, severity, message, file, line, col, "
-         "ai_verdict, ai_confidence, ai_explanation, ai_fix, "
-         "(fix_generated_at IS NOT NULL) AS has_fix "
-         "FROM findings WHERE scan_id=?")
+    q = ("SELECT f.id, f.tool, f.rule_id, f.severity, f.message, f.file,"
+         " f.line, f.col, f.ai_verdict, f.ai_confidence, f.ai_explanation,"
+         " f.ai_fix, (f.fix_generated_at IS NOT NULL) AS has_fix, "
+         "COALESCE(t.status,'open') AS triage_status,"
+         " t.assigned_to AS triage_assignee, t.note AS triage_note "
+         "FROM findings f LEFT JOIN finding_triage t"
+         " ON t.finding_id=f.id WHERE f.scan_id=?")
     params = [scan_id]
     if severity:
-        q += " AND severity=?"
+        q += " AND f.severity=?"
         params.append(severity)
+    if triage_status:
+        if triage_status not in TRIAGE_STATUSES:
+            db.close()
+            raise HTTPException(400, f"triage_status: one of {TRIAGE_STATUSES}")
+        q += " AND COALESCE(t.status,'open')=?"
+        params.append(triage_status)
+    if assigned_to:
+        q += " AND t.assigned_to=?"
+        params.append(assigned_to)
     rows = db.execute(q, params).fetchall()
     db.close()
     return [dict(r) for r in rows]
@@ -1354,6 +1368,250 @@ def taint_flow(request: Request, finding_id: int):
                 "reason": ("Scan sources are no longer available "
                            "(deleted after scan — zero-retention).")}
     return extract_taint_path(finding, target_dir)
+
+
+# ---------------------------------------------------------------------------
+# Team finding triage: status workflow, assignment, change history.
+# ---------------------------------------------------------------------------
+
+TRIAGE_STATUSES = ("open", "in_progress", "false_positive", "fixed",
+                   "accepted_risk")
+
+
+def _triage_finding(db, request: Request, finding_id: int):
+    """Fetch one finding visible to the caller (org/project scope).
+
+    Returns the finding dict (with org_id) or None.
+    """
+    pred, params = _scan_scope(request, "s")
+    row = db.execute(
+        f"""SELECT f.*, s.org_id FROM findings f
+            JOIN scans s ON s.id = f.scan_id
+            WHERE f.id=? AND {pred}""",
+        (finding_id, *params)).fetchone()
+    return dict(row) if row else None
+
+
+def _validate_assignee(db, org_id: str, assigned_to):
+    """assigned_to must be a live API key of the caller's org (or empty)."""
+    if assigned_to in (None, ""):
+        return None
+    row = db.execute(
+        "SELECT id FROM api_keys WHERE id=? AND org_id=? AND revoked=0",
+        (assigned_to, org_id)).fetchone()
+    if not row:
+        raise HTTPException(
+            400, "assigned_to: unknown or revoked key in this org")
+    return assigned_to
+
+
+def _sync_suppression(db, org_id: str, finding: dict, old_status: str,
+                      new_status: str, actor: str):
+    """Keep finding_suppressions in step with the triage status.
+
+    Marking false_positive suppresses the finding's fingerprint
+    (tool|rule_id|file|message — same scheme as the scheduler) so it
+    never re-alerts on later scheduled runs; leaving false_positive
+    lifts the suppression again.
+    """
+    from scheduler import finding_fingerprint  # noqa: E402
+    fp = finding_fingerprint(finding.get("tool") or "",
+                             finding.get("rule_id") or "",
+                             finding.get("file") or "",
+                             finding.get("message") or "")
+    now = datetime.now(timezone.utc).isoformat()
+    if new_status == "false_positive" and old_status != "false_positive":
+        db.execute(
+            "INSERT OR IGNORE INTO finding_suppressions"
+            " (org_id, fingerprint, reason, created_by, created_at)"
+            " VALUES (?,?,?,?,?)",
+            (org_id, fp, (finding.get("message") or "")[:200], actor, now))
+    elif old_status == "false_positive" and new_status != "false_positive":
+        db.execute(
+            "DELETE FROM finding_suppressions WHERE org_id=? AND fingerprint=?",
+            (org_id, fp))
+
+
+def _apply_triage(db, request: Request, finding_id: int, finding: dict,
+                  status, assigned_to, note, actor: str, org_id: str,
+                  validate_assignee: bool):
+    """Upsert triage row + history + suppression sync. Returns the new state."""
+    cur = db.execute("SELECT * FROM finding_triage WHERE finding_id=?",
+                     (finding_id,)).fetchone()
+    cur = dict(cur) if cur else None
+    old_status = (cur or {}).get("status", "open")
+    new_status = status if status is not None else old_status
+    if validate_assignee:
+        new_assignee = _validate_assignee(db, org_id, assigned_to)
+    else:
+        new_assignee = (cur or {}).get("assigned_to")
+    new_note = note if note is not None else (cur or {}).get("note", "")
+    now = datetime.now(timezone.utc).isoformat()
+    if cur:
+        db.execute(
+            "UPDATE finding_triage SET status=?, assigned_to=?, note=?,"
+            " updated_by=?, updated_at=? WHERE finding_id=?",
+            (new_status, new_assignee, new_note, actor, now, finding_id))
+    else:
+        db.execute(
+            "INSERT INTO finding_triage (finding_id, status, assigned_to,"
+            " note, updated_by, updated_at) VALUES (?,?,?,?,?,?)",
+            (finding_id, new_status, new_assignee, new_note, actor, now))
+    db.execute(
+        "INSERT INTO triage_history (finding_id, org_id, changed_by,"
+        " changed_at, from_status, to_status, note)"
+        " VALUES (?,?,?,?,?,?,?)",
+        (finding_id, org_id, actor, now, old_status, new_status,
+         new_note or ""))
+    _sync_suppression(db, org_id, finding, old_status, new_status, actor)
+    return {"finding_id": finding_id, "status": new_status,
+            "assigned_to": new_assignee, "note": new_note,
+            "updated_by": actor, "updated_at": now}
+
+
+@app.get("/api/team")
+@limiter.limit("60/minute")
+def list_team(request: Request):
+    """Org members available for finding assignment (member+).
+
+    Returns key id, name, prefix and role — never hashes. A project-scoped
+    key sees only its own project's keys.
+    """
+    require_role(request, "member")
+    key_pid = getattr(request.state, "project_id", None)
+    db = get_db()
+    try:
+        if key_pid:
+            rows = db.execute(
+                "SELECT id, name, key_prefix, role FROM api_keys"
+                " WHERE org_id=? AND project_id=? AND revoked=0 ORDER BY name",
+                (request.state.org_id, key_pid)).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT id, name, key_prefix, role FROM api_keys"
+                " WHERE org_id=? AND revoked=0 ORDER BY name",
+                (request.state.org_id,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        db.close()
+
+
+@app.get("/api/findings/{finding_id}/triage")
+@limiter.limit("60/minute")
+def get_triage(request: Request, finding_id: int):
+    """Current triage state + change history of one finding (viewer+)."""
+    db = get_db()
+    finding = _triage_finding(db, request, finding_id)
+    if not finding:
+        db.close()
+        raise HTTPException(404, "Finding not found")
+    cur = db.execute("SELECT * FROM finding_triage WHERE finding_id=?",
+                     (finding_id,)).fetchone()
+    hist = db.execute(
+        "SELECT changed_by, changed_at, from_status, to_status, note"
+        " FROM triage_history WHERE finding_id=?"
+        " ORDER BY changed_at DESC, id DESC",
+        (finding_id,)).fetchall()
+    db.close()
+    return {
+        "finding_id": finding_id,
+        "triage": dict(cur) if cur else {"status": "open",
+                                        "assigned_to": None, "note": ""},
+        "history": [dict(h) for h in hist],
+    }
+
+
+@app.patch("/api/findings/{finding_id}/triage")
+@limiter.limit("60/minute")
+async def triage_finding(request: Request, finding_id: int):
+    """Team triage of one finding (member+).
+
+    Body: {"status": "open|in_progress|false_positive|fixed|accepted_risk",
+           "assigned_to": "<api key id>" | null, "note": "..."}.
+    Every change is recorded in triage_history; marking false_positive
+    suppresses the fingerprint from future scheduled-scan alerts, and
+    leaving false_positive lifts the suppression.
+    """
+    require_role(request, "member")
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    body = body or {}
+    status = body.get("status")
+    if status is not None and status not in TRIAGE_STATUSES:
+        raise HTTPException(400, f"status: one of {TRIAGE_STATUSES}")
+    if status is None and "assigned_to" not in body and "note" not in body:
+        raise HTTPException(
+            400, "Nothing to update: provide status, assigned_to or note")
+    db = get_db()
+    finding = _triage_finding(db, request, finding_id)
+    if not finding:
+        db.close()
+        raise HTTPException(404, "Finding not found")
+    org_id = request.state.org_id
+    actor = getattr(request.state, "actor", "")
+    out = _apply_triage(db, request, finding_id, finding, status,
+                        body.get("assigned_to"),
+                        body.get("note") if "note" in body else None,
+                        actor, org_id,
+                        validate_assignee="assigned_to" in body)
+    db.commit()
+    db.close()
+    _audit(request, "finding.triaged", "finding", finding_id,
+           {"from": out["status"], "assigned_to": out["assigned_to"]})
+    return out
+
+
+@app.post("/api/findings/triage-bulk")
+@limiter.limit("30/minute")
+async def triage_bulk(request: Request):
+    """Triage many findings at once (member+).
+
+    Body: {"finding_ids": [1, 2, 3], "status": "...",
+           "assigned_to": "<key id>" | null, "note": "..."}.
+    Findings not visible to the caller are skipped and reported.
+    """
+    require_role(request, "member")
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed JSON
+        body = {}
+    body = body or {}
+    ids = body.get("finding_ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(400, "finding_ids: non-empty list required")
+    if len(ids) > 200:
+        raise HTTPException(400, "finding_ids: max 200 per call")
+    status = body.get("status")
+    if status is not None and status not in TRIAGE_STATUSES:
+        raise HTTPException(400, f"status: one of {TRIAGE_STATUSES}")
+    db = get_db()
+    org_id = request.state.org_id
+    actor = getattr(request.state, "actor", "")
+    assignee = (_validate_assignee(db, org_id, body.get("assigned_to"))
+                if "assigned_to" in body else None)
+    note = body.get("note") if "note" in body else None
+    change_assignee = "assigned_to" in body
+    updated, skipped = [], []
+    for raw in ids:
+        try:
+            fid = int(raw)
+        except (TypeError, ValueError):
+            skipped.append(raw)
+            continue
+        finding = _triage_finding(db, request, fid)
+        if not finding:
+            skipped.append(fid)
+            continue
+        _apply_triage(db, request, fid, finding, status, assignee, note,
+                      actor, org_id, validate_assignee=change_assignee)
+        updated.append(fid)
+    db.commit()
+    db.close()
+    _audit(request, "finding.triaged_bulk", "finding", "",
+           {"updated": len(updated), "skipped": len(skipped)})
+    return {"updated": updated, "skipped": skipped}
 
 
 @app.get("/api/scans/{scan_id}/sarif")
