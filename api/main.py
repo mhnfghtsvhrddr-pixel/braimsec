@@ -2099,13 +2099,16 @@ async def add_uptime_target(request: Request):
         try:
             es = body.get("expected_status")
             es = int(es) if es is not None else None
+            lw = body.get("latency_warn_ms")
+            lw = int(lw) if lw is not None else None
             row = add_target(
                 db, request.state.org_id, body.get("hostname", ""),
                 int(body.get("port", 443)), body.get("path", "/") or "/",
                 bool(body.get("use_https", True)), es,
                 body.get("keyword", "") or "",
                 int(body.get("check_interval_s", 300)),
-                body.get("webhook_url", "") or "")
+                body.get("webhook_url", "") or "",
+                latency_warn_ms=lw)
         except ValueError as e:
             raise HTTPException(400, str(e))
         from audit import log_event  # noqa: E402
@@ -2128,8 +2131,10 @@ async def add_uptime_target(request: Request):
 @app.patch("/api/uptime-targets/{target_id}")
 @limiter.limit("30/minute")
 async def update_uptime_target(request: Request, target_id: int):
-    """Update keyword / expected_status / interval / webhook_url / enabled."""
+    """Update keyword / expected_status / interval / webhook_url / enabled /
+    latency_warn_ms."""
     require_role(request, "member")
+    from uptime_monitor import validate_latency_warn_ms  # noqa: E402
     body = await request.json()
     db = get_db()
     try:
@@ -2150,6 +2155,13 @@ async def update_uptime_target(request: Request, target_id: int):
                 raise HTTPException(400, "expected_status must be 100..599")
             sets.append("expected_status=?")
             args.append(es)
+        if "latency_warn_ms" in body:
+            try:
+                lw = validate_latency_warn_ms(body["latency_warn_ms"])
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            sets.append("latency_warn_ms=?")
+            args.append(lw)
         if "check_interval_s" in body:
             iv = int(body["check_interval_s"])
             if not (60 <= iv <= 3600):
