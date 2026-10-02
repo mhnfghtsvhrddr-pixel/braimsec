@@ -1450,6 +1450,283 @@ _doc("POST", "/api/uptime-targets/{target_id}/check",
          "429": _err429(),
      })
 
+_doc("GET", "/api/status-pages",
+     tag="Alerts",
+     summary="List status pages",
+     description=("This org's public status pages (viewer+, org scope)."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="60/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("Array of status page rows.",
+                      [{"id": 1, "title": "Acme status",
+                        "slug": "acme", "enabled": 1}]),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/status-pages",
+     tag="Alerts",
+     summary="Publish a status page",
+     description=("Publish a public status page served at /status/<slug> "
+                  "(member+). Slugs are 3..60 chars, lowercase letters, "
+                  "digits and hyphens, globally unique. The page shows the "
+                  "org's uptime targets with 90-day bars, active incidents "
+                  "and recent history."),
+     auth="key", min_role="member", org_scope=True, rate_limit="10/minute",
+     params=[],
+     request_body={
+         "application/json": {
+             "example": {"title": "Acme status", "slug": "acme",
+                         "headline": "All systems operational",
+                         "enabled": True}}},
+     responses={
+         "200": _resp("Created status page row.",
+                      {"id": 1, "slug": "acme", "enabled": 1}),
+         "400": _err400("Invalid slug / duplicate slug / missing title"),
+         "401": _err401(),
+         "403": _err403(),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
+_doc("PATCH", "/api/status-pages/{page_id}",
+     tag="Alerts",
+     summary="Update a status page",
+     description=("Update title, slug, headline or enabled (member+, org "
+                  "scope)."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[
+         _param("page_id", "path", "integer",
+                "Status page row id.", True, example=1),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Updated status page row.",
+                      {"id": 1, "slug": "acme", "enabled": 1}),
+         "400": _err400("Invalid slug / duplicate slug"),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Page"),
+         "429": _err429(),
+     })
+
+_doc("DELETE", "/api/status-pages/{page_id}",
+     tag="Alerts",
+     summary="Delete a status page",
+     description=("Delete a status page (member+, org scope)."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[
+         _param("page_id", "path", "integer",
+                "Status page row id.", True, example=1),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Deletion confirmation.", {"deleted": 1}),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Page"),
+         "429": _err429(),
+     })
+
+_doc("GET", "/api/incidents",
+     tag="Alerts",
+     summary="List incidents",
+     description=("Incident log, newest first (viewer+, org scope). "
+                  "Filter with ?status=open|investigating|identified|"
+                  "monitoring|resolved and ?target_id=N."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="60/minute",
+     params=[
+         _param("status", "query", "string",
+                "Status filter (or 'open').", False, example="open"),
+         _param("target_id", "query", "integer",
+                "Uptime target row id.", False, example=1),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Array of incident rows.",
+                      [{"id": 1, "title": " outage",
+                        "status": "investigating", "impact": "critical"}]),
+         "400": _err400("Bad status filter"),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/incidents",
+     tag="Alerts",
+     summary="Open an incident",
+     description=("Open an incident manually (member+). uptime.down "
+                  "alerts also open incidents automatically, one per "
+                  "target; uptime.recovered auto-resolves them."),
+     auth="key", min_role="member", org_scope=True, rate_limit="10/minute",
+     params=[],
+     request_body={
+         "application/json": {
+             "example": {"title": "DB failover", "status": "identified",
+                         "impact": "major", "target_id": 1,
+                         "public_visible": True,
+                         "message": "Primary DB unreachable"}}},
+     responses={
+         "200": _resp("Created incident with its timeline.",
+                      {"id": 1, "status": "identified", "updates": []}),
+         "400": _err400("Invalid title / status / impact / target"),
+         "401": _err401(),
+         "403": _err403(),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
+_doc("GET", "/api/incidents/{incident_id}",
+     tag="Alerts",
+     summary="Get an incident",
+     description=("One incident with its update timeline (viewer+, org "
+                  "scope)."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="60/minute",
+     params=[
+         _param("incident_id", "path", "integer",
+                "Incident row id.", True, example=1),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Incident row with updates.",
+                      {"id": 1, "status": "investigating",
+                       "updates": [{"status": "investigating",
+                                    "message": "..."}]}),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Incident"),
+         "429": _err429(),
+     })
+
+_doc("PATCH", "/api/incidents/{incident_id}",
+     tag="Alerts",
+     summary="Update an incident",
+     description=("Update title, impact, public_visible or status "
+                  "(member+, org scope). Setting status=resolved stamps "
+                  "resolved_at; reopening clears it."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[
+         _param("incident_id", "path", "integer",
+                "Incident row id.", True, example=1),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Updated incident with timeline.",
+                      {"id": 1, "status": "monitoring"}),
+         "400": _err400("Invalid status / impact"),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Incident"),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/incidents/{incident_id}/updates",
+     tag="Alerts",
+     summary="Add an incident update",
+     description=("Append a timeline update, optionally changing the "
+                  "incident status (member+, org scope)."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[
+         _param("incident_id", "path", "integer",
+                "Incident row id.", True, example=1),
+     ],
+     request_body={
+         "application/json": {
+             "example": {"message": "Failover complete, watching metrics",
+                         "status": "monitoring"}}},
+     responses={
+         "200": _resp("Incident with updated timeline.",
+                      {"id": 1, "updates": []}),
+         "400": _err400("message or status is required"),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Incident"),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/incidents/{incident_id}/resolve",
+     tag="Alerts",
+     summary="Resolve an incident",
+     description=("Resolve an incident with an optional closing message "
+                  "(member+, org scope). Idempotent."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[
+         _param("incident_id", "path", "integer",
+                "Incident row id.", True, example=1),
+     ],
+     request_body={
+         "application/json": {
+             "example": {"message": "All green for 30 minutes"}}},
+     responses={
+         "200": _resp("Resolved incident.", {"id": 1,
+                                             "status": "resolved"}),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Incident"),
+         "429": _err429(),
+     })
+
+_doc("DELETE", "/api/incidents/{incident_id}",
+     tag="Alerts",
+     summary="Delete an incident",
+     description=("Delete an incident and its timeline (member+, org "
+                  "scope)."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[
+         _param("incident_id", "path", "integer",
+                "Incident row id.", True, example=1),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Deletion confirmation.", {"deleted": 1}),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Incident"),
+         "429": _err429(),
+     })
+
+_doc("GET", "/api/status/{slug}",
+     tag="Alerts",
+     summary="Public status page (JSON)",
+     description=("Read-only public summary of an enabled status page: "
+                  "overall state (operational|degraded|outage), targets "
+                  "with 90-day uptime bars, active and recent public "
+                  "incidents with timelines. No authentication. 404 for "
+                  "unknown or disabled pages."),
+     auth="public", min_role=None, org_scope=False, rate_limit="30/minute",
+     params=[
+         _param("slug", "path", "string",
+                "Public page slug.", True, example="acme"),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Public status summary.",
+                      {"title": "Acme status", "overall": "operational",
+                       "targets": [], "incidents": []}),
+         "404": _err404("Status page"),
+         "429": _err429(),
+     })
+
+_doc("GET", "/status/{slug}",
+     tag="Alerts",
+     summary="Public status page (HTML)",
+     description=("Human-readable public status page (Arabic RTL): the "
+                  "same data as /api/status/{slug} rendered as HTML. No "
+                  "authentication. 404 for unknown or disabled pages."),
+     auth="public", min_role=None, org_scope=False, rate_limit="600/minute",
+     params=[
+         _param("slug", "path", "string",
+                "Public page slug.", True, example="acme"),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("HTML status page.", "<html>..."),
+         "404": _err404("Status page"),
+         "429": _err429(),
+     })
+
 _doc("GET", "/api/alert-emails",
      tag="Alerts",
      summary="List email recipients",
