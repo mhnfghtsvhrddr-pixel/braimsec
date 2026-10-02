@@ -303,6 +303,9 @@ CREATE TABLE IF NOT EXISTS uptime_targets (
     check_interval_s INTEGER NOT NULL DEFAULT 300,
     webhook_url TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
+    latency_warn_ms INTEGER,
+    last_slow_alerted_at TEXT,
+    last_slow_alert_event TEXT,
     last_checked_at TEXT,
     last_status TEXT NOT NULL DEFAULT 'never',
     last_http_code INTEGER,
@@ -503,8 +506,15 @@ def init_db():
     # braimsec_taint_rules}. NULL on scans that predate this logging.
     if "engines_json" not in scan_cols:
         conn.execute("ALTER TABLE scans ADD COLUMN engines_json TEXT")
-    # Lightweight migration: RBAC roles on API keys (enterprise).
-    # viewer < member < admin < owner. Existing keys keep full historical
+    # Lightweight migration: latency-degradation alerts on uptime targets.
+    uptime_cols = {r["name"]
+                   for r in conn.execute("PRAGMA table_info(uptime_targets)")}
+    for col, ctype in (("latency_warn_ms", "INTEGER"),
+                       ("last_slow_alerted_at", "TEXT"),
+                       ("last_slow_alert_event", "TEXT")):
+        if col not in uptime_cols:
+            conn.execute(f"ALTER TABLE uptime_targets ADD COLUMN {col} {ctype}")
+    # Lightweight migration: RBAC roles on API keys (enterprise).    # viewer < member < admin < owner. Existing keys keep full historical
     # behavior as 'member' (scan + AI, no key management — which had no
     # HTTP surface before this migration anyway).
     key_cols = {r["name"] for r in conn.execute("PRAGMA table_info(api_keys)")}
