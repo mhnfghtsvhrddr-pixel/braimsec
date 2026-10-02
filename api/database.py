@@ -316,6 +316,61 @@ CREATE TABLE IF NOT EXISTS uptime_targets (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_uptime_targets_org_host
     ON uptime_targets(org_id, hostname, port, path);
 CREATE INDEX IF NOT EXISTS idx_uptime_targets_org ON uptime_targets(org_id);
+-- Public status pages: one org may publish several pages (per product),
+-- each under a globally unique slug. Public endpoints expose only enabled
+-- pages and their org's targets / public incidents.
+CREATE TABLE IF NOT EXISTS status_pages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    title TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    headline TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_status_pages_org ON status_pages(org_id);
+-- Incident log. Incidents are opened automatically by uptime.down alerts
+-- (one open incident per target) and resolved automatically by
+-- uptime.recovered; orgs can also manage them manually.
+CREATE TABLE IF NOT EXISTS incidents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'investigating',
+    impact TEXT NOT NULL DEFAULT 'minor',
+    target_id INTEGER,
+    public_visible INTEGER NOT NULL DEFAULT 1,
+    started_at TEXT NOT NULL,
+    resolved_at TEXT,
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incidents_org ON incidents(org_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_incidents_target_open
+    ON incidents(target_id, status);
+CREATE TABLE IF NOT EXISTS incident_updates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id INTEGER NOT NULL REFERENCES incidents(id),
+    status TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incident_updates_inc
+    ON incident_updates(incident_id, created_at);
+-- Daily uptime aggregates: one row per target per UTC day, feeding the
+-- 90-day uptime bars on status pages. Pruned after 120 days.
+CREATE TABLE IF NOT EXISTS uptime_daily (
+    target_id INTEGER NOT NULL REFERENCES uptime_targets(id),
+    day TEXT NOT NULL,
+    checks_up INTEGER NOT NULL DEFAULT 0,
+    checks_down INTEGER NOT NULL DEFAULT 0,
+    checks_error INTEGER NOT NULL DEFAULT 0,
+    latency_sum_ms INTEGER NOT NULL DEFAULT 0,
+    latency_n INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (target_id, day)
+);
 -- Per-org HMAC signing secrets for outgoing alert webhooks. The secret is
 -- generated server-side, Fernet-encrypted at rest, and shown to the org
 -- owner exactly once at rotation time (never returned by the API again).
