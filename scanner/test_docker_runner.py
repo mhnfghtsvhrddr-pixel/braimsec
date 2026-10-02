@@ -246,3 +246,108 @@ def test_run_isolated_names_container_and_logs(tmp_path, monkeypatch, caplog):
     assert re.fullmatch(r"braimsec-scan-[0-9a-f]{12}", seen["cmd"][i + 1])
     assert any("sandbox scan ok" in r.message and "braimsec-scan-" in r.message
                for r in caplog.records)
+
+
+# --- runner-service client (BRAIMSEC_RUNNER_URL) -----------------------------
+
+import io  # noqa: E402
+import urllib.error  # noqa: E402
+
+
+class _FakeHTTPResponse:
+    def __init__(self, payload):
+        self._buf = io.BytesIO(json.dumps(payload).encode())
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, *a):
+        return self._buf.read(*a)
+
+
+def _runner_env(monkeypatch, key="k"):
+    monkeypatch.setattr(docker_runner, "RUNNER_URL", "http://runner:8001")
+    monkeypatch.setattr(docker_runner, "RUNNER_API_KEY", key)
+
+
+def test_run_via_runner_translates_paths(tmp_path, monkeypatch):
+    _runner_env(monkeypatch)
+    payload = {"container": "braimsec-scan-abc",
+               "image": "img",
+               "findings": [{"tool": "semgrep", "rule_id": "r",
+                             "file": "/target/a.py"}]}
+    monkeypatch.setattr(docker_runner.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeHTTPResponse(payload))
+    target = tmp_path / "t"
+    target.mkdir()
+    findings = docker_runner._run_via_runner(str(target))
+    assert findings[0]["file"] == os.path.join(str(target), "a.py")
+
+
+def test_run_via_runner_sends_bearer_auth(tmp_path, monkeypatch):
+    _runner_env(monkeypatch, key="secret-key")
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["auth"] = req.get_header("Authorization")
+        return _FakeHTTPResponse({"findings": []})
+
+    monkeypatch.setattr(docker_runner.urllib.request, "urlopen", fake_urlopen)
+    target = tmp_path / "t"
+    target.mkdir()
+    docker_runner._run_via_runner(str(target))
+    assert seen["auth"] == "Bearer secret-key"
+
+
+def test_run_via_runner_rejects_without_api_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(docker_runner, "RUNNER_URL", "http://runner:8001")
+    monkeypatch.setattr(docker_runner, "RUNNER_API_KEY", "")
+    with pytest.raises(ContainerError, match="RUNNER_API_KEY"):
+        docker_runner._run_via_runner(str(tmp_path))
+
+
+def test_run_via_runner_http_error_fail_closed(tmp_path, monkeypatch):
+    _runner_env(monkeypatch)
+
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 401, "x", {}, io.BytesIO(b"{}"))
+
+    monkeypatch.setattr(docker_runner.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(ContainerError, match="HTTP 401"):
+        docker_runner._run_via_runner(str(tmp_path))
+
+
+def test_run_via_runner_unreachable_fail_closed(tmp_path, monkeypatch):
+    _runner_env(monkeypatch)
+
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.URLError("conn refused")
+
+    monkeypatch.setattr(docker_runner.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(ContainerError, match="runner unreachable"):
+        docker_runner._run_via_runner(str(tmp_path))
+
+
+def test_run_scan_isolated_prefers_runner(tmp_path, monkeypatch):
+    _runner_env(monkeypatch)
+    called = {}
+
+    def fake_via_runner(t, scope=None):
+        called["target"] = t
+        return [{"file": os.path.join(os.path.abspath(t), "a.py"),
+                 "tool": "t", "rule_id": "r"}]
+
+    monkeypatch.setattr(docker_runner, "_run_via_runner", fake_via_runner)
+    # The docker CLI must NOT be touched when the runner URL is set.
+    def no_docker(*a, **k):
+        raise AssertionError("docker CLI must not be used")
+    monkeypatch.setattr(docker_runner.subprocess, "run", no_docker)
+    monkeypatch.setattr(docker_runner, "_docker_available", lambda: True)
+    target = tmp_path / "t"
+    target.mkdir()
+    findings = run_scan_isolated(str(target))
+    assert called["target"] == str(target)
+    assert findings[0]["file"] == os.path.join(str(target), "a.py")
