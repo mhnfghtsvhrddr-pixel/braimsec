@@ -56,8 +56,6 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.prod
     restart: unless-stopped
-    depends_on:
-      - redis
     env_file:
       - .env
     working_dir: /app/api
@@ -69,15 +67,36 @@ services:
       BRAIMSEC_SCAN_SANDBOX: ${BRAIMSEC_SCAN_SANDBOX:-docker}
       BRAIMSEC_SCAN_RUNNER_IMAGE: ${BRAIMSEC_SCAN_RUNNER_IMAGE:-braimsec/scan-runner:1.0}
       BRAIMSEC_DOCKER_BIN: /usr/local/bin/docker
+      # The worker drives throwaway sandbox containers through the filtered
+      # socket proxy (never the raw host socket): only container/image
+      # endpoints are exposed, exec/build/swarm/secrets stay denied.
+      DOCKER_HOST: tcp://socket-proxy:2375
+    depends_on:
+      - redis
+      - socket-proxy
     volumes:
       - ${HOST_DATA_DIR:-/data/braimsec}:${HOST_DATA_DIR:-/data/braimsec}
-      # SECURITY: the worker talks to the host Docker daemon to spawn the
-      # sandbox. A compromised worker with this socket is host-root
-      # equivalent. Accepted for phase 1 (the worker already runs the
-      # engines); revisit with a socket proxy or a dedicated runner
-      # service before multi-tenant production.
-      - /var/run/docker.sock:/var/run/docker.sock
     command: ["celery", "-A", "tasks", "worker", "--loglevel=info", "--concurrency=2"]
+
+  # Filtered Docker API proxy: the ONLY holder of the host socket.
+  # The worker can create/start/stop/remove containers and read images
+  # (everything `docker run --rm` + logs needs); exec, build, swarm,
+  # secrets, volumes, networks and the rest are denied at the proxy.
+  # Residual risk: container CREATE with arbitrary bind mounts is still
+  # possible through the allowed endpoints, so a compromised worker is
+  # not fully contained — the complete fix is a dedicated runner
+  # service with a narrow scan-only API (planned before multi-tenant).
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      # Everything else defaults to 0 (denied): AUTH, BUILD, COMMIT,
+      # CONFIGS, DISTRIBUTION, EXEC, INFO, NETWORKS, NODES, PLUGINS,
+      # SECRETS, SERVICES, SESSION, SWARM, SYSTEM, TASKS, VOLUMES.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
   beat:
     build:
