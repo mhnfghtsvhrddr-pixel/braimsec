@@ -36,6 +36,10 @@ Flow:
                                           entitlements (a transaction has no
                                           period to grant)
        anything else                   -> ignored (200, no retry storm)
+     The tier/cycle ALWAYS comes from the Paddle-reported price_id via
+     PADDLE_PRICE_MAP (what was actually paid). custom_data only
+     attributes the org; a browser claim disagreeing with the paid price
+     is rejected as tampering.
   6. run_expiry() never auto-expires an active card subscription: card
      subs stay webhook-driven, so a missed renewal webhook must not cut
      off a paying customer (see billing.run_expiry).
@@ -298,20 +302,27 @@ def evaluate_event(event):
     if not isinstance(custom, dict):
         custom = {}
     org_id = custom.get("org_id")
-    tier, cycle = custom.get("tier"), custom.get("cycle")
-    if (tier, cycle) not in PLAN_FOR_TIER_CYCLE:
-        # Fall back to the price id on the first item.
+    # The price_id Paddle reports is authoritative: it reflects what was
+    # actually paid. custom_data is stamped by the customer's browser via
+    # the checkout page, so it may only *attribute* the org — it must
+    # never decide the tier on its own (else a buyer could pay for
+    # starter while claiming pro).
+    price_id = None
+    try:
+        price_id = (data.get("items") or [])[0]["price"]["id"]
+    except (IndexError, KeyError, TypeError):
         price_id = None
-        try:
-            price_id = (data.get("items") or [])[0]["price"]["id"]
-        except (IndexError, KeyError, TypeError):
-            price_id = None
-        tc = price_map().get(str(price_id)) if price_id else None
-        if not tc:
-            return ("reject",
-                    "cannot map subscription to a tier/cycle "
-                    f"(custom_data={tier}/{cycle}, price={price_id})")
-        tier, cycle = tc
+    paid_tc = price_map().get(str(price_id)) if price_id else None
+    if not paid_tc:
+        return ("reject",
+                f"unmapped or missing Paddle price_id: {price_id}")
+    tier, cycle = paid_tc
+    claimed = (custom.get("tier"), custom.get("cycle"))
+    if claimed != (None, None) and claimed != paid_tc:
+        return ("reject",
+                f"custom_data claim {claimed[0]}/{claimed[1]} disagrees "
+                f"with paid price {price_id} "
+                f"({paid_tc[0]}/{paid_tc[1]})")
     plan_id = PLAN_FOR_TIER_CYCLE[(tier, cycle)]
     if not _org_exists(org_id):
         return ("reject", f"unknown org: {org_id}")
