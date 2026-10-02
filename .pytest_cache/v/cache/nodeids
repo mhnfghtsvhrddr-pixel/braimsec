@@ -423,6 +423,7 @@
   "api/test_status_page.py::test_incident_lifecycle",
   "api/test_status_page.py::test_page_crud_rbac_and_isolation",
   "api/test_status_page.py::test_prune_daily",
+  "api/test_status_page.py::test_public_summary_certificates",
   "api/test_status_page.py::test_public_summary_degraded_and_private_incidents",
   "api/test_status_page.py::test_slug_validation",
   "api/test_taint_flow.py::test_happy_path_linear_trace",
