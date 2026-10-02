@@ -77,6 +77,8 @@ ACTIONS = frozenset({
     "uptime_target.removed",
     "uptime_target.down",
     "uptime_target.recovered",
+    "uptime_target.slow",
+    "uptime_target.fast",
     "status_page.created",
     "status_page.updated",
     "status_page.deleted",
