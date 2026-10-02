@@ -474,7 +474,9 @@ def public_summary(db, slug: str) -> dict | None:
         overall = "outage"
     elif any(i["status"] in OPEN_STATUSES for i in incidents):
         overall = "degraded"
+    import maintenance as _mnt  # noqa: E402
     return {"title": page["title"], "headline": page["headline"],
             "slug": page["slug"], "overall": overall,
             "targets": targets, "incidents": incidents,
+            "maintenance": _mnt.public_windows(db, org_id),
             "generated_at": _now_iso()}
