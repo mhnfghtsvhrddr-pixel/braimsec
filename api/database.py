@@ -546,6 +546,13 @@ def init_db():
         conn.execute("ALTER TABLE scans ADD COLUMN vcs_repo_id TEXT")
     if "commit_sha" not in scan_cols:
         conn.execute("ALTER TABLE scans ADD COLUMN commit_sha TEXT")
+    # Lightweight migration: scan attempt counting (retry-policy
+    # visibility). Incremented each time a scan attempt starts; a scan
+    # that failed on a deterministic error shows attempt_count=1.
+    if "attempt_count" not in scan_cols:
+        conn.execute(
+            "ALTER TABLE scans ADD COLUMN attempt_count INTEGER "
+            "NOT NULL DEFAULT 0")
     # Migration: notifications gains vcs_repo_id and a nullable schedule_id
     # (VCS alerts have no schedule). SQLite cannot ALTER a column's NOT NULL,
     # so the table is rebuilt when the new column is absent.
