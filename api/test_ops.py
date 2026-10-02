@@ -106,8 +106,10 @@ def test_scan_tasks_carry_soft_time_limits():
     assert getattr(tasks.run_scan, "time_limit", None) is None
 
 
-def test_soft_timeout_fails_scan_without_retry(monkeypatch, tmp_path):
-    """A scan that exceeds its time budget is failed outright, not retried."""
+def test_soft_timeout_retries_scan(monkeypatch, tmp_path):
+    """A scan that exceeds its time budget is transient: host pressure
+    varies between attempts, so the retry policy applies (2026-10-02:
+    timeouts moved from fail-fast to retried)."""
     def _boom(_target_dir):
         raise SoftTimeLimitExceeded()
 
@@ -118,8 +120,24 @@ def test_soft_timeout_fails_scan_without_retry(monkeypatch, tmp_path):
     (target / "a.py").write_text("x = 1\n")
 
     fake = FakeSelf(max_retries=2)
-    # Must NOT raise FakeSelf.RetryRaised: a timed-out scan would time out
-    # again, so retrying just burns two more full time windows.
+    with pytest.raises(FakeSelf.RetryRaised):
+        tasks._run_scan_impl(fake, scan_id, str(target), None)
+    assert fake.retry_called is True
+
+
+def test_soft_timeout_fails_when_retries_exhausted(monkeypatch, tmp_path):
+    """A timed-out scan with no retries left fails with the time-limit error."""
+    def _boom(_target_dir):
+        raise SoftTimeLimitExceeded()
+
+    monkeypatch.setattr(tasks, "run_semgrep", _boom)
+    scan_id = _mk_scan()
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "a.py").write_text("x = 1\n")
+
+    fake = FakeSelf(max_retries=0)
+    # Must NOT raise RetryRaised: no retries remain.
     tasks._run_scan_impl(fake, scan_id, str(target), None)
     assert fake.retry_called is False
 
