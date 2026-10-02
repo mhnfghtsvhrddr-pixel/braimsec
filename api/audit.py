@@ -92,6 +92,8 @@ ACTIONS = frozenset({
     "maintenance.deleted",
     "maintenance.cancelled",
     "maintenance.alert_suppressed",
+    "uptime_digest.configured",
+    "uptime_digest.sent",
 })
 
 # Archival never touches recent history: the window must be at least
