@@ -66,7 +66,8 @@ def _build_content(db, row: dict, channel: str):
     from telegram_alerts import (build_telegram_message,  # noqa: E402
                                  send_telegram)
 
-    if row["event"] in ("cert.expiry", "uptime.down", "uptime.recovered"):
+    if row["event"] in ("cert.expiry", "uptime.down", "uptime.recovered",
+                        "uptime.slow", "uptime.fast"):
         # Monitor alerts carry everything in the stored payload; rebuild
         # the exact human text from it instead of the findings machinery.
         import cert_monitor  # noqa: E402,F401 - registers text builders
