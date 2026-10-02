@@ -2501,8 +2501,146 @@ async def delete_incident_api(request: Request, incident_id: int):
         db.close()
 
 
-# Public (unauthenticated, read-only) status page ---------------------------
+# ---------------------------------------------------------------------------
+# Scheduled maintenance windows
+# ---------------------------------------------------------------------------
 
+@app.get("/api/maintenance")
+@limiter.limit("60/minute")
+async def list_maintenance(request: Request, include_past: str = ""):
+    """List maintenance windows, active/upcoming first (viewer+)."""
+    require_org_scope(request)
+    from maintenance import list_windows  # noqa: E402
+    db = get_db()
+    try:
+        return list_windows(db, request.state.org_id,
+                            include_past=bool(include_past))
+    finally:
+        db.close()
+
+
+@app.post("/api/maintenance")
+@limiter.limit("10/minute")
+async def create_maintenance(request: Request):
+    """Schedule a maintenance window (member+)."""
+    require_role(request, "member")
+    from maintenance import create_window  # noqa: E402
+    body = await request.json()
+    db = get_db()
+    try:
+        try:
+            row = create_window(
+                db, request.state.org_id, body.get("title", ""),
+                body.get("starts_at", ""), body.get("ends_at", ""),
+                body.get("description", "") or "",
+                body.get("target_ids"),
+                created_by=request.state.actor)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "maintenance.created",
+                  detail={"window_id": row["id"],
+                          "title": row["title"]}, db=db)
+        db.commit()
+        return row
+    finally:
+        db.close()
+
+
+@app.get("/api/maintenance/{window_id}")
+@limiter.limit("60/minute")
+async def get_maintenance(request: Request, window_id: int):
+    """Get one maintenance window (viewer+)."""
+    require_org_scope(request)
+    from maintenance import get_window  # noqa: E402
+    db = get_db()
+    try:
+        w = get_window(db, window_id, request.state.org_id)
+        if w is None:
+            raise HTTPException(404, "window not found")
+        return w
+    finally:
+        db.close()
+
+
+@app.patch("/api/maintenance/{window_id}")
+@limiter.limit("30/minute")
+async def update_maintenance(request: Request, window_id: int):
+    """Edit a scheduled (not yet started) window (member+)."""
+    require_role(request, "member")
+    from maintenance import update_window  # noqa: E402
+    body = await request.json()
+    db = get_db()
+    try:
+        fields = {k: body[k] for k in
+                  ("title", "description", "starts_at", "ends_at",
+                   "target_ids") if k in body}
+        try:
+            row = update_window(db, window_id, request.state.org_id,
+                                **fields)
+        except KeyError:
+            raise HTTPException(404, "window not found")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "maintenance.updated",
+                  detail={"window_id": window_id,
+                          "fields": sorted(fields)}, db=db)
+        db.commit()
+        return row
+    finally:
+        db.close()
+
+
+@app.post("/api/maintenance/{window_id}/cancel")
+@limiter.limit("30/minute")
+async def cancel_maintenance(request: Request, window_id: int):
+    """Cancel a scheduled/active window (member+)."""
+    require_role(request, "member")
+    from maintenance import cancel_window  # noqa: E402
+    db = get_db()
+    try:
+        try:
+            row = cancel_window(db, window_id, request.state.org_id)
+        except KeyError:
+            raise HTTPException(404, "window not found")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "maintenance.cancelled",
+                  detail={"window_id": window_id}, db=db)
+        db.commit()
+        return row
+    finally:
+        db.close()
+
+
+@app.delete("/api/maintenance/{window_id}")
+@limiter.limit("30/minute")
+async def delete_maintenance(request: Request, window_id: int):
+    """Delete a maintenance window (member+)."""
+    require_role(request, "member")
+    from maintenance import delete_window  # noqa: E402
+    db = get_db()
+    try:
+        try:
+            delete_window(db, window_id, request.state.org_id)
+        except KeyError:
+            raise HTTPException(404, "window not found")
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "maintenance.deleted",
+                  detail={"window_id": window_id}, db=db)
+        db.commit()
+        return {"deleted": window_id}
+    finally:
+        db.close()
+
+
+# Public (unauthenticated, read-only) status page ---------------------------
 @app.get("/api/status/{slug}")
 @limiter.limit("30/minute")
 async def public_status_json(request: Request, slug: str):
@@ -2557,6 +2695,21 @@ a{{color:#7dd3fc}}</style></head><body><main>
 <p class="mut">{esc(data['headline'] or '')}</p>
 <div class="card"><div class="banner"><span>{overall[0]}</span>
 <span style="color:{overall[2]}">{overall[1]}</span></div></div>"""]
+    maint = data.get("maintenance") or []
+    if maint:
+        parts.append('<div class="card"><h3>🛠️ صيانة مجدولة</h3>')
+        for m in maint:
+            badge = ("🟡 جارية الآن" if m["status"] == "active"
+                     else "📅 قادمة")
+            parts.append(
+                f'<div class="inc"><b>{esc(m["title"])}</b> '
+                f'<span class="mut">{badge} · من '
+                f'{esc(m["starts_at"][:16].replace("T", " "))} إلى '
+                f'{esc(m["ends_at"][:16].replace("T", " "))}</span>')
+            if m["description"]:
+                parts.append(f'<div class="tl">{esc(m["description"])}</div>')
+            parts.append("</div>")
+        parts.append("</div>")
     for t in data["targets"]:
         st = {"up": "🟢 يعمل", "down": "🔴 متوقف", "error": "⚠️ خطأ فحص",
               "never": "⏳ لم يُفحص بعد"}.get(t["last_status"], t["last_status"])
