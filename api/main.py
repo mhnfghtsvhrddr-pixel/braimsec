@@ -2743,6 +2743,27 @@ a{{color:#7dd3fc}}</style></head><body><main>
 <div class="bars">{''.join(bars)}</div></div>""")
     active = [i for i in data["incidents"] if i["status"] != "resolved"]
     past = [i for i in data["incidents"] if i["status"] == "resolved"]
+    certs = data.get("certificates") or []
+    if certs:
+        parts.append('<div class="card"><h3>🔒 شهادات TLS</h3>')
+        for c in certs:
+            st = c["last_status"]
+            dl = c["last_days_left"]
+            if st == "ok":
+                badge = f"🟢 سارية ({dl} يوم متبقٍ)"
+            elif st == "expiring" and dl is not None and dl <= 0:
+                badge = "🔴 منتهية"
+            elif st == "expiring":
+                badge = f"🟡 تنتهي خلال {dl} يوم"
+            elif st == "error":
+                badge = "⚠️ تعذّر الفحص"
+            else:
+                badge = "⏳ لم تُفحص بعد"
+            exp = (f' · تنتهي {esc(c["last_expires_at"][:10])}'
+                   if c.get("last_expires_at") else "")
+            parts.append(f'<div class="tl">🔒 <b dir="ltr">{esc(c["hostname"])}'
+                         f'</b> — {badge}{exp}</div>')
+        parts.append("</div>")
     if active:
         parts.append('<div class="card"><h3>🚨 حوادث جارية</h3>')
         for i in active:
