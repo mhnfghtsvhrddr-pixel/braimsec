@@ -256,6 +256,8 @@ def evaluate_ipn(payload):
 def fulfill_ipn(payload):
     """Activate the subscription for a vetted IPN. Idempotent on payment_id."""
     from billing import set_subscription_plan  # lazy: avoids import cycles
+    if not isinstance(payload, dict):
+        return ("reject", "payload is not an object")
     payment_id = str(payload.get("payment_id"))
     if already_fulfilled(payment_id):
         return ("duplicate", payment_id)
