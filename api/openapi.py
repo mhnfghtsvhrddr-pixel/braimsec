@@ -1821,6 +1821,86 @@ _doc("DELETE", "/api/maintenance/{window_id}",
          "429": _err429(),
      })
 
+_doc("GET", "/api/uptime-digest/config",
+     tag="Alerts",
+     summary="Get the digest configuration",
+     description=("This org's uptime-digest schedule (viewer+, org "
+                  "scope). Returns defaults when never configured."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="60/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("Digest config row.",
+                      {"frequency": "weekly", "enabled": 1, "hour": 8}),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
+_doc("PUT", "/api/uptime-digest/config",
+     tag="Alerts",
+     summary="Configure the uptime digest",
+     description=("Set the weekly/monthly digest schedule (member+). "
+                  "Weekly sends on day_of_week (0=Monday) at hour UTC; "
+                  "monthly on day_of_month (1..28) at hour UTC. The beat "
+                  "emails the digest to the org's alert-email recipients."),
+     auth="key", min_role="member", org_scope=True, rate_limit="10/minute",
+     params=[],
+     request_body={
+         "application/json": {
+             "example": {"enabled": True, "frequency": "weekly",
+                         "day_of_week": 0, "day_of_month": 1,
+                         "hour": 8}}},
+     responses={
+         "200": _resp("Saved digest config.", {"frequency": "weekly"}),
+         "400": _err400("Invalid frequency / day / hour"),
+         "401": _err401(),
+         "403": _err403(),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
+_doc("GET", "/api/uptime-digest/preview",
+     tag="Alerts",
+     summary="Preview the uptime digest",
+     description=("Build the digest JSON for the last ?days (1..90) "
+                  "without sending it (viewer+, org scope)."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="30/minute",
+     params=[
+         _param("days", "query", "integer",
+                "Lookback window in days.", False, example=7),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Digest payload.",
+                      {"days": 7, "targets": [], "incidents": []}),
+         "400": _err400("days must be 1..90"),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/uptime-digest/send",
+     tag="Alerts",
+     summary="Send the digest now",
+     description=("Build and email the digest immediately to the org's "
+                  "alert-email recipients (member+). Reported as skipped "
+                  "when the org has no recipients or SMTP is unconfigured."),
+     auth="key", min_role="member", org_scope=True, rate_limit="10/minute",
+     params=[],
+     request_body={
+         "application/json": {
+             "example": {"days": 7}}},
+     responses={
+         "200": _resp("Delivery result.",
+                      {"sent": 2, "total": 2, "skipped": False}),
+         "400": _err400("days must be 1..90"),
+         "401": _err401(),
+         "403": _err403(),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
 _doc("GET", "/api/status/{slug}",
      tag="Alerts",
      summary="Public status page (JSON)",
