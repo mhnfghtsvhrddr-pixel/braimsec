@@ -101,6 +101,7 @@ from billing import (  # noqa: E402
 )
 import nowpayments_pay as nowpay  # noqa: E402
 import paddle_pay as paddlepay  # noqa: E402
+import auth as authmod  # noqa: E402
 
 # Reuse the scan engine prototype
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -176,12 +177,15 @@ if not API_KEY:
 async def api_key_gate(request: Request, call_next):
     """Require X-API-Key on every /api/* route. Dashboard static files stay open.
 
-    Two key types:
+    Three credential types:
     - the master key (BRAIMSEC_API_KEY env): maps to the built-in 'owner' org.
     - per-customer keys (api_keys table, hashed): map to their org + plan.
+    - user sessions (bss_ prefix, api/auth.py): email+password login for
+      humans; accepted everywhere an API key works, carrying org + role.
     Sets request.state.org_id / request.state.plan for downstream handlers,
     plus request.state.actor (API key prefix, or 'owner' for the master key)
-    for the audit trail. The full key secret never leaves this middleware.
+    for the audit trail. request.state.user_id is set for session callers
+    only. The full key secret never leaves this middleware.
     /api/plans is public (pricing catalog for the marketing page).
     /api/checkout/crypto is public (new-customer crypto checkout; rate-limited).
     /api/checkout/paddle is public (new-customer card checkout session;
@@ -196,6 +200,7 @@ async def api_key_gate(request: Request, call_next):
                     "/api/checkout/status", "/api/webhooks/nowpayments",
                     "/api/webhooks/paddle",
                     "/api/webhooks/github", "/api/webhooks/gitlab",
+                    "/api/auth/register", "/api/auth/login",
                     "/api/openapi.json",
                     "/api/health")
     path = request.url.path
@@ -218,6 +223,10 @@ async def api_key_gate(request: Request, call_next):
                 org = {"org_id": OWNER_ORG_ID, "plan": "team"}
                 actor = "owner"
                 role = "owner"
+            elif presented.startswith(authmod.SESSION_PREFIX):
+                org = authmod.verify_session(presented)
+                actor = (org or {}).get("key_prefix", "")
+                role = (org or {}).get("role", "viewer")
             else:
                 org = verify_key(presented)
                 actor = (org or {}).get("key_prefix", "")
@@ -231,6 +240,7 @@ async def api_key_gate(request: Request, call_next):
         request.state.actor = actor
         request.state.role = role
         request.state.key_id = (org or {}).get("key_id")  # None for master key
+        request.state.user_id = (org or {}).get("user_id")  # sessions only
         # Project scope: None = org-wide key; otherwise the key only sees
         # its own project's data.
         request.state.project_id = (org or {}).get("project_id")
@@ -4477,6 +4487,85 @@ async def paddle_webhook(request: Request):
     verdict, info = paddlepay.fulfill_event(event)
     return {"ok": True, "verdict": verdict,
             "detail": info if isinstance(info, str) else "fulfilled"}
+
+
+# ---------------------------------------------------------------------------
+# Customer accounts: email + password login (api/auth.py). Sessions (bss_)
+# are accepted by the api_key_gate everywhere an API key works.
+# ---------------------------------------------------------------------------
+@app.post("/api/auth/register")
+@limiter.limit("10/minute")
+async def auth_register(request: Request):
+    """Register a new customer account.
+
+    Public (new customers have no credential yet); rate-limited to
+    10/min/IP. Body: {email, password (10-128 chars)}. Creates an org +
+    an owner user and returns a session token (shown once) that works as
+    the X-API-Key header value. 409 when the email is taken.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+    try:
+        user, token = authmod.register_account(
+            body.get("email", ""), body.get("password", ""))
+    except KeyError:
+        raise HTTPException(409, "Email already registered")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"user": user, "session_token": token,
+            "token_note": "Save this session token now — it is shown only "
+                          "once. Send it as the X-API-Key header."}
+
+
+@app.post("/api/auth/login")
+@limiter.limit("10/minute")
+async def auth_login(request: Request):
+    """Log in with email + password.
+
+    Public; rate-limited to 10/min/IP. Returns a session token (shown
+    once). Failures answer 401 with a generic message (no account
+    oracle).
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+    try:
+        user, token = authmod.login_account(
+            body.get("email", ""), body.get("password", ""))
+    except KeyError:
+        raise HTTPException(401, "Invalid email or password")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"user": user, "session_token": token}
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request):
+    """Revoke the calling session token. Requires a session (bss_)."""
+    presented = request.headers.get("x-api-key", "")
+    if not authmod.revoke_session(presented):
+        raise HTTPException(400, "No active session to revoke")
+    return {"ok": True}
+
+
+@app.get("/api/me")
+def api_me(request: Request):
+    """Who am I: for session callers the user profile, for API-key
+    callers the credential type + org."""
+    require_org_scope(request)
+    user_id = getattr(request.state, "user_id", None)
+    if user_id:
+        sess = authmod.verify_session(request.headers.get("x-api-key", ""))
+        return {"type": "user", "user_id": user_id,
+                "email": (sess or {}).get("email"),
+                "org_id": request.state.org_id,
+                "role": request.state.role}
+    return {"type": "api_key", "org_id": request.state.org_id,
+            "role": request.state.role,
+            "key_id": getattr(request.state, "key_id", None)}
 
 
 @app.get("/api/subscription")
