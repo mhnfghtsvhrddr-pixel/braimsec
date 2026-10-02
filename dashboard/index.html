@@ -505,6 +505,33 @@
       <button class="btn-ghost" onclick="loadMaintenance()">↻ تحديث</button>
     </div>
     <div id="maintenance-wrap"></div>
+    <h4 style="margin:1.2rem 0 0.6rem;">📊 تقرير الجهوزية الدوري</h4>
+    <p style="font-size:0.85rem;opacity:0.75;margin-bottom:0.7rem">
+      ملخص يُرسل بالإيميل لعناوين التنبيه: نسبة الجهوزية ومتوسط الاستجابة
+      لكل رابط، الحوادث، والشهادات القريبة من الانتهاء.
+    </p>
+    <div class="row" style="gap:0.6rem;flex-wrap:wrap;margin-bottom:0.8rem">
+      <label style="font-size:0.85rem"><input type="checkbox" id="dg-enabled" checked> مفعّل</label>
+      <select id="dg-freq" aria-label="التكرار">
+        <option value="weekly">أسبوعي</option>
+        <option value="monthly">شهري</option>
+      </select>
+      <select id="dg-dow" aria-label="يوم الأسبوع">
+        <option value="0">الاثنين</option>
+        <option value="1">الثلاثاء</option>
+        <option value="2">الأربعاء</option>
+        <option value="3">الخميس</option>
+        <option value="4">الجمعة</option>
+        <option value="5">السبت</option>
+        <option value="6">الأحد</option>
+      </select>
+      <input id="dg-dom" type="number" min="1" max="28" value="1" style="width:70px" dir="ltr" aria-label="يوم الشهر" title="يوم الشهر (للشهري)">
+      <input id="dg-hour" type="number" min="0" max="23" value="8" style="width:70px" dir="ltr" aria-label="الساعة (UTC)">
+      <button class="btn" onclick="saveDigestConfig()">💾 حفظ الجدولة</button>
+      <button class="btn-ghost" onclick="previewDigest()">👁️ معاينة</button>
+      <button class="btn-ghost" onclick="sendDigestNow()">📧 إرسال الآن</button>
+    </div>
+    <div id="digest-wrap"></div>
   </section>
 
   <!-- التقارير التنفيذية المجدولة: PDF يُرسل بالإيميل تلقائياً -->
@@ -893,7 +920,7 @@ function showView(name) {
   clearInterval(pollTimer);
   if (name === "scans") loadScans();
   if (name === "trends") loadTrends();
-  if (name === "sched") { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); loadCertDomains(); loadUptimeTargets(); loadStatusPages(); loadIncidents(); loadMaintenance(); }
+  if (name === "sched") { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); loadCertDomains(); loadUptimeTargets(); loadStatusPages(); loadIncidents(); loadMaintenance(); loadDigestConfig(); }
   if (name === "reports") loadReportSchedules();
   if (name === "vcs") loadVcsRepos();
   if (name === "billing") loadBilling();
@@ -2091,6 +2118,67 @@ async function delMaintenance(id) {
   if (!confirm("حذف نافذة الصيانة هذه؟")) return;
   await api(`/maintenance/${id}`, { method: "DELETE" });
   loadMaintenance();
+}
+
+/* ---------- تقرير الجهوزية الدوري ---------- */
+async function loadDigestConfig() {
+  try {
+    const cfg = await api("/uptime-digest/config");
+    document.getElementById("dg-enabled").checked = !!cfg.enabled;
+    document.getElementById("dg-freq").value = cfg.frequency || "weekly";
+    document.getElementById("dg-dow").value = String(cfg.day_of_week ?? 0);
+    document.getElementById("dg-dom").value = cfg.day_of_month ?? 1;
+    document.getElementById("dg-hour").value = cfg.hour ?? 8;
+  } catch (e) { /* defaults stay */ }
+}
+
+async function saveDigestConfig() {
+  try {
+    await api("/uptime-digest/config", { method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enabled: document.getElementById("dg-enabled").checked,
+        frequency: document.getElementById("dg-freq").value,
+        day_of_week: parseInt(document.getElementById("dg-dow").value, 10),
+        day_of_month: parseInt(document.getElementById("dg-dom").value, 10) || 1,
+        hour: parseInt(document.getElementById("dg-hour").value, 10) || 0,
+      }) });
+    alert("✅ حُفظت جدولة التقرير");
+  } catch (e) { alert("تعذّر الحفظ: " + e.message); }
+}
+
+async function previewDigest() {
+  const el = document.getElementById("digest-wrap");
+  let d;
+  try {
+    d = await api("/uptime-digest/preview?days=7");
+  } catch (e) {
+    el.innerHTML = `<div class="empty"><p>تعذّر التحميل: ${esc(e.message)}</p></div>`;
+    return;
+  }
+  if (!d.targets.length) {
+    el.innerHTML = `<div class="empty"><p>لا روابط مراقَبة بعد 🌐</p></div>`;
+    return;
+  }
+  el.innerHTML = `<table><thead><tr>
+      <th>الرابط</th><th>الجهوزية (7 أيام)</th><th>متوسط الاستجابة</th><th>فحوصات</th>
+    </tr></thead><tbody>` + d.targets.map(t => `
+    <tr>
+      <td dir="ltr">${esc(t.hostname)}${esc(t.path)}</td>
+      <td dir="ltr">${t.uptime_pct == null ? "لا بيانات" : t.uptime_pct + "%"}</td>
+      <td dir="ltr">${t.avg_latency_ms == null ? "—" : t.avg_latency_ms + "ms"}</td>
+      <td dir="ltr">${t.checks}</td>
+    </tr>`).join("") + `</tbody></table>
+    <p class="mut" style="font-size:0.8rem">الحوادث: ${d.incidents.length} · شهادات تنتهي قريباً: ${d.certs_expiring.length}</p>`;
+}
+
+async function sendDigestNow() {
+  if (!confirm("إرسال تقرير الجهوزية الآن لعناوين التنبيه؟")) return;
+  try {
+    const r = await api("/uptime-digest/send", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ days: 7 }) });
+    alert(r.skipped ? `⏭️ تُخطّي: ${r.error || "لا عناوين أو SMTP غير معدّ"}`
+      : `📧 أُرسل إلى ${r.sent} من ${r.total}`);
+  } catch (e) { alert("تعذّر الإرسال: " + e.message); }
 }
 
 /* ---------- المستودعات: فحص تلقائي عند push ---------- */
