@@ -10,7 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
+        ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Docker CLI (client only, no daemon) --------------------------------
