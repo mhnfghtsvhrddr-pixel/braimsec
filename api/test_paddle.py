@@ -183,7 +183,8 @@ def test_verify_ts_verbatim_not_reserialized():
 
 # ------------------------------------------------------- evaluate_event
 
-def test_evaluate_created_fulfills():
+def test_evaluate_created_fulfills(monkeypatch):
+    monkeypatch.setenv("PADDLE_PRICE_MAP", json.dumps(PRICE_MAP))
     org = _org()
     verdict, info = pp.evaluate_event(_sub_event(org))
     assert verdict == "fulfill"
@@ -193,7 +194,8 @@ def test_evaluate_created_fulfills():
     assert info["period_end"] == "2026-11-02T09:00:00Z"
 
 
-def test_evaluate_unknown_org_rejected():
+def test_evaluate_unknown_org_rejected(monkeypatch):
+    monkeypatch.setenv("PADDLE_PRICE_MAP", json.dumps(PRICE_MAP))
     verdict, info = pp.evaluate_event(_sub_event("org_nope"))
     assert verdict == "reject"
     assert "unknown org" in info
@@ -214,14 +216,16 @@ def test_evaluate_transaction_completed_ignored():
     assert "subscription-driven" in info
 
 
-def test_evaluate_paused_maps_to_canceled():
+def test_evaluate_paused_maps_to_canceled(monkeypatch):
+    monkeypatch.setenv("PADDLE_PRICE_MAP", json.dumps(PRICE_MAP))
     org = _org()
     verdict, info = pp.evaluate_event(_sub_event(org, status="paused"))
     assert verdict == "fulfill"
     assert info["status"] == "canceled"
 
 
-def test_evaluate_unknown_status_rejected():
+def test_evaluate_unknown_status_rejected(monkeypatch):
+    monkeypatch.setenv("PADDLE_PRICE_MAP", json.dumps(PRICE_MAP))
     org = _org()
     verdict, _ = pp.evaluate_event(_sub_event(org, status="weird"))
     assert verdict == "reject"
@@ -239,6 +243,27 @@ def test_evaluate_price_fallback(monkeypatch):
 def test_evaluate_unmappable_rejected():
     org = _org()
     ev = _sub_event(org, custom={"org_id": org}, price_id="pri_unknown")
+    verdict, _ = pp.evaluate_event(ev)
+    assert verdict == "reject"
+
+
+def test_evaluate_custom_data_tampering_rejected(monkeypatch):
+    monkeypatch.setenv("PADDLE_PRICE_MAP", json.dumps(PRICE_MAP))
+    # Browser claims pro/monthly but the Paddle-reported price is
+    # starter/monthly: the paid price wins, the claim is rejected.
+    org = _org()
+    ev = _sub_event(org, tier="pro", cycle="monthly",
+                    price_id="pri_test_sm")
+    verdict, info = pp.evaluate_event(ev)
+    assert verdict == "reject"
+    assert "disagrees" in info
+
+
+def test_evaluate_missing_items_rejected(monkeypatch):
+    monkeypatch.setenv("PADDLE_PRICE_MAP", json.dumps(PRICE_MAP))
+    org = _org()
+    ev = _sub_event(org)
+    ev["data"]["items"] = []
     verdict, _ = pp.evaluate_event(ev)
     assert verdict == "reject"
 
@@ -278,6 +303,14 @@ def test_webhook_idempotent_on_event_id(client):
     r2 = _post_webhook(client, ev)
     assert r2.status_code == 200
     assert r2.json()["verdict"] == "duplicate"
+
+
+def test_webhook_503_when_unconfigured(monkeypatch):
+    monkeypatch.delenv("PADDLE_PRICE_MAP", raising=False)
+    c = TestClient(main.app)
+    r = c.post("/api/webhooks/paddle", content=b"{}",
+               headers={"Content-Type": "application/json"})
+    assert r.status_code == 503
 
 
 def test_webhook_bad_signature_400(client):
@@ -352,6 +385,13 @@ def test_checkout_unknown_tier_400(monkeypatch):
     r = c.post("/api/checkout/paddle",
                json={"tier": "nope", "cycle": "monthly",
                      "email": "x@example.com"})
+    assert r.status_code == 400
+
+
+def test_checkout_array_body_400(monkeypatch):
+    monkeypatch.setenv("PADDLE_PRICE_MAP", json.dumps(PRICE_MAP))
+    c = TestClient(main.app)
+    r = c.post("/api/checkout/paddle", json=["not", "a", "dict"])
     assert r.status_code == 400
 
 
