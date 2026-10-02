@@ -2775,6 +2775,40 @@ _doc("POST", "/api/auth/logout",
          "429": _err429(),
      })
 
+_doc("POST", "/api/auth/forgot",
+     tag="Auth",
+     summary="Request password reset",
+     description=("Request a password-reset email. Public; 10/min/IP. "
+                  "Always answers 200 (no account oracle): an email goes "
+                  "out only when the account exists AND SMTP is configured "
+                  "on the server. The token is single-use, 1-hour."),
+     auth="public", min_role=None, org_scope=False, rate_limit="10/minute",
+     params=[],
+     request_body=_body("Email address.",
+                        {"email": "owner@acme.com"}),
+     responses={
+         "200": _resp("Accepted (always).", {"ok": True}),
+         "400": _err400("Invalid JSON body"),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/auth/reset",
+     tag="Auth",
+     summary="Reset password",
+     description=("Consume a password-reset token (bsr_) and set the new "
+                  "password. Public; 10/min/IP. All of the user's sessions "
+                  "are revoked."),
+     auth="public", min_role=None, org_scope=False, rate_limit="10/minute",
+     params=[],
+     request_body=_body("Token + new password.",
+                        {"token": "bsr_...",
+                         "new_password": "new-correct-horse-12"}),
+     responses={
+         "200": _resp("Password changed.", {"ok": True}),
+         "400": _err400("Invalid or expired reset token"),
+         "429": _err429(),
+     })
+
 _doc("GET", "/api/me",
      tag="Auth",
      summary="Who am I",
