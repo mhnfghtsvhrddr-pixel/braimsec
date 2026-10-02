@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 
 import cert_monitor
 import status_page
+import maintenance
 
 log = logging.getLogger("braimsec.uptime")
 
@@ -224,9 +225,53 @@ def _down_alert_due(target: dict) -> bool:
 
 def _alert(db, target: dict, event: str, severity: str, payload: dict,
            audit_action: str):
+    from audit import log_event  # noqa: E402
+    scan_id = f"uptime:{target['id']}"
+    # Maintenance suppression: while a window covers the target, a down
+    # alert is logged (status='suppressed') but never sent and no incident
+    # opens. The repeat window still advances so the log isn't spammed.
+    if event == "uptime.down":
+        window = maintenance.is_target_in_maintenance(
+            db, target["org_id"], target["id"])
+        if window is not None:
+            from alert_fanout import record  # noqa: E402
+            record(db, target["org_id"], event=event, scan_id=scan_id,
+                   severity=severity, count=payload.get("failures", 0),
+                   webhook_url=target.get("webhook_url") or "",
+                   channel="maintenance",
+                   recipient=window["title"][:120], status="suppressed",
+                   attempts=0, error=None, payload=payload)
+            db.commit()
+            db.execute("UPDATE uptime_targets SET last_alerted_at=?,"
+                       " last_alert_event=? WHERE id=?",
+                       (_now_iso(), event, target["id"]))
+            db.commit()
+            log_event(target["org_id"], "system",
+                      "maintenance.alert_suppressed",
+                      detail={"target_id": target["id"],
+                              "hostname": target["hostname"],
+                              "window_id": window["id"],
+                              "window_title": window["title"]},
+                      db=db)
+            db.commit()
+            return
+    # A recovery is announced only if the outage itself was announced:
+    # a down alert that was suppressed by maintenance stays silent.
+    if event == "uptime.recovered":
+        last_down = db.execute(
+            "SELECT status FROM notifications WHERE org_id=?"
+            " AND scan_id=? AND event='uptime.down'"
+            " ORDER BY created_at DESC, id DESC LIMIT 1",
+            (target["org_id"], scan_id)).fetchone()
+        if last_down is not None and last_down["status"] == "suppressed":
+            db.execute("UPDATE uptime_targets SET last_alerted_at=?,"
+                       " last_alert_event=? WHERE id=?",
+                       (_now_iso(), event, target["id"]))
+            db.commit()
+            return
     from alert_fanout import fan_out  # noqa: E402
     fan_out(db, target["org_id"], event=event,
-            scan_id=f"uptime:{target['id']}", severity=severity,
+            scan_id=scan_id, severity=severity,
             count=payload.get("failures", 0),
             webhook_url=target.get("webhook_url") or "", payload=payload)
     db.execute("UPDATE uptime_targets SET last_alerted_at=?,"
