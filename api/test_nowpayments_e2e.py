@@ -146,6 +146,12 @@ set_subscription_plan(org3, "team", "active", provider="paddle")
 pe5 = datetime.fromisoformat(get_subscription(org3)["current_period_end"])
 check("default period still month-end", pe5.day >= 28)
 
+# --- hostile bodies are 400, never 500 -------------------------------------------
+r_bad = c.post("/api/checkout/crypto", json=["not", "a", "dict"])
+check("crypto checkout array body -> 400", r_bad.status_code == 400)
+check("fulfill_ipn rejects non-dict payload",
+      npay.fulfill_ipn(["not", "a", "dict"])[0] == "reject")
+
 n_fail = sum(1 for _, ok in results if not ok)
 print(f"\n{len(results) - n_fail}/{len(results)} passed")
 sys.exit(1 if n_fail else 0)
