@@ -1,0 +1,20 @@
+# BraimSec canonical semgrep exclusions.
+#
+# Intentionally vulnerable fixtures (eval corpora + benchmark samples).
+# These MUST fire the rules by design; they are not product code.
+scanner/eval/
+benchmark/corpus/
+
+# Our own CI / infra / shipped-integration configs. Findings here are
+# policy decisions (e.g. unpinned CI actions) or rule precision gaps,
+# not product-code issues — reviewed separately, never in the
+# product-code gate (scripts/semgrep-review.sh).
+.github/
+integrations/
+deploy/
+
+# Build artifacts and vendored code.
+vscode-extension/node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
