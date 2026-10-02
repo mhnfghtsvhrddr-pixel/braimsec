@@ -27,6 +27,7 @@ import time
 from datetime import datetime, timezone
 
 import cert_monitor
+import status_page
 
 log = logging.getLogger("braimsec.uptime")
 
@@ -239,6 +240,17 @@ def _alert(db, target: dict, event: str, severity: str, payload: dict,
                       "path": target["path"]},
               db=db)
     db.commit()
+    # Automatic incident log: a down alert opens an incident for the
+    # target (idempotent — one open incident per target); a recovery
+    # auto-resolves them. Best-effort: never breaks alerting.
+    try:
+        if event == "uptime.down":
+            status_page.open_incident_for_target(
+                db, target, payload.get("error") or "")
+        elif event == "uptime.recovered":
+            status_page.resolve_incidents_for_target(db, target)
+    except Exception:  # noqa: BLE001
+        log.exception("auto-incident handling failed")
 
 
 def check_target(db, target: dict) -> dict:
@@ -251,6 +263,7 @@ def check_target(db, target: dict) -> dict:
                        " last_status='error', last_error=? WHERE id=?",
                        (now, res["error"][:500], target["id"]))
             db.commit()
+            status_page.record_check(db, target["id"], "error", None)
             return {"status": "error", "error": res["error"]}
         if res["ok"]:
             was_down = target.get("last_status") == "down"
@@ -261,6 +274,8 @@ def check_target(db, target: dict) -> dict:
                        (now, res["http_status"], res["latency_ms"],
                         target["id"]))
             db.commit()
+            status_page.record_check(db, target["id"], "up",
+                                     res["latency_ms"])
             if was_down and target.get("last_alert_event") == "uptime.down":
                 payload = _payload(target, res, "uptime.recovered")
                 _alert(db, target, "uptime.recovered", "info", payload,
@@ -276,6 +291,8 @@ def check_target(db, target: dict) -> dict:
                    (now, res["http_status"], res["latency_ms"],
                     (res["error"] or "")[:500], failures, target["id"]))
         db.commit()
+        status_page.record_check(db, target["id"], "down",
+                                 res["latency_ms"])
         # NOTE: `target` still carries the pre-check alert state, which is
         # exactly what the anti-spam check needs.
         if failures >= FAILURES_BEFORE_ALERT and _down_alert_due(target):
@@ -326,6 +343,10 @@ def run_uptime_checks_once(db=None) -> dict:
                 out["down"] += 1
             elif res.get("status") == "error":
                 out["errors"] += 1
+        try:
+            status_page.prune_daily(db)
+        except Exception:  # noqa: BLE001 - pruning must not kill the beat
+            log.exception("uptime_daily prune failed")
         return out
     except Exception:  # noqa: BLE001 - beat must survive
         log.exception("uptime check sweep crashed")
