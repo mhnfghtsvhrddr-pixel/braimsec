@@ -52,4 +52,4 @@ def test_uptime_event_labels_and_options():
 
 def test_uptime_loader_runs_with_sched_view():
     h = _html()
-    assert "loadUptimeTargets(); loadStatusPages(); loadIncidents(); loadMaintenance(); }" in h
+    assert "loadUptimeTargets(); loadStatusPages(); loadIncidents(); loadMaintenance(); loadDigestConfig(); }" in h
