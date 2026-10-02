@@ -201,6 +201,7 @@ async def api_key_gate(request: Request, call_next):
                     "/api/webhooks/paddle",
                     "/api/webhooks/github", "/api/webhooks/gitlab",
                     "/api/auth/register", "/api/auth/login",
+                    "/api/auth/forgot", "/api/auth/reset",
                     "/api/openapi.json",
                     "/api/health")
     path = request.url.path
@@ -241,6 +242,7 @@ async def api_key_gate(request: Request, call_next):
         request.state.role = role
         request.state.key_id = (org or {}).get("key_id")  # None for master key
         request.state.user_id = (org or {}).get("user_id")  # sessions only
+        request.state.user_email = (org or {}).get("email")  # sessions only
         # Project scope: None = org-wide key; otherwise the key only sees
         # its own project's data.
         request.state.project_id = (org or {}).get("project_id")
@@ -4507,6 +4509,8 @@ async def auth_register(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(400, "Invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Invalid JSON body")
     try:
         user, token = authmod.register_account(
             body.get("email", ""), body.get("password", ""))
@@ -4532,6 +4536,8 @@ async def auth_login(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(400, "Invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Invalid JSON body")
     try:
         user, token = authmod.login_account(
             body.get("email", ""), body.get("password", ""))
@@ -4551,6 +4557,50 @@ async def auth_logout(request: Request):
     return {"ok": True}
 
 
+@app.post("/api/auth/forgot")
+@limiter.limit("10/minute")
+async def auth_forgot(request: Request):
+    """Request a password-reset email.
+
+    Public; rate-limited to 10/min/IP. Always answers 200 (no account
+    oracle): an email is dispatched only when the account exists AND
+    SMTP is configured on the server.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Invalid JSON body")
+    authmod.request_password_reset(str(body.get("email", "")))
+    return {"ok": True}
+
+
+@app.post("/api/auth/reset")
+@limiter.limit("10/minute")
+async def auth_reset(request: Request):
+    """Consume a password-reset token and set the new password.
+
+    Public; rate-limited to 10/min/IP. The token is single-use and
+    expires after 1 hour; all of the user's sessions are revoked.
+    Body: {token: bsr_..., new_password}.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Invalid JSON body")
+    try:
+        authmod.reset_password(str(body.get("token", "")),
+                               body.get("new_password", ""))
+    except KeyError:
+        raise HTTPException(400, "Invalid or expired reset token")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
 @app.get("/api/me")
 def api_me(request: Request):
     """Who am I: for session callers the user profile, for API-key
@@ -4558,9 +4608,8 @@ def api_me(request: Request):
     require_org_scope(request)
     user_id = getattr(request.state, "user_id", None)
     if user_id:
-        sess = authmod.verify_session(request.headers.get("x-api-key", ""))
         return {"type": "user", "user_id": user_id,
-                "email": (sess or {}).get("email"),
+                "email": getattr(request.state, "user_email", None),
                 "org_id": request.state.org_id,
                 "role": request.state.role}
     return {"type": "api_key", "org_id": request.state.org_id,
