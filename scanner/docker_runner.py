@@ -61,6 +61,27 @@ def _docker_available() -> bool:
     return shutil.which(DOCKER_BIN) is not None
 
 
+def resolve_cpus() -> str | None:
+    """Clamp the sandbox --cpus request to what the host actually has.
+
+    Docker rejects `--cpus N` with rc=125 when N exceeds the host's CPU
+    count, which would fail every sandboxed scan on a small VPS.
+    (Found on a 1-vCPU host, 2026-10-02.)
+    """
+    if not CONTAINER_CPUS:
+        return None
+    try:
+        requested = float(CONTAINER_CPUS)
+    except ValueError:
+        return CONTAINER_CPUS
+    available = os.cpu_count() or 1
+    if requested > available:
+        log.warning("sandbox cpus clamped: requested=%s available=%d",
+                    CONTAINER_CPUS, available)
+    clamped = max(0.01, min(requested, float(available)))
+    return str(int(clamped)) if clamped == int(clamped) else str(clamped)
+
+
 def build_command(target_dir: str, out_dir: str,
                   image: str = RUNNER_IMAGE, name: str | None = None) -> list:
     """The hardened `docker run` invocation. Pure function, unit-tested."""
@@ -81,8 +102,9 @@ def build_command(target_dir: str, out_dir: str,
         cmd += ["--pids-limit", CONTAINER_PIDS]
     if CONTAINER_MEMORY:
         cmd += ["--memory", CONTAINER_MEMORY]
-    if CONTAINER_CPUS:
-        cmd += ["--cpus", CONTAINER_CPUS]
+    cpus = resolve_cpus()
+    if cpus:
+        cmd += ["--cpus", cpus]
     cmd += [
         "-v", f"{os.path.abspath(target_dir)}:/target:ro",
         "-v", f"{os.path.abspath(out_dir)}:/out",
