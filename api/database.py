@@ -371,6 +371,23 @@ CREATE TABLE IF NOT EXISTS uptime_daily (
     latency_n INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (target_id, day)
 );
+-- Scheduled maintenance windows. While a window is active, uptime.down
+-- alerts for covered targets are suppressed (logged, not sent) and no
+-- incident auto-opens. Empty target_ids_json = covers all targets.
+CREATE TABLE IF NOT EXISTS maintenance_windows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id TEXT NOT NULL REFERENCES organizations(id),
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    target_ids_json TEXT NOT NULL DEFAULT '[]',
+    starts_at TEXT NOT NULL,
+    ends_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'scheduled',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_maintenance_org
+    ON maintenance_windows(org_id, starts_at);
 -- Per-org HMAC signing secrets for outgoing alert webhooks. The secret is
 -- generated server-side, Fernet-encrypted at rest, and shown to the org
 -- owner exactly once at rotation time (never returned by the API again).
