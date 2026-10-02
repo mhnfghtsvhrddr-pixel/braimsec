@@ -196,7 +196,13 @@ async def api_key_gate(request: Request, call_next):
     # The scan badge is public by design (README embedding): it exposes only
     # aggregate severity counts, never scan metadata (see scan_badge.py).
     is_badge = (path.startswith("/api/scans/") and path.endswith("/badge.svg"))
-    if path.startswith("/api/") and path not in public_paths and not is_badge:
+    # Public status pages are public by design (shareable service status):
+    # /api/status/<slug> and /status/<slug> expose only enabled pages and
+    # their org's targets / public incidents — no auth material, no keys.
+    is_status = (path.startswith("/api/status/") or
+                 path.startswith("/status/"))
+    if (path.startswith("/api/") and path not in public_paths
+            and not is_badge and not is_status):
         presented = request.headers.get("x-api-key", "")
         org = None
         actor = ""
@@ -2186,6 +2192,10 @@ async def delete_uptime_target(request: Request, target_id: int):
         if row is None:
             raise HTTPException(404, "target not found")
         db.execute("DELETE FROM uptime_targets WHERE id=?", (target_id,))
+        db.execute("DELETE FROM uptime_daily WHERE target_id=?",
+                   (target_id,))
+        db.execute("UPDATE incidents SET target_id=NULL WHERE target_id=?",
+                   (target_id,))
         from audit import log_event  # noqa: E402
         log_event(request.state.org_id, request.state.actor,
                   "uptime_target.removed",
@@ -2224,6 +2234,382 @@ async def check_uptime_target_now(request: Request, target_id: int):
 # operator configured SMTP (BRAIMSEC_SMTP_*). Delivery happens on the same
 # trigger as webhook alerts (new findings >= threshold, failed scans).
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Public status pages + incident log (built on uptime monitoring)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/status-pages")
+@limiter.limit("60/minute")
+async def list_status_pages(request: Request):
+    """List this org's public status pages (viewer+)."""
+    require_org_scope(request)
+    from status_page import list_pages  # noqa: E402
+    db = get_db()
+    try:
+        return list_pages(db, request.state.org_id)
+    finally:
+        db.close()
+
+
+@app.post("/api/status-pages")
+@limiter.limit("10/minute")
+async def create_status_page(request: Request):
+    """Publish a status page under /status/<slug> (member+)."""
+    require_role(request, "member")
+    from status_page import create_page  # noqa: E402
+    body = await request.json()
+    db = get_db()
+    try:
+        try:
+            row = create_page(db, request.state.org_id,
+                              body.get("title", ""), body.get("slug", ""),
+                              body.get("headline", "") or "",
+                              bool(body.get("enabled", True)))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "status_page.created",
+                  detail={"page_id": row["id"], "slug": row["slug"]}, db=db)
+        db.commit()
+        return row
+    finally:
+        db.close()
+
+
+@app.patch("/api/status-pages/{page_id}")
+@limiter.limit("30/minute")
+async def update_status_page(request: Request, page_id: int):
+    """Update a status page's title/slug/headline/enabled (member+)."""
+    require_role(request, "member")
+    from status_page import update_page  # noqa: E402
+    body = await request.json()
+    db = get_db()
+    try:
+        fields = {k: body[k] for k in
+                  ("title", "slug", "headline", "enabled") if k in body}
+        try:
+            row = update_page(db, page_id, request.state.org_id, **fields)
+        except KeyError:
+            raise HTTPException(404, "page not found")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "status_page.updated",
+                  detail={"page_id": page_id,
+                          "fields": sorted(fields)}, db=db)
+        db.commit()
+        return row
+    finally:
+        db.close()
+
+
+@app.delete("/api/status-pages/{page_id}")
+@limiter.limit("30/minute")
+async def delete_status_page(request: Request, page_id: int):
+    """Delete a status page (member+)."""
+    require_role(request, "member")
+    from status_page import delete_page  # noqa: E402
+    db = get_db()
+    try:
+        try:
+            delete_page(db, page_id, request.state.org_id)
+        except KeyError:
+            raise HTTPException(404, "page not found")
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "status_page.deleted",
+                  detail={"page_id": page_id}, db=db)
+        db.commit()
+        return {"deleted": page_id}
+    finally:
+        db.close()
+
+
+@app.get("/api/incidents")
+@limiter.limit("60/minute")
+async def list_incidents_api(request: Request, status: str = "",
+                             target_id: str = ""):
+    """List incidents: ?status=open|investigating|...&target_id=N (viewer+)."""
+    require_org_scope(request)
+    from status_page import list_incidents  # noqa: E402
+    db = get_db()
+    try:
+        try:
+            tid = int(target_id) if target_id else None
+            return list_incidents(db, request.state.org_id,
+                                  status=status or None, target_id=tid)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    finally:
+        db.close()
+
+
+@app.post("/api/incidents")
+@limiter.limit("10/minute")
+async def create_incident_api(request: Request):
+    """Open an incident manually (member+)."""
+    require_role(request, "member")
+    from status_page import create_incident  # noqa: E402
+    body = await request.json()
+    db = get_db()
+    try:
+        try:
+            tid = body.get("target_id")
+            row = create_incident(
+                db, request.state.org_id, body.get("title", ""),
+                body.get("status", "investigating") or "investigating",
+                body.get("impact", "minor") or "minor",
+                int(tid) if tid is not None else None,
+                bool(body.get("public_visible", True)),
+                created_by=request.state.actor,
+                initial_message=body.get("message", "") or "")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "incident.created",
+                  detail={"incident_id": row["id"],
+                          "title": row["title"]}, db=db)
+        db.commit()
+        return row
+    finally:
+        db.close()
+
+
+@app.get("/api/incidents/{incident_id}")
+@limiter.limit("60/minute")
+async def get_incident_api(request: Request, incident_id: int):
+    """Get one incident with its update timeline (viewer+)."""
+    require_org_scope(request)
+    from status_page import get_incident  # noqa: E402
+    db = get_db()
+    try:
+        inc = get_incident(db, incident_id, request.state.org_id)
+        if inc is None:
+            raise HTTPException(404, "incident not found")
+        return inc
+    finally:
+        db.close()
+
+
+@app.patch("/api/incidents/{incident_id}")
+@limiter.limit("30/minute")
+async def update_incident_api(request: Request, incident_id: int):
+    """Update title/impact/status/public_visible (member+)."""
+    require_role(request, "member")
+    from status_page import update_incident  # noqa: E402
+    body = await request.json()
+    db = get_db()
+    try:
+        fields = {k: body[k] for k in
+                  ("title", "impact", "status", "public_visible")
+                  if k in body}
+        try:
+            row = update_incident(db, incident_id, request.state.org_id,
+                                  actor=request.state.actor, **fields)
+        except KeyError:
+            raise HTTPException(404, "incident not found")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "incident.resolved" if fields.get("status") == "resolved"
+                  else "incident.updated",
+                  detail={"incident_id": incident_id,
+                          "fields": sorted(fields)}, db=db)
+        db.commit()
+        return row
+    finally:
+        db.close()
+
+
+@app.post("/api/incidents/{incident_id}/updates")
+@limiter.limit("30/minute")
+async def add_incident_update_api(request: Request, incident_id: int):
+    """Append a timeline update, optionally changing status (member+)."""
+    require_role(request, "member")
+    from status_page import add_update  # noqa: E402
+    body = await request.json()
+    db = get_db()
+    try:
+        try:
+            row = add_update(db, incident_id, request.state.org_id,
+                             body.get("message", "") or "",
+                             body.get("status") or None,
+                             created_by=request.state.actor)
+        except KeyError:
+            raise HTTPException(404, "incident not found")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "incident_update.added",
+                  detail={"incident_id": incident_id}, db=db)
+        db.commit()
+        return row
+    finally:
+        db.close()
+
+
+@app.post("/api/incidents/{incident_id}/resolve")
+@limiter.limit("30/minute")
+async def resolve_incident_api(request: Request, incident_id: int):
+    """Resolve an incident with an optional closing message (member+)."""
+    require_role(request, "member")
+    from status_page import resolve_incident  # noqa: E402
+    body = await request.json()
+    db = get_db()
+    try:
+        try:
+            row = resolve_incident(db, incident_id, request.state.org_id,
+                                   body.get("message", "") or "",
+                                   created_by=request.state.actor)
+        except KeyError:
+            raise HTTPException(404, "incident not found")
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "incident.resolved",
+                  detail={"incident_id": incident_id}, db=db)
+        db.commit()
+        return row
+    finally:
+        db.close()
+
+
+@app.delete("/api/incidents/{incident_id}")
+@limiter.limit("30/minute")
+async def delete_incident_api(request: Request, incident_id: int):
+    """Delete an incident and its timeline (member+)."""
+    require_role(request, "member")
+    from status_page import delete_incident  # noqa: E402
+    db = get_db()
+    try:
+        try:
+            delete_incident(db, incident_id, request.state.org_id)
+        except KeyError:
+            raise HTTPException(404, "incident not found")
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "incident.removed",
+                  detail={"incident_id": incident_id}, db=db)
+        db.commit()
+        return {"deleted": incident_id}
+    finally:
+        db.close()
+
+
+# Public (unauthenticated, read-only) status page ---------------------------
+
+@app.get("/api/status/{slug}")
+@limiter.limit("30/minute")
+async def public_status_json(request: Request, slug: str):
+    """Public JSON summary of an enabled status page (no auth)."""
+    from status_page import public_summary  # noqa: E402
+    db = get_db()
+    try:
+        data = public_summary(db, slug)
+        if data is None:
+            raise HTTPException(404, "status page not found")
+        return data
+    finally:
+        db.close()
+
+
+@app.get("/status/{slug}", response_class=HTMLResponse)
+@limiter.limit("600/minute")
+async def public_status_html(request: Request, slug: str):
+    """Public human-readable status page (no auth), Arabic RTL."""
+    from status_page import public_summary  # noqa: E402
+    db = get_db()
+    try:
+        data = public_summary(db, slug)
+    finally:
+        db.close()
+    if data is None:
+        raise HTTPException(404, "status page not found")
+    return _render_status_html(data)
+
+
+def _render_status_html(data: dict) -> str:
+    import html as _html  # noqa: E402
+    esc = _html.escape
+    overall = {"operational": ("🟢", "كل الأنظمة تعمل", "#16a34a"),
+               "degraded": ("🟡", "تدهور جزئي", "#d97706"),
+               "outage": ("🔴", "انقطاع", "#dc2626")}[data["overall"]]
+    parts = [f"""<!doctype html><html dir="rtl" lang="ar"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{esc(data['title'])} — حالة الخدمة</title>
+<style>body{{font-family:system-ui,'Segoe UI',Tahoma,sans-serif;background:#0f172a;
+color:#e2e8f0;margin:0;padding:2rem 1rem}}main{{max-width:820px;margin:auto}}
+.card{{background:#1e293b;border-radius:14px;padding:1.2rem 1.4rem;margin:1rem 0}}
+.banner{{display:flex;align-items:center;gap:0.8rem;font-size:1.3rem;font-weight:700}}
+.bars{{display:flex;gap:2px;align-items:flex-end;height:34px;margin-top:0.5rem}}
+.bar{{flex:1;border-radius:3px;min-width:3px}}
+h1{{margin:0 0 0.3rem}}p.mut{{opacity:0.7;font-size:0.9rem}}
+.inc{{border-right:4px solid #d97706;padding-right:0.8rem;margin:0.8rem 0}}
+.inc.resolved{{border-color:#16a34a}}
+.tl{{font-size:0.85rem;opacity:0.85;margin:0.3rem 0}}
+a{{color:#7dd3fc}}</style></head><body><main>
+<h1>{esc(data['title'])}</h1>
+<p class="mut">{esc(data['headline'] or '')}</p>
+<div class="card"><div class="banner"><span>{overall[0]}</span>
+<span style="color:{overall[2]}">{overall[1]}</span></div></div>"""]
+    for t in data["targets"]:
+        st = {"up": "🟢 يعمل", "down": "🔴 متوقف", "error": "⚠️ خطأ فحص",
+              "never": "⏳ لم يُفحص بعد"}.get(t["last_status"], t["last_status"])
+        bars = []
+        for h in t["history"]:
+            u = h["uptime"]
+            color = "#334155" if u is None else (
+                "#16a34a" if u >= 0.99 else "#d97706" if u >= 0.9 else "#dc2626")
+            bars.append(f'<div class="bar" title="{h["day"]}: '
+                        f'{"" if u is None else round(u * 100, 1)}%"'
+                        f' style="background:{color};'
+                        f'height:{12 if u is None else 12 + int(u * 22)}px">'
+                        f"</div>")
+        up90 = ("لا بيانات" if t["uptime_90d"] is None
+                else f"{round(t['uptime_90d'] * 100, 2)}%")
+        parts.append(f"""<div class="card"><b>{esc(t['hostname'])}</b>
+<span class="mut" dir="ltr">{esc(t['url'])}</span> — {st}
+<span class="mut">· جهوزية 90 يوم: {up90}</span>
+<div class="bars">{''.join(bars)}</div></div>""")
+    active = [i for i in data["incidents"] if i["status"] != "resolved"]
+    past = [i for i in data["incidents"] if i["status"] == "resolved"]
+    if active:
+        parts.append('<div class="card"><h3>🚨 حوادث جارية</h3>')
+        for i in active:
+            parts.append(_incident_html(i, esc, resolved=False))
+        parts.append("</div>")
+    if past:
+        parts.append('<div class="card"><h3>📜 الحوادث السابقة</h3>')
+        for i in past:
+            parts.append(_incident_html(i, esc, resolved=True))
+        parts.append("</div>")
+    parts.append(f"""<p class="mut" style="text-align:center">
+مدعوم بـ BraimSec · آخر تحديث {esc(data['generated_at'])}</p>
+</main></body></html>""")
+    return "".join(parts)
+
+
+def _incident_html(inc: dict, esc, resolved: bool) -> str:
+    from status_page import STATUS_AR, IMPACT_AR  # noqa: E402
+    cls = "inc resolved" if resolved else "inc"
+    out = [f'<div class="{cls}"><b>{esc(inc["title"])}</b> '
+           f'<span class="mut">{STATUS_AR.get(inc["status"], inc["status"])}'
+           f' · {IMPACT_AR.get(inc["impact"], inc["impact"])}'
+           f' · بدأ {esc(inc["started_at"][:16])}']
+    if resolved and inc.get("resolved_at"):
+        out.append(f' · انتهى {esc(inc["resolved_at"][:16])}')
+    out.append("</span>")
+    for u in inc["updates"]:
+        if u["message"]:
+            out.append(f'<div class="tl">🕒 {esc(u["created_at"][:16])} — '
+                       f'{esc(u["message"])}</div>')
+    out.append("</div>")
+    return "".join(out)
 
 @app.get("/api/alert-emails")
 @limiter.limit("60/minute")
