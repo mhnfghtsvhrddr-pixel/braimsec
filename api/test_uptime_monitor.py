@@ -76,6 +76,14 @@ def _clean_uptime_state(ctx):
     yield
     db = get_db()
     db.execute("DELETE FROM notifications WHERE event LIKE 'uptime.%'")
+    db.execute("DELETE FROM uptime_daily WHERE target_id IN "
+               "(SELECT id FROM uptime_targets WHERE org_id IN (?,?))",
+               (ctx["org"], ctx["other"]))
+    db.execute("DELETE FROM incident_updates WHERE incident_id IN "
+               "(SELECT id FROM incidents WHERE org_id IN (?,?))",
+               (ctx["org"], ctx["other"]))
+    db.execute("DELETE FROM incidents WHERE org_id IN (?,?)",
+               (ctx["org"], ctx["other"]))
     db.execute("DELETE FROM uptime_targets WHERE org_id IN (?,?)",
                (ctx["org"], ctx["other"]))
     db.commit()
