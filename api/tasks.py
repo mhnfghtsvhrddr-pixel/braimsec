@@ -280,6 +280,40 @@ def _run_incremental(db, scan_id, org_id, target_dir, baseline_scan_id):
     return merged, baseline_scan_id
 
 
+# --- Scan failure classification (retry policy) ---------------------------
+# A failed scan attempt is either DETERMINISTIC (retrying can never
+# succeed — fail the scan immediately, exactly one attempt) or TRANSIENT
+# (timeouts, OOM-kills, engine hiccups — keep the Celery retry policy).
+#
+# Conservative deterministic set: a missing/unusable target, docker
+# rejecting the invocation (rc=125: invalid --cpus etc.), engine
+# misconfiguration, and broken baseline references. Timeouts
+# (SoftTimeLimitExceeded, engine "timed out") and OOM-killed runs
+# (rc=137) stay transient: host/memory pressure varies between attempts.
+_DETERMINISTIC_FAILURE_MARKERS = (
+    "not a directory",  # missing/unusable target
+    "rc=125",  # docker rejected the invocation (invalid --cpus etc.)
+    "binary not found",  # engine misconfiguration
+    "baseline scan not found",
+    "belongs to another organization",
+    "baseline scan is not complete",
+)
+
+
+def is_deterministic_failure(exc: BaseException) -> bool:
+    """True if retrying the scan after this failure can never succeed.
+
+    Add new never-retryable error kinds here (message substrings,
+    lowercased before matching). When in doubt, leave a failure
+    transient: an unnecessary retry costs minutes, a wrongly-skipped
+    retry costs a scan that could have succeeded.
+    """
+    if isinstance(exc, SoftTimeLimitExceeded):
+        return False  # timeouts stay transient: host pressure varies
+    msg = str(exc).lower()
+    return any(m in msg for m in _DETERMINISTIC_FAILURE_MARKERS)
+
+
 def _run_scan_impl(task_self, scan_id: str, target_dir: str,
                    cleanup_dir: str | None = None,
                    baseline_scan_id: str | None = None):
@@ -295,7 +329,8 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
     try:
         # Idempotency: a redelivered task must not duplicate findings.
         db.execute("DELETE FROM findings WHERE scan_id=?", (scan_id,))
-        db.execute("UPDATE scans SET status='running', started_at=? WHERE id=?",
+        db.execute("UPDATE scans SET status='running', started_at=?,"
+                   " attempt_count=COALESCE(attempt_count,0)+1 WHERE id=?",
                    (_now_iso(), scan_id))
         db.commit()
         scan_row = db.execute("SELECT org_id FROM scans WHERE id=?",
@@ -340,12 +375,17 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
         _audit_scan_terminal(db, scan_id, "scan.completed",
                              {"total_findings": len(findings)})
     except Exception as e:  # noqa: BLE001 - prototype: record failure
-        # A timed-out scan is not transient: retrying would burn two more
-        # full time-limit windows. Fail it outright.
-        timed_out = isinstance(e, SoftTimeLimitExceeded)
-        if timed_out or task_self.request.retries >= (task_self.max_retries or 0):
-            error = (f"scan exceeded the {SCAN_SOFT_LIMIT_S}s time limit"
-                     if timed_out else str(e))
+        # Deterministic failures (bad target, docker arg errors, engine
+        # misconfiguration, broken baselines) can never succeed on retry:
+        # fail the scan immediately instead of burning attempts. Everything
+        # else (timeouts, OOM-kills, engine hiccups) keeps the retry policy
+        # with backoff, keeping the target dir alive for the next attempt.
+        if (is_deterministic_failure(e)
+                or task_self.request.retries >= (task_self.max_retries or 0)):
+            if isinstance(e, SoftTimeLimitExceeded):
+                error = (f"scan exceeded the {SCAN_SOFT_LIMIT_S}s time limit")
+            else:
+                error = str(e)
             db.execute(
                 "UPDATE scans SET status='failed', finished_at=?, error=?"
                 " WHERE id=?", (_now_iso(), error, scan_id))
@@ -353,8 +393,6 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
             _audit_scan_terminal(db, scan_id, "scan.failed",
                                  {"error": error[:200]})
         else:
-            # Transient engine failure (e.g. binary hiccup): retry with backoff,
-            # keeping the target dir alive for the next attempt.
             will_retry = True
             raise task_self.retry(exc=e, countdown=2 ** task_self.request.retries * 10)
     finally:
