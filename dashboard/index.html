@@ -488,6 +488,20 @@
       <button class="btn-ghost" onclick="loadIncidents()">↻ تحديث</button>
     </div>
     <div id="incidents-wrap"></div>
+    <h4 style="margin:1.2rem 0 0.6rem;">🛠️ نوافذ الصيانة المجدولة</h4>
+    <p style="font-size:0.85rem;opacity:0.75;margin-bottom:0.7rem">
+      أثناء نافذة الصيانة تُكتم تنبيهات التوقف (وتُسجَّل كمكتمة بسجل التنبيهات)
+      ولا يُفتح حادث تلقائي — مع استمرار الفحص والتسجيل اليومي.
+    </p>
+    <div class="row" style="gap:0.6rem;flex-wrap:wrap;margin-bottom:0.8rem">
+      <input id="mnt-title" placeholder="عنوان الصيانة" style="min-width:170px" aria-label="عنوان الصيانة">
+      <input id="mnt-start" type="datetime-local" dir="ltr" aria-label="بداية الصيانة">
+      <input id="mnt-end" type="datetime-local" dir="ltr" aria-label="نهاية الصيانة">
+      <input id="mnt-desc" placeholder="وصف (اختياري)" style="min-width:150px" aria-label="وصف الصيانة">
+      <button class="btn" onclick="addMaintenance()">＋ جدولة صيانة</button>
+      <button class="btn-ghost" onclick="loadMaintenance()">↻ تحديث</button>
+    </div>
+    <div id="maintenance-wrap"></div>
   </section>
 
   <!-- التقارير التنفيذية المجدولة: PDF يُرسل بالإيميل تلقائياً -->
@@ -876,7 +890,7 @@ function showView(name) {
   clearInterval(pollTimer);
   if (name === "scans") loadScans();
   if (name === "trends") loadTrends();
-  if (name === "sched") { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); loadCertDomains(); loadUptimeTargets(); loadStatusPages(); loadIncidents(); }
+  if (name === "sched") { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); loadCertDomains(); loadUptimeTargets(); loadStatusPages(); loadIncidents(); loadMaintenance(); }
   if (name === "reports") loadReportSchedules();
   if (name === "vcs") loadVcsRepos();
   if (name === "billing") loadBilling();
@@ -2006,6 +2020,68 @@ async function delIncident(id) {
   if (!confirm("حذف هذا الحادث وسجل تحديثاته؟")) return;
   await api(`/incidents/${id}`, { method: "DELETE" });
   loadIncidents();
+}
+
+/* ---------- نوافذ الصيانة المجدولة ---------- */
+const MNT_ST = { scheduled: "📅 مجدولة", active: "🟡 جارية الآن",
+  completed: "✅ مكتملة", cancelled: "🚫 ملغاة" };
+
+async function loadMaintenance() {
+  const el = document.getElementById("maintenance-wrap");
+  let rows;
+  try {
+    rows = await api("/maintenance");
+  } catch (e) {
+    el.innerHTML = `<div class="empty"><p>تعذّر التحميل: ${esc(e.message)}</p></div>`;
+    return;
+  }
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty"><p>لا نوافذ صيانة مجدولة 🛠️</p></div>`;
+    return;
+  }
+  el.innerHTML = `<table><thead><tr>
+      <th>العنوان</th><th>من</th><th>إلى</th><th>الحالة</th><th>إجراءات</th>
+    </tr></thead><tbody>` + rows.map(w => `
+    <tr>
+      <td>${esc(w.title)}<br><span class="mut" style="font-size:0.8rem">${esc(w.description || "")}</span></td>
+      <td dir="ltr">${esc((w.starts_at || "").slice(0, 16).replace("T", " "))}</td>
+      <td dir="ltr">${esc((w.ends_at || "").slice(0, 16).replace("T", " "))}</td>
+      <td>${MNT_ST[w.status] || esc(w.status)}</td>
+      <td style="white-space:nowrap">
+        ${(w.status === "scheduled" || w.status === "active")
+          ? `<button class="btn-ghost" onclick="cancelMaintenance(${w.id})" title="إلغاء">🚫</button>` : ""}
+        <button class="btn-ghost" onclick="delMaintenance(${w.id})" title="حذف">🗑️</button>
+      </td>
+    </tr>`).join("") + `</tbody></table>`;
+}
+
+async function addMaintenance() {
+  const title = document.getElementById("mnt-title").value.trim();
+  const startV = document.getElementById("mnt-start").value;
+  const endV = document.getElementById("mnt-end").value;
+  const description = document.getElementById("mnt-desc").value.trim();
+  if (!title || !startV || !endV) return;
+  try {
+    await api("/maintenance", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, description,
+        starts_at: new Date(startV).toISOString(),
+        ends_at: new Date(endV).toISOString(), target_ids: [] }) });
+    document.getElementById("mnt-title").value = "";
+    document.getElementById("mnt-desc").value = "";
+    loadMaintenance();
+  } catch (e) { alert("تعذّرت الجدولة: " + e.message); }
+}
+
+async function cancelMaintenance(id) {
+  if (!confirm("إلغاء نافذة الصيانة هذه؟")) return;
+  await api(`/maintenance/${id}/cancel`, { method: "POST" });
+  loadMaintenance();
+}
+
+async function delMaintenance(id) {
+  if (!confirm("حذف نافذة الصيانة هذه؟")) return;
+  await api(`/maintenance/${id}`, { method: "DELETE" });
+  loadMaintenance();
 }
 
 /* ---------- المستودعات: فحص تلقائي عند push ---------- */
