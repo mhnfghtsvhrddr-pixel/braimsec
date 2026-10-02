@@ -254,7 +254,7 @@ print(d["scan_id"])')"
     echo "$results" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-fs = d.get('findings', d if isinstance(d, list) else [])
+fs = d['findings'] if isinstance(d, dict) else d
 print(len(fs), 'findings')
 for f in fs:
     print(' -', f.get('tool'), '|', f.get('rule_id'), '|', f.get('file'))
