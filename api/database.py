@@ -391,6 +391,19 @@ CREATE TABLE IF NOT EXISTS maintenance_windows (
 );
 CREATE INDEX IF NOT EXISTS idx_maintenance_org
     ON maintenance_windows(org_id, starts_at);
+-- Per-org uptime digest configuration (weekly/monthly email summary of
+-- uptime %, latency, incidents and expiring certs). One row per org.
+CREATE TABLE IF NOT EXISTS uptime_digests (
+    org_id TEXT PRIMARY KEY REFERENCES organizations(id),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    frequency TEXT NOT NULL DEFAULT 'weekly',
+    day_of_week INTEGER NOT NULL DEFAULT 0,
+    day_of_month INTEGER NOT NULL DEFAULT 1,
+    hour INTEGER NOT NULL DEFAULT 8,
+    last_sent_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 -- Per-org HMAC signing secrets for outgoing alert webhooks. The secret is
 -- generated server-side, Fernet-encrypted at rest, and shown to the org
 -- owner exactly once at rotation time (never returned by the API again).
