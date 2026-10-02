@@ -1826,10 +1826,11 @@ _doc("GET", "/api/status/{slug}",
      summary="Public status page (JSON)",
      description=("Read-only public summary of an enabled status page: "
                   "overall state (operational|degraded|outage), targets "
-                  "with 90-day uptime bars, active and recent public "
-                  "incidents with timelines, and active/upcoming "
-                  "maintenance windows. No authentication. 404 for "
-                  "unknown or disabled pages."),
+                  "with 90-day uptime bars, TLS certificate states, "
+                  "active and recent public incidents with timelines, "
+                  "and active/upcoming maintenance windows. An expired "
+                  "certificate counts as an outage. No authentication. "
+                  "404 for unknown or disabled pages."),
      auth="public", min_role=None, org_scope=False, rate_limit="30/minute",
      params=[
          _param("slug", "path", "string",
@@ -1839,7 +1840,8 @@ _doc("GET", "/api/status/{slug}",
      responses={
          "200": _resp("Public status summary.",
                       {"title": "Acme status", "overall": "operational",
-                       "targets": [], "incidents": [], "maintenance": []}),
+                       "targets": [], "incidents": [], "maintenance": [],
+                       "certificates": []}),
          "404": _err404("Status page"),
          "429": _err429(),
      })
