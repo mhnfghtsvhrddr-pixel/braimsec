@@ -4285,6 +4285,8 @@ async def crypto_checkout(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(400, "Invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Invalid JSON body")
     tier = str(body.get("tier", "")).lower()
     cycle = str(body.get("cycle", "")).lower()
     email = str(body.get("email", "")).strip()
@@ -4351,6 +4353,8 @@ async def paddle_checkout(request: Request):
     try:
         body = await request.json()
     except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+    if not isinstance(body, dict):
         raise HTTPException(400, "Invalid JSON body")
     tier = str(body.get("tier", "")).lower()
     cycle = str(body.get("cycle", "")).lower()
@@ -4471,10 +4475,14 @@ async def paddle_webhook(request: Request):
     Public by necessity (called by Paddle). Security is the HMAC-SHA256
     signature in the Paddle-Signature header (ts=<unix>;h1=<hex> over
     "{ts}:{raw_body}"), verified against PADDLE_WEBHOOK_SECRET with a
-    300s replay window. Always returns 200 on a valid signature (even for
-    ignored events) so Paddle stops retrying; 400 only on bad
+    300s replay window. 503 while Paddle checkout is unconfigured (so
+    Paddle retries after the operator configures it); 200 on a valid
+    signature otherwise (even for ignored events); 400 only on bad
     signature/JSON.
     """
+    if not paddlepay.price_map():
+        return JSONResponse({"ok": False, "error": "Paddle is not configured"},
+                            status_code=503)
     secret = os.environ.get("PADDLE_WEBHOOK_SECRET", "")
     raw = await request.body()
     sig = request.headers.get("Paddle-Signature")
