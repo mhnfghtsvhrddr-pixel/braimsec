@@ -51,7 +51,7 @@ def _zip_bytes():
 def _upload(client, filename, payload, workdir, monkeypatch):
     """Route tempfile.mkdtemp into a known dir so we can assert containment."""
     workdir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(main.tempfile, "mkdtemp", lambda prefix="": str(workdir))
+    monkeypatch.setattr(main.tempfile, "mkdtemp", lambda prefix="", dir=None: str(workdir))
     return client.post(
         "/api/scans",
         headers=HEADERS,
