@@ -2652,6 +2652,91 @@ async def delete_maintenance(request: Request, window_id: int):
         db.close()
 
 
+# ---------------------------------------------------------------------------
+# Uptime digest (scheduled email summary)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/uptime-digest/config")
+@limiter.limit("60/minute")
+async def get_digest_config(request: Request):
+    """Get this org's digest configuration (viewer+)."""
+    require_org_scope(request)
+    from uptime_digest import get_config  # noqa: E402
+    db = get_db()
+    try:
+        cfg = get_config(db, request.state.org_id)
+        return cfg or {"org_id": request.state.org_id, "enabled": 0,
+                       "frequency": "weekly", "day_of_week": 0,
+                       "day_of_month": 1, "hour": 8,
+                       "last_sent_at": None}
+    finally:
+        db.close()
+
+
+@app.put("/api/uptime-digest/config")
+@limiter.limit("10/minute")
+async def put_digest_config(request: Request):
+    """Create/update the digest schedule (member+)."""
+    require_role(request, "member")
+    from uptime_digest import upsert_config  # noqa: E402
+    body = await request.json()
+    db = get_db()
+    try:
+        try:
+            row = upsert_config(
+                db, request.state.org_id,
+                bool(body.get("enabled", True)),
+                body.get("frequency", "weekly") or "weekly",
+                body.get("day_of_week", 0), body.get("day_of_month", 1),
+                body.get("hour", 8))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        from audit import log_event  # noqa: E402
+        log_event(request.state.org_id, request.state.actor,
+                  "uptime_digest.configured",
+                  detail={"frequency": row["frequency"],
+                          "enabled": row["enabled"]}, db=db)
+        db.commit()
+        return row
+    finally:
+        db.close()
+
+
+@app.get("/api/uptime-digest/preview")
+@limiter.limit("30/minute")
+async def preview_digest(request: Request, days: str = "7"):
+    """Preview the digest JSON without sending (viewer+)."""
+    require_org_scope(request)
+    from uptime_digest import build_digest  # noqa: E402
+    db = get_db()
+    try:
+        try:
+            return build_digest(db, request.state.org_id, int(days))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    finally:
+        db.close()
+
+
+@app.post("/api/uptime-digest/send")
+@limiter.limit("10/minute")
+async def send_digest_now(request: Request):
+    """Build and email the digest right now (member+)."""
+    require_role(request, "member")
+    from uptime_digest import send_digest  # noqa: E402
+    body = await request.json()
+    db = get_db()
+    try:
+        try:
+            days = int(body.get("days", 7))
+            return send_digest(db, request.state.org_id, days,
+                               actor=request.state.actor)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    finally:
+        db.close()
+
+
 # Public (unauthenticated, read-only) status page ---------------------------
 @app.get("/api/status/{slug}")
 @limiter.limit("30/minute")
