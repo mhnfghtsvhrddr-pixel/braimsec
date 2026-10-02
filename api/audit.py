@@ -85,6 +85,11 @@ ACTIONS = frozenset({
     "incident.resolved",
     "incident.removed",
     "incident_update.added",
+    "maintenance.created",
+    "maintenance.updated",
+    "maintenance.deleted",
+    "maintenance.cancelled",
+    "maintenance.alert_suppressed",
 })
 
 # Archival never touches recent history: the window must be at least
