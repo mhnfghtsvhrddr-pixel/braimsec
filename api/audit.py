@@ -43,6 +43,8 @@ ACTIONS = frozenset({
     "api_key.revoked",
     "user.registered",
     "user.login",
+    "user.password_reset_requested",
+    "user.password_reset",
     "project.created",
     "project.deleted",
     "audit_log.archived",
