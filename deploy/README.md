@@ -81,6 +81,17 @@ rule edits do NOT take effect until you rebuild).
 - Celery is real here (`BRAIMSEC_BROKER_URL` set); the inline fallback only
   applies to dev.
 
+## Backups
+
+- `deploy/backup.sh` runs nightly from root's crontab
+  (`0 2 * * * /root/braimsec-backup.sh`): online SQLite snapshot via the
+  backup API (WAL-safe, zero downtime) + `uploads/` and `scans/`, with
+  `PRAGMA integrity_check` on every snapshot and 7-daily / 4-weekly
+  (Mondays) retention under `/root/backups/`.
+- Restore: `tar -xzf /root/backups/daily/braimsec-YYYY-MM-DD.tar.gz -C /tmp/r`
+  then point the stack at `/tmp/r/braimsec-backup.db` (or copy it over
+  `/data/braimsec/braimsec.db` while the stack is stopped).
+
 ## Scheduled scans + alerts
 
 - Customers create schedules in the dashboard (⏰ tab) or via
