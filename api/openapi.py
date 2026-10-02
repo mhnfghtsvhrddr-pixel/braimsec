@@ -2689,9 +2689,10 @@ _doc("POST", "/api/webhooks/paddle",
                   "Paddle-Signature header (ts=<unix>;h1=<hex>), with a "
                   "300s replay window. Subscription events activate/sync/"
                   "cancel the org subscription idempotently on event_id; "
-                  "transaction events are logged only. Returns 200 on a "
-                  "valid signature even for ignored events so Paddle stops "
-                  "retrying; 400 only on a bad signature or bad JSON."),
+                  "transaction events are logged only. 503 while Paddle is "
+                  "unconfigured (Paddle retries); 200 on a valid signature "
+                  "even for ignored events; 400 only on a bad signature "
+                  "or bad JSON."),
      auth="public", min_role=None, org_scope=False, rate_limit="600/minute",
      params=[],
      request_body=_body("Paddle webhook event.",
@@ -2710,6 +2711,7 @@ _doc("POST", "/api/webhooks/paddle",
          "400": _resp("Bad signature or bad JSON.",
                       {"ok": False, "error": "bad signature"}),
          "429": _err429(),
+         "503": _err503("Paddle is not configured"),
      })
 
 # ============================ Auth =========================================
