@@ -33,6 +33,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+import urllib.request
+import urllib.error
 import uuid
 
 log = logging.getLogger(__name__)
@@ -45,6 +47,16 @@ CONTAINER_TIMEOUT = int(os.environ.get("BRAIMSEC_SCAN_CONTAINER_TIMEOUT",
 CONTAINER_MEMORY = os.environ.get("BRAIMSEC_SCAN_CONTAINER_MEMORY", "2g")
 CONTAINER_CPUS = os.environ.get("BRAIMSEC_SCAN_CONTAINER_CPUS", "2")
 CONTAINER_PIDS = os.environ.get("BRAIMSEC_SCAN_CONTAINER_PIDS", "256")
+
+# Dedicated runner service: when BRAIMSEC_RUNNER_URL is set, sandbox scans
+# go through its narrow scan-only HTTP API instead of talking to the Docker
+# API directly. Production compose always sets it (the worker then holds no
+# Docker access at all); the direct docker-CLI path below remains as the
+# local-dev fallback.
+RUNNER_URL = os.environ.get("BRAIMSEC_RUNNER_URL", "").strip().rstrip("/")
+RUNNER_API_KEY = os.environ.get("RUNNER_API_KEY", "")
+RUNNER_HTTP_TIMEOUT = int(os.environ.get("BRAIMSEC_RUNNER_HTTP_TIMEOUT",
+                                         str(CONTAINER_TIMEOUT + 120)))
 
 
 class ContainerError(RuntimeError):
@@ -129,6 +141,53 @@ def build_command(target_dir: str, out_dir: str,
     return cmd
 
 
+def _run_via_runner(target_dir: str, scope=None) -> list:
+    """Ask the dedicated runner service to run the sandbox scan.
+
+    Fail closed: any transport error, auth failure, or runner-side error
+    raises ContainerError — never fall back to an un-isolated scan.
+    """
+    if not RUNNER_API_KEY:
+        raise ContainerError("BRAIMSEC_RUNNER_URL is set but RUNNER_API_KEY "
+                             "is missing; refusing to scan")
+    target_abs = os.path.abspath(target_dir)
+    payload = json.dumps({
+        "target_dir": target_abs,
+        "scope": [os.path.abspath(p) for p in scope] if scope else [],
+    }).encode()
+    req = urllib.request.Request(
+        RUNNER_URL + "/v1/scans", data=payload, method="POST",
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {RUNNER_API_KEY}"})
+    started = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=RUNNER_HTTP_TIMEOUT) as resp:
+            body = json.load(resp)
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.load(e).get("error", "")
+        except Exception:
+            detail = ""
+        raise ContainerError(
+            f"runner rejected the scan (HTTP {e.code}): {detail}") from e
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise ContainerError(f"runner unreachable: {e}") from e
+    findings = body.get("findings")
+    if not isinstance(findings, list):
+        raise ContainerError("runner returned no findings list")
+    for item in findings:
+        fp = item.get("file", "")
+        if fp.startswith("/target/"):
+            item["file"] = os.path.join(target_abs, fp[len("/target/"):])
+        elif fp == "/target":
+            item["file"] = target_abs
+    # Ops proof, same greppable shape as the direct path below.
+    log.info("runner scan ok: container=%s image=%s target=%s findings=%d "
+             "(%.1fs)", body.get("container", "?"), body.get("image", "?"),
+             target_abs, len(findings), time.time() - started)
+    return findings
+
+
 def run_scan_isolated(target_dir: str, scope=None) -> list:
     """Run semgrep+gitleaks in the sandbox container on target_dir.
 
@@ -137,6 +196,8 @@ def run_scan_isolated(target_dir: str, scope=None) -> list:
     Returns findings with host-absolute `file` paths.
     Raises ContainerError on any failure (fail closed).
     """
+    if RUNNER_URL:
+        return _run_via_runner(target_dir, scope)
     if not _docker_available():
         raise ContainerError(
             f"docker binary not found ({DOCKER_BIN!r}); refusing to scan "
