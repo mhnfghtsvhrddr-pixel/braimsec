@@ -459,6 +459,37 @@
     <div id="uptime-wrap"></div>
   </section>
 
+  <!-- صفحات الحالة العامة وسجل الحوادث -->
+  <section id="status-section">
+    <h3 style="margin: 1.6rem 0 1rem;">📢 صفحة الحالة العامة وسجل الحوادث</h3>
+    <p style="font-size:0.85rem;opacity:0.75;margin-bottom:0.7rem">
+      صفحة حالة عامة (مثل صفحات GitHub/Stripe) تعرض جهوزية روابطك وآخر 90 يوماً
+      والحوادث — تُفتح الحوادث تلقائياً عند توقف أي رابط وتُغلق عند عودته.
+    </p>
+    <div class="row" style="gap:0.6rem;flex-wrap:wrap;margin-bottom:0.8rem">
+      <input id="sp-title" placeholder="عنوان الصفحة (مثال: حالة خدماتنا)" style="min-width:200px" aria-label="عنوان الصفحة">
+      <input id="sp-slug" placeholder="slug (مثال: acme)" dir="ltr" style="width:150px" aria-label="المعرف">
+      <input id="sp-headline" placeholder="سطر تعريفي (اختياري)" style="min-width:180px" aria-label="سطر تعريفي">
+      <button class="btn" onclick="addStatusPage()">＋ نشر صفحة</button>
+      <button class="btn-ghost" onclick="loadStatusPages()">↻ تحديث</button>
+    </div>
+    <div id="status-pages-wrap"></div>
+    <h4 style="margin:1.2rem 0 0.6rem;">🚨 سجل الحوادث</h4>
+    <div class="row" style="gap:0.6rem;flex-wrap:wrap;margin-bottom:0.8rem">
+      <input id="inc-title" placeholder="عنوان الحادث (اختياري — يُفتح تلقائياً عند التوقف)" style="min-width:220px" aria-label="عنوان الحادث">
+      <select id="inc-impact" aria-label="التأثير">
+        <option value="minor">تأثير بسيط</option>
+        <option value="major">تأثير كبير</option>
+        <option value="critical">تأثير حرج</option>
+        <option value="none">بلا تأثير</option>
+      </select>
+      <input id="inc-msg" placeholder="رسالة أولى (اختياري)" style="min-width:180px" aria-label="رسالة أولى">
+      <button class="btn" onclick="addIncident()">＋ فتح حادث يدوياً</button>
+      <button class="btn-ghost" onclick="loadIncidents()">↻ تحديث</button>
+    </div>
+    <div id="incidents-wrap"></div>
+  </section>
+
   <!-- التقارير التنفيذية المجدولة: PDF يُرسل بالإيميل تلقائياً -->
   <section id="view-reports" hidden>
     <div class="toolbar">
@@ -845,7 +876,7 @@ function showView(name) {
   clearInterval(pollTimer);
   if (name === "scans") loadScans();
   if (name === "trends") loadTrends();
-  if (name === "sched") { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); loadCertDomains(); loadUptimeTargets(); }
+  if (name === "sched") { loadSchedules(); loadAlertEmails(); loadAlertChannels(); loadNotifications(); loadCertDomains(); loadUptimeTargets(); loadStatusPages(); loadIncidents(); }
   if (name === "reports") loadReportSchedules();
   if (name === "vcs") loadVcsRepos();
   if (name === "billing") loadBilling();
@@ -1844,6 +1875,137 @@ async function toggleUptimeTarget(id, enabled) {
   await api(`/uptime-targets/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ enabled: !!enabled }) });
   loadUptimeTargets();
+}
+
+/* ---------- صفحات الحالة العامة والحوادث ---------- */
+const INC_ST = { investigating: "🔍 قيد التحقيق", identified: "📌 تم تحديد المشكلة",
+  monitoring: "👀 قيد المراقبة", resolved: "✅ تم الحل" };
+const INC_IMP = { none: "بلا تأثير", minor: "تأثير بسيط", major: "تأثير كبير", critical: "تأثير حرج" };
+
+async function loadStatusPages() {
+  const el = document.getElementById("status-pages-wrap");
+  let rows;
+  try {
+    rows = await api("/status-pages");
+  } catch (e) {
+    el.innerHTML = `<div class="empty"><p>تعذّر التحميل: ${esc(e.message)}</p></div>`;
+    return;
+  }
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty"><p>لا صفحات منشورة — أنشر صفحة ليتمكن عملاؤك من متابعة حالة خدماتك 📢</p></div>`;
+    return;
+  }
+  const origin = window.location.origin;
+  el.innerHTML = `<table><thead><tr>
+      <th>العنوان</th><th>الرابط العام</th><th>الحالة</th><th>إجراءات</th>
+    </tr></thead><tbody>` + rows.map(p => {
+    const pub = `${origin}/status/${esc(p.slug)}`;
+    return `
+    <tr>
+      <td>${esc(p.title)}<br><span class="mut" style="font-size:0.8rem">${esc(p.headline || "")}</span></td>
+      <td dir="ltr"><a href="${pub}" target="_blank" rel="noopener">${pub}</a></td>
+      <td>${p.enabled ? "🟢 منشورة" : "⏸️ مخفية"}</td>
+      <td style="white-space:nowrap">
+        <button class="btn-ghost" onclick="toggleStatusPage(${p.id}, ${p.enabled ? 0 : 1})" title="${p.enabled ? "إخفاء" : "نشر"}">${p.enabled ? "⏸️" : "▶️"}</button>
+        <button class="btn-ghost" onclick="delStatusPage(${p.id})" title="حذف">🗑️</button>
+      </td>
+    </tr>`; }).join("") + `</tbody></table>`;
+}
+
+async function addStatusPage() {
+  const title = document.getElementById("sp-title").value.trim();
+  const slug = document.getElementById("sp-slug").value.trim();
+  const headline = document.getElementById("sp-headline").value.trim();
+  if (!title || !slug) return;
+  try {
+    await api("/status-pages", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, slug, headline }) });
+    document.getElementById("sp-title").value = "";
+    document.getElementById("sp-slug").value = "";
+    document.getElementById("sp-headline").value = "";
+    loadStatusPages();
+  } catch (e) { alert("تعذّر النشر: " + e.message); }
+}
+
+async function delStatusPage(id) {
+  if (!confirm("حذف صفحة الحالة هذه؟")) return;
+  await api(`/status-pages/${id}`, { method: "DELETE" });
+  loadStatusPages();
+}
+
+async function toggleStatusPage(id, enabled) {
+  await api(`/status-pages/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: !!enabled }) });
+  loadStatusPages();
+}
+
+async function loadIncidents() {
+  const el = document.getElementById("incidents-wrap");
+  let rows;
+  try {
+    rows = await api("/incidents");
+  } catch (e) {
+    el.innerHTML = `<div class="empty"><p>تعذّر التحميل: ${esc(e.message)}</p></div>`;
+    return;
+  }
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty"><p>لا حوادث — سيُفتح حادث تلقائياً عند توقف أي رابط مراقَب ✅</p></div>`;
+    return;
+  }
+  el.innerHTML = rows.map(i => `
+    <div class="card" style="margin-bottom:0.7rem">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:0.6rem;flex-wrap:wrap">
+        <b>${esc(i.title)}</b>
+        <span style="font-size:0.85rem">${INC_ST[i.status] || esc(i.status)} · ${INC_IMP[i.impact] || esc(i.impact)}
+        ${i.created_by === "system" ? " · 🤖 تلقائي" : ""}</span>
+      </div>
+      <div class="mut" style="font-size:0.8rem">بدأ ${esc((i.started_at || "").slice(0, 16).replace("T", " "))}
+      ${i.resolved_at ? " · انتهى " + esc(i.resolved_at.slice(0, 16).replace("T", " ")) : ""}</div>
+      <div class="row" style="gap:0.5rem;margin-top:0.5rem;flex-wrap:wrap">
+        <input id="incupd-${i.id}" placeholder="إضافة تحديث…" style="flex:1;min-width:160px" aria-label="تحديث الحادث">
+        <button class="btn-ghost" onclick="addIncidentUpdate(${i.id})">＋ تحديث</button>
+        ${i.status !== "resolved" ? `<button class="btn-ghost" onclick="resolveIncident(${i.id})">✅ حلّ</button>` : ""}
+        <button class="btn-ghost" onclick="delIncident(${i.id})" title="حذف">🗑️</button>
+      </div>
+    </div>`).join("");
+}
+
+async function addIncident() {
+  const title = document.getElementById("inc-title").value.trim();
+  const impact = document.getElementById("inc-impact").value;
+  const message = document.getElementById("inc-msg").value.trim();
+  if (!title) return;
+  try {
+    await api("/incidents", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, impact, message }) });
+    document.getElementById("inc-title").value = "";
+    document.getElementById("inc-msg").value = "";
+    loadIncidents();
+  } catch (e) { alert("تعذّر فتح الحادث: " + e.message); }
+}
+
+async function addIncidentUpdate(id) {
+  const input = document.getElementById(`incupd-${id}`);
+  const message = input.value.trim();
+  if (!message) return;
+  try {
+    await api(`/incidents/${id}/updates`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }) });
+    loadIncidents();
+  } catch (e) { alert("تعذّر إضافة التحديث: " + e.message); }
+}
+
+async function resolveIncident(id) {
+  if (!confirm("إغلاق هذا الحادث؟")) return;
+  await api(`/incidents/${id}/resolve`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}) });
+  loadIncidents();
+}
+
+async function delIncident(id) {
+  if (!confirm("حذف هذا الحادث وسجل تحديثاته؟")) return;
+  await api(`/incidents/${id}`, { method: "DELETE" });
+  loadIncidents();
 }
 
 /* ---------- المستودعات: فحص تلقائي عند push ---------- */
