@@ -29,11 +29,12 @@ rule edits do NOT take effect until you rebuild).
 - `BRAIMSEC_SCAN_RUNNER_IMAGE=braimsec/scan-runner:1.0`
 - Fail-closed: a container error fails the scan loudly — never a silent
   fallback to un-isolated engines.
-- Security note: the worker mounts `/var/run/docker.sock` to spawn the
-  sandbox. A compromised worker with that socket is host-root equivalent.
-  Accepted for phase 1 (the worker already runs the engines); revisit with
-  a socket proxy or a dedicated runner service before multi-tenant
-  production.
+- Security: the worker holds NO Docker access. Sandbox containers are
+  spawned only by the dedicated `runner` service (narrow scan-only HTTP
+  API, Bearer auth), which reaches the daemon through a filtered
+  socket proxy (container/image API only — build/swarm/secrets/networks/
+  volumes denied). The runner's API cannot express exec, custom images
+  or extra mounts, and targets are contained under `uploads/`.
 
 ## Files
 
@@ -41,7 +42,7 @@ rule edits do NOT take effect until you rebuild).
 |---|---|
 | `Dockerfile.prod` | Full image: API + worker + semgrep 1.178.0 + gitleaks 8.28.0 (both pinned to the versions our rules/evals were validated against) + Docker CLI (worker spawns the sandbox) + all code (`api/`, `scanner/`, `ai/`, `reports/`, `dashboard/`). The old root `Dockerfile` only copied `api/`+`dashboard/` and no engines — it cannot run a real scan. |
 | `docker/scan-runner.Dockerfile` | Minimal sandbox image: semgrep 1.178.0 + gitleaks 8.28.0 (both sha256-pinned) + vendored ruleset snapshot + `runner-entrypoint.py`. Built once per server (see Deploy stages). |
-| `docker-compose.prod.yml` | `redis` (AOF persistence), `api` (uvicorn), `worker` (celery, concurrency 2), `beat` (celery beat — fires the scan scheduler every 60s), `caddy` (auto-TLS reverse proxy). api+worker share the host data dir at the same path (required: worker must see the same scan targets and the same `BRAIMSEC_DB`, and sandbox mounts use absolute paths). |
+| `docker-compose.prod.yml` | `redis` (AOF persistence), `api` (uvicorn), `worker` (celery, concurrency 2), `beat` (celery beat — fires the scan scheduler every 60s), `caddy` (auto-TLS reverse proxy), `runner` (dedicated scan-runner service — the only component that spawns sandbox containers, via the filtered `socket-proxy`). api+worker+runner share the host data dir at the same path (required: the worker must see the same scan targets and the same `BRAIMSEC_DB`, and sandbox mounts use absolute host paths). |
 | `deploy.sh` | **One-command provision + deploy + smoke test** (run as root on the server): installs Docker (official repo), bootstraps `.env` (auto-detects the public IP for stage 1, generates the master API key), creates the data dir, builds the scan-runner image, starts the stack, waits for health, then runs the smoke test (health, plans, end-to-end scan with findings, sandbox proof from worker logs). `--domain api.braimsec.world` for stage 2, `--rebuild-runner`, `--skip-smoke`, `--smoke-only`. |
 | `Caddyfile` | Templated by `SITE_ADDRESS`: `http://<ip>` for smoke test, `api.braimsec.world` for production (automatic Let's Encrypt). |
 | `.env.example` | Copy to `.env`; never commit real secrets. |
