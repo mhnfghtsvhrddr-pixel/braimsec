@@ -983,6 +983,14 @@ async function api(path, opts) {
     "X-API-Key": localStorage.getItem("braimsec_key") || ""
   });
   const r = await fetch(API + path, opts);
+  if (r.status === 401) {
+    // Dead credential (expired/revoked session, rotated or deleted key):
+    // drop it so the user is not stuck retrying the same invalid token.
+    localStorage.removeItem("braimsec_key");
+    const inp = document.getElementById("api-key");
+    if (inp) inp.value = "";
+    if (typeof refreshAuthBtn === "function") refreshAuthBtn();
+  }
   if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || ("خطأ " + r.status)); }
   return r.json();
 }
@@ -1612,7 +1620,7 @@ async function loadSchedules() {
       <div>
         <div class="name">⏰ ${esc(s.name)}</div>
         <div class="meta"><code dir="ltr">${esc(s.target_path)}</code></div>
-        <div class="meta">${freq} — ${esc(s.run_time)} (${esc(s.timezone)}) — تنبيه: ${SEV_TH_AR[s.alert_severity] || s.alert_severity}</div>
+        <div class="meta">${freq} — ${esc(s.run_time)} (${esc(s.timezone)}) — تنبيه: ${esc(SEV_TH_AR[s.alert_severity] || s.alert_severity)}</div>
         <div class="meta">التالي: ${fmtDT(s.next_run_at)}${s.last_run_at ? " — آخر تشغيل: " + fmtDT(s.last_run_at) : ""}</div>
         ${s.last_error ? `<div class="meta" style="color:var(--red)">⚠️ ${esc(s.last_error)}</div>` : ""}
       </div>
@@ -1831,7 +1839,7 @@ async function loadNotifications() {
       <td>${fmtDT(n.created_at)}</td>
       <td>${evAr[n.event] || esc(n.event)}</td>
       <td title="${esc(n.recipient || n.webhook_url || "")}">${chAr[n.channel] || esc(n.channel || "webhook")}</td>
-      <td><span class="sev sev-${n.severity}">${esc(n.severity)}</span></td>
+      <td><span class="sev sev-${esc(n.severity)}">${esc(n.severity)}</span></td>
       <td>${n.new_count}</td>
       <td>${stBadge(n.status)}${resendBtn(n)}</td>
       <td>${n.attempts}${n.error ? ` <span title="${esc(n.error)}" style="color:var(--red)">⚠️</span>` : ""}</td>
