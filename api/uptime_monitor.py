@@ -65,6 +65,16 @@ def validate_target(hostname: str, port: int, path: str,
     return host, port, _norm_path(path), check_interval_s
 
 
+def validate_latency_warn_ms(value: int | None) -> int | None:
+    """Normalize the slow-response threshold (ms), or None to disable."""
+    if value is None:
+        return None
+    value = int(value)
+    if not (100 <= value <= 120000):
+        raise ValueError("latency_warn_ms must be 100..120000")
+    return value
+
+
 def probe(target: dict) -> dict:
     """HTTP GET the target. Returns a dict, never raises.
 
@@ -161,9 +171,51 @@ def _url_of(payload: dict) -> str:
     return f"{scheme}://{host}{port}{payload.get('path', '/')}"
 
 
+def _texts_slow(payload: dict) -> dict:
+    url = _url_of(payload)
+    lat = payload.get("latency_ms")
+    thr = payload.get("threshold_ms")
+    return {
+        "telegram": (f"🟡 BraimSec: بطء الاستجابة\n«{url}»\n"
+                     f"زمن الاستجابة: {lat}ms (الحد: {thr}ms) ⚠️"),
+        "slack": (f":warning: *BraimSec: بطء الاستجابة*\n`{url}`\n"
+                  f"الزمن: {lat}ms (الحد: {thr}ms)"),
+        "email_subject": f"🟡 BraimSec: بطء {payload['hostname']}",
+        "email_text": (f"BraimSec: زمن استجابة مرتفع\n\nالرابط: {url}\n"
+                       f"زمن الاستجابة: {lat}ms\nالحد المضبوط: {thr}ms\n"),
+        "email_html": (f'<html dir="rtl" lang="ar"><body>'
+                       f'<h2>🟡 بطء الاستجابة</h2>'
+                       f'<p>الرابط: <b>{url}</b></p>'
+                       f'<p>زمن الاستجابة: <b>{lat}ms</b> '
+                       f'(الحد: {thr}ms)</p></body></html>'),
+        "teams_title": "🟡 BraimSec: بطء الاستجابة",
+        "teams_facts": [("الرابط", url),
+                        ("زمن الاستجابة", f"{lat}ms"),
+                        ("الحد", f"{thr}ms")],
+    }
+
+
+def _texts_fast(payload: dict) -> dict:
+    url = _url_of(payload)
+    lat = payload.get("latency_ms")
+    return {
+        "telegram": f"🟢 BraimSec: عاد زمن الاستجابة طبيعياً\n«{url}» ({lat}ms) ✅",
+        "slack": f":large_green_circle: *BraimSec: زمن الاستجابة طبيعي*\n`{url}` ({lat}ms)",
+        "email_subject": f"🟢 BraimSec: تحسّن زمن {payload['hostname']}",
+        "email_text": f"BraimSec: عاد زمن الاستجابة طبيعياً\n\nالرابط: {url}\nالزمن: {lat}ms\n",
+        "email_html": (f'<html dir="rtl" lang="ar"><body>'
+                       f'<h2>🟢 زمن الاستجابة طبيعي</h2>'
+                       f'<p>الرابط: <b>{url}</b> ({lat}ms)</p></body></html>'),
+        "teams_title": "🟢 BraimSec: زمن الاستجابة طبيعي",
+        "teams_facts": [("الرابط", url), ("زمن الاستجابة", f"{lat}ms")],
+    }
+
+
 from alert_fanout import register_text_builder as _register  # noqa: E402
 _register("uptime.down", _texts_down)
 _register("uptime.recovered", _texts_recovered)
+_register("uptime.slow", _texts_slow)
+_register("uptime.fast", _texts_fast)
 
 
 # ---------------------------------------------------------------------------
@@ -184,10 +236,12 @@ def add_target(db, org_id: str, hostname: str, port: int = 443,
                path: str = "/", use_https: bool = True,
                expected_status: int | None = None, keyword: str = "",
                check_interval_s: int = DEFAULT_INTERVAL_S,
-               webhook_url: str = "") -> dict:
+               webhook_url: str = "",
+               latency_warn_ms: int | None = None) -> dict:
     host, port, path, interval = validate_target(
         hostname, port, path, check_interval_s, expected_status,
         keyword or "")
+    warn_ms = validate_latency_warn_ms(latency_warn_ms)
     exists = db.execute(
         "SELECT id FROM uptime_targets WHERE org_id=? AND hostname=?"
         " AND port=? AND path=?",
@@ -197,10 +251,11 @@ def add_target(db, org_id: str, hostname: str, port: int = 443,
     cur = db.execute(
         "INSERT INTO uptime_targets (org_id, hostname, port, path, use_https,"
         " expected_status, keyword, check_interval_s, webhook_url, enabled,"
-        " last_status, consecutive_failures, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?, 'never', 0, ?)",
+        " latency_warn_ms, last_status, consecutive_failures, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?, 'never', 0, ?)",
         (org_id, host, port, path, 1 if use_https else 0, expected_status,
-         keyword or "", interval, webhook_url or "", 1, _now_iso()))
+         keyword or "", interval, webhook_url or "", 1, warn_ms,
+         _now_iso()))
     db.commit()
     return dict(db.execute("SELECT * FROM uptime_targets WHERE id=?",
                            (cur.lastrowid,)).fetchone())
@@ -223,14 +278,49 @@ def _down_alert_due(target: dict) -> bool:
         >= REPEAT_ALERT_S
 
 
+def _slow_alert_due(target: dict) -> bool:
+    if target.get("last_slow_alert_event") != "uptime.slow":
+        return True
+    if not target.get("last_slow_alerted_at"):
+        return True
+    try:
+        last = datetime.fromisoformat(target["last_slow_alerted_at"])
+    except ValueError:
+        return True
+    return (datetime.now(timezone.utc) - last).total_seconds() \
+        >= REPEAT_ALERT_S
+
+
+def _mark_alerted(db, target_id: int, event: str):
+    """Advance the anti-spam clock for an alert (down-family vs
+    slow-family columns)."""
+    now = _now_iso()
+    if event in ("uptime.slow", "uptime.fast"):
+        db.execute("UPDATE uptime_targets SET last_slow_alerted_at=?,"
+                   " last_slow_alert_event=? WHERE id=?",
+                   (now, event, target_id))
+    else:
+        db.execute("UPDATE uptime_targets SET last_alerted_at=?,"
+                   " last_alert_event=? WHERE id=?",
+                   (now, event, target_id))
+    db.commit()
+
+
+# A recovery/fast event is announced only if its matching alert was
+# announced: an alert suppressed by maintenance stays silent.
+_SILENT_AFTER_SUPPRESSED = {"uptime.recovered": "uptime.down",
+                            "uptime.fast": "uptime.slow"}
+
+
 def _alert(db, target: dict, event: str, severity: str, payload: dict,
            audit_action: str):
     from audit import log_event  # noqa: E402
     scan_id = f"uptime:{target['id']}"
-    # Maintenance suppression: while a window covers the target, a down
-    # alert is logged (status='suppressed') but never sent and no incident
-    # opens. The repeat window still advances so the log isn't spammed.
-    if event == "uptime.down":
+    # Maintenance suppression: while a window covers the target, a down or
+    # slow alert is logged (status='suppressed') but never sent and no
+    # incident opens. The repeat window still advances so the log isn't
+    # spammed.
+    if event in ("uptime.down", "uptime.slow"):
         window = maintenance.is_target_in_maintenance(
             db, target["org_id"], target["id"])
         if window is not None:
@@ -242,10 +332,7 @@ def _alert(db, target: dict, event: str, severity: str, payload: dict,
                    recipient=window["title"][:120], status="suppressed",
                    attempts=0, error=None, payload=payload)
             db.commit()
-            db.execute("UPDATE uptime_targets SET last_alerted_at=?,"
-                       " last_alert_event=? WHERE id=?",
-                       (_now_iso(), event, target["id"]))
-            db.commit()
+            _mark_alerted(db, target["id"], event)
             log_event(target["org_id"], "system",
                       "maintenance.alert_suppressed",
                       detail={"target_id": target["id"],
@@ -255,30 +342,22 @@ def _alert(db, target: dict, event: str, severity: str, payload: dict,
                       db=db)
             db.commit()
             return
-    # A recovery is announced only if the outage itself was announced:
-    # a down alert that was suppressed by maintenance stays silent.
-    if event == "uptime.recovered":
-        last_down = db.execute(
+    if event in _SILENT_AFTER_SUPPRESSED:
+        prev = _SILENT_AFTER_SUPPRESSED[event]
+        last_prev = db.execute(
             "SELECT status FROM notifications WHERE org_id=?"
-            " AND scan_id=? AND event='uptime.down'"
+            " AND scan_id=? AND event=?"
             " ORDER BY created_at DESC, id DESC LIMIT 1",
-            (target["org_id"], scan_id)).fetchone()
-        if last_down is not None and last_down["status"] == "suppressed":
-            db.execute("UPDATE uptime_targets SET last_alerted_at=?,"
-                       " last_alert_event=? WHERE id=?",
-                       (_now_iso(), event, target["id"]))
-            db.commit()
+            (target["org_id"], scan_id, prev)).fetchone()
+        if last_prev is not None and last_prev["status"] == "suppressed":
+            _mark_alerted(db, target["id"], event)
             return
     from alert_fanout import fan_out  # noqa: E402
     fan_out(db, target["org_id"], event=event,
             scan_id=scan_id, severity=severity,
             count=payload.get("failures", 0),
             webhook_url=target.get("webhook_url") or "", payload=payload)
-    db.execute("UPDATE uptime_targets SET last_alerted_at=?,"
-               " last_alert_event=? WHERE id=?",
-               (_now_iso(), event, target["id"]))
-    db.commit()
-    from audit import log_event  # noqa: E402
+    _mark_alerted(db, target["id"], event)
     log_event(target["org_id"], "system", audit_action,
               detail={"target_id": target["id"],
                       "hostname": target["hostname"],
@@ -325,6 +404,24 @@ def check_target(db, target: dict) -> dict:
                 payload = _payload(target, res, "uptime.recovered")
                 _alert(db, target, "uptime.recovered", "info", payload,
                        "uptime_target.recovered")
+            # Latency-degradation alerts: a successful probe slower than
+            # the target's threshold raises uptime.slow (warning); the
+            # first probe back under it raises uptime.fast (info).
+            warn_ms = target.get("latency_warn_ms")
+            lat = res["latency_ms"]
+            if warn_ms and lat is not None and lat >= warn_ms:
+                # NOTE: `target` still carries the pre-check slow-alert
+                # state, which is exactly what the anti-spam check needs.
+                if _slow_alert_due(target):
+                    payload = _payload(target, res, "uptime.slow")
+                    payload["threshold_ms"] = warn_ms
+                    _alert(db, target, "uptime.slow", "warning", payload,
+                           "uptime_target.slow")
+            elif target.get("last_slow_alert_event") == "uptime.slow":
+                payload = _payload(target, res, "uptime.fast")
+                payload["threshold_ms"] = warn_ms or 0
+                _alert(db, target, "uptime.fast", "info", payload,
+                       "uptime_target.fast")
             return {"status": "up", "http_status": res["http_status"],
                     "latency_ms": res["latency_ms"]}
         # down
