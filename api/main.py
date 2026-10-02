@@ -545,7 +545,20 @@ async def create_scan(
                 raise HTTPException(
                     413, f"ZIP exceeds {MAX_ZIP_BYTES // (1024 * 1024)} MB limit")
             chunks.append(chunk)
-        workdir = tempfile.mkdtemp(prefix="braimsec-")
+        # The extracted target must live where the worker can see it.
+        # Production (docker compose): api and worker are separate
+        # containers sharing only HOST_DATA_DIR at the same path, so a
+        # workdir under the api container's private /tmp is invisible to
+        # the worker and every upload scan fails with
+        # "target not a directory". Dev (same host): system temp is fine.
+        # (Found by the first real production smoke test, 2026-10-02.)
+        shared = os.environ.get("HOST_DATA_DIR")
+        if shared:
+            upload_root = os.path.join(shared, "uploads")
+            os.makedirs(upload_root, exist_ok=True)
+        else:
+            upload_root = tempfile.gettempdir()
+        workdir = tempfile.mkdtemp(prefix="braimsec-", dir=upload_root)
         # Sanitize the client-supplied filename: a value like "../../evil"
         # would otherwise escape workdir (path traversal on the upload itself).
         # basename() strips every directory component; "." / ".." / empty
