@@ -409,6 +409,8 @@
         <option value="cert.expiry">🔒 انتهاء شهادة TLS</option>
         <option value="uptime.down">🔴 توقف الموقع</option>
         <option value="uptime.recovered">🟢 عودة الموقع</option>
+        <option value="uptime.slow">🟡 بطء الاستجابة</option>
+        <option value="uptime.fast">🟢 تحسّن الاستجابة</option>
       </select>
       <select id="notif-f-status" onchange="loadNotifications()" aria-label="فلتر الحالة">
         <option value="">كل الحالات</option>
@@ -452,6 +454,7 @@
       <input id="up-path" placeholder="/health" dir="ltr" style="width:130px" aria-label="المسار">
       <label style="font-size:0.85rem"><input type="checkbox" id="up-https" checked> HTTPS</label>
       <input id="up-kw" placeholder="كلمة مفتاحية (اختياري)" style="width:150px" aria-label="كلمة مفتاحية">
+      <input id="up-lat" type="number" placeholder="حد البطء ms (اختياري)" min="100" max="120000" style="width:130px" dir="ltr" aria-label="حد زمن الاستجابة">
       <input id="up-wh" placeholder="Webhook URL (اختياري)" dir="ltr" style="min-width:190px" aria-label="Webhook URL">
       <button class="btn" onclick="addUptimeTarget()">＋ إضافة رابط</button>
       <button class="btn-ghost" onclick="loadUptimeTargets()">↻ تحديث</button>
@@ -1697,7 +1700,8 @@ async function loadNotifications() {
   const evAr = { "schedule.alert": "نتائج جديدة", "schedule.failed": "فشل الفحص",
     "vcs.alert": "نتائج جديدة (مستودع)", "vcs.failed": "فشل الفحص (مستودع)",
     "cert.expiry": "🔒 انتهاء شهادة TLS",
-    "uptime.down": "🔴 توقف الموقع", "uptime.recovered": "🟢 عودة الموقع" };
+    "uptime.down": "🔴 توقف الموقع", "uptime.recovered": "🟢 عودة الموقع",
+    "uptime.slow": "🟡 بطء الاستجابة", "uptime.fast": "🟢 تحسّن الاستجابة" };
   const chAr = { "webhook": "🔗 ويبهوك", "email": "📧 إيميل",
     "telegram": "✈️ تيليجرام", "slack": "💬 Slack", "teams": "👔 Teams" };
   const stBadge = s => s === "sent" ? `<span class="badge b-done">أُرسل</span>`
@@ -1831,16 +1835,18 @@ async function loadUptimeTargets() {
     return;
   }
   el.innerHTML = `<table><thead><tr>
-      <th>الرابط</th><th>الحالة</th><th>كود</th><th>زمن الاستجابة</th><th>آخر فحص</th><th>إجراءات</th>
+      <th>الرابط</th><th>الحالة</th><th>كود</th><th>زمن الاستجابة</th><th>حد البطء</th><th>آخر فحص</th><th>إجراءات</th>
     </tr></thead><tbody>` + rows.map(t => {
     const scheme = t.use_https ? "https" : "http";
     const url = `${scheme}://${esc(t.hostname)}:${t.port}${esc(t.path)}`;
+    const slow = t.latency_warn_ms && t.last_latency_ms != null && t.last_latency_ms >= t.latency_warn_ms;
     return `
     <tr>
       <td dir="ltr">${url}</td>
-      <td>${UP_ST[t.last_status] || esc(t.last_status)}${t.enabled ? "" : " ⏸️"}</td>
+      <td>${UP_ST[t.last_status] || esc(t.last_status)}${t.enabled ? "" : " ⏸️"}${slow ? " 🟡" : ""}</td>
       <td dir="ltr">${t.last_http_code ?? "—"}</td>
       <td dir="ltr">${t.last_latency_ms == null ? "—" : t.last_latency_ms + "ms"}</td>
+      <td dir="ltr">${t.latency_warn_ms == null ? "—" : t.latency_warn_ms + "ms"}</td>
       <td dir="ltr">${t.last_checked_at ? esc(t.last_checked_at.slice(0, 16).replace("T", " ")) : "—"}</td>
       <td style="white-space:nowrap">
         <button class="btn-ghost" onclick="checkUptimeTarget(${t.id})" title="فحص الآن">🔍</button>
@@ -1857,10 +1863,13 @@ async function addUptimeTarget() {
   const use_https = document.getElementById("up-https").checked;
   const keyword = document.getElementById("up-kw").value.trim();
   const webhook_url = document.getElementById("up-wh").value.trim();
+  const latV = document.getElementById("up-lat").value.trim();
   if (!hostname) return;
   try {
+    const payload = { hostname, port, path, use_https, keyword, webhook_url };
+    if (latV) payload.latency_warn_ms = parseInt(latV, 10);
     await api("/uptime-targets", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ hostname, port, path, use_https, keyword, webhook_url }) });
+      body: JSON.stringify(payload) });
     document.getElementById("up-host").value = "";
     document.getElementById("up-kw").value = "";
     document.getElementById("up-wh").value = "";
