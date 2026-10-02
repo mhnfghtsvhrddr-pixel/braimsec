@@ -1141,6 +1141,8 @@ _doc("POST", "/api/webhooks/nowpayments",
          "429": _err429(),
      })
 
+
+
 # ============================ Alerts =======================================
 
 _doc("GET", "/api/notifications",
@@ -2707,6 +2709,86 @@ _doc("POST", "/api/webhooks/paddle",
                        "detail": "fulfilled"}),
          "400": _resp("Bad signature or bad JSON.",
                       {"ok": False, "error": "bad signature"}),
+         "429": _err429(),
+     })
+
+# ============================ Auth =========================================
+
+_doc("POST", "/api/auth/register",
+     tag="Auth",
+     summary="Register account",
+     description=("Register a new customer: creates an org + an owner user "
+                  "and returns a session token (bss_) shown once. The "
+                  "token works as the X-API-Key header everywhere an API "
+                  "key works. Public; 10/min/IP. 409 when the email is "
+                  "taken."),
+     auth="public", min_role=None, org_scope=False, rate_limit="10/minute",
+     params=[],
+     request_body=_body("Registration.",
+                        {"email": "owner@acme.com",
+                         "password": "correct-horse-12"}),
+     responses={
+         "200": _resp("User + one-time session token.",
+                      {"user": {"id": "user_9f8e7d6c5b4a",
+                                "org_id": "org_9f8e7d6c5b4a",
+                                "email": "owner@acme.com", "role": "owner"},
+                       "session_token": "bss_..."}),
+         "400": _err400("A valid email is required"),
+         "409": _err409("Email already registered"),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/auth/login",
+     tag="Auth",
+     summary="Log in",
+     description=("Log in with email + password; returns a session token "
+                  "(bss_) shown once. Public; 10/min/IP. Failures answer "
+                  "401 with a generic message (no account oracle)."),
+     auth="public", min_role=None, org_scope=False, rate_limit="10/minute",
+     params=[],
+     request_body=_body("Credentials.",
+                        {"email": "owner@acme.com",
+                         "password": "correct-horse-12"}),
+     responses={
+         "200": _resp("User + session token.",
+                      {"user": {"id": "user_9f8e7d6c5b4a",
+                                "org_id": "org_9f8e7d6c5b4a",
+                                "email": "owner@acme.com", "role": "owner"},
+                       "session_token": "bss_..."}),
+         "401": _resp("Bad credentials.",
+                      {"detail": "Invalid email or password"}),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/auth/logout",
+     tag="Auth",
+     summary="Log out",
+     description=("Revoke the calling session token. Requires a session "
+                  "(bss_) in the X-API-Key header."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="600/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("Logged out.", {"ok": True}),
+         "400": _err400("No active session to revoke"),
+         "401": _err401(),
+         "429": _err429(),
+     })
+
+_doc("GET", "/api/me",
+     tag="Auth",
+     summary="Who am I",
+     description=("The caller's identity: user profile for session "
+                  "callers, credential type + org for API-key callers."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="600/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("Identity.",
+                      {"type": "user", "user_id": "user_9f8e7d6c5b4a",
+                       "email": "owner@acme.com", "org_id": "org_9f8e7d6c5b4a",
+                       "role": "owner"}),
+         "401": _err401(),
          "429": _err429(),
      })
 
