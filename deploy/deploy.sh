@@ -132,6 +132,16 @@ bootstrap_env() {
     else
         echo "master API key already set"
     fi
+
+    # Shared secret between the worker and the scan-runner service.
+    if [[ -z "$(env_get RUNNER_API_KEY)" ]]; then
+        rkey="bssr_$(openssl rand -hex 32)"
+        env_set RUNNER_API_KEY "$rkey"
+        chmod 600 .env
+        echo "generated runner API key (stored in .env)"
+    else
+        echo "runner API key already set"
+    fi
 }
 
 # ------------------------------------------------------------------ data ---
@@ -262,13 +272,15 @@ assert len(fs) >= 1, 'expected at least 1 finding'
 "
 
     echo "--- 5/5 sandbox proof (worker log must show the isolated run)"
+    # The worker delegates to the runner service; both log a greppable
+    # "… scan ok: container=braimsec-scan-…" line on success.
     proof=""
     for i in 1 2 3 4 5; do
         if ! wlogs=$(docker compose -f docker-compose.prod.yml logs worker 2>&1); then
             echo "WARN: 'docker compose logs worker' failed (attempt $i/5):" >&2
             echo "$wlogs" | tail -3 >&2
         else
-            proof=$(printf '%s\n' "$wlogs" | grep "sandbox scan ok: container=braimsec-scan-" | tail -1)
+            proof=$(printf '%s\n' "$wlogs" | grep -E "(sandbox|runner) scan ok: container=braimsec-scan-" | tail -1)
             [ -n "$proof" ] && break
         fi
         [ "$i" -lt 5 ] && sleep 10
