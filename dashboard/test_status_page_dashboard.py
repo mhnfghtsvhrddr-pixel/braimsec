@@ -54,4 +54,4 @@ def test_status_loader_runs_with_sched_view():
     h = _html()
     assert "loadStatusPages();" in h
     assert "loadIncidents();" in h
-    assert "loadStatusPages(); loadIncidents(); loadMaintenance(); }" in h
+    assert "loadStatusPages(); loadIncidents(); loadMaintenance(); loadDigestConfig(); }" in h
