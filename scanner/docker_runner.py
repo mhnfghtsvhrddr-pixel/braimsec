@@ -61,6 +61,19 @@ def _docker_available() -> bool:
     return shutil.which(DOCKER_BIN) is not None
 
 
+def shared_dir() -> str | None:
+    """The host directory shared with sibling sandbox containers.
+
+    Sandbox containers are spawned via the host docker socket, so any
+    host path mounted into them (-v) is resolved on the HOST, not in the
+    worker container. Paths under the worker's private /tmp would mount
+    as empty host dirs. Production (compose) shares HOST_DATA_DIR at the
+    same path everywhere; dev (same host) returns None -> system temp.
+    """
+    shared = os.environ.get("HOST_DATA_DIR")
+    return shared or None
+
+
 def resolve_cpus() -> str | None:
     """Clamp the sandbox --cpus request to what the host actually has.
 
@@ -132,7 +145,15 @@ def run_scan_isolated(target_dir: str, scope=None) -> list:
     if not os.path.isdir(target_abs):
         raise ContainerError(f"target not a directory: {target_abs}")
 
-    out_dir = tempfile.mkdtemp(prefix="braimsec-sandbox-out-")
+    # The out dir is mounted into the sibling sandbox container, so it
+    # must live on the shared volume too (see shared_dir()).
+    base = shared_dir()
+    if base:
+        os.makedirs(os.path.join(base, "sandbox-out"), exist_ok=True)
+        out_dir = tempfile.mkdtemp(prefix="braimsec-sandbox-out-",
+                                   dir=os.path.join(base, "sandbox-out"))
+    else:
+        out_dir = tempfile.mkdtemp(prefix="braimsec-sandbox-out-")
     container_name = f"braimsec-scan-{uuid.uuid4().hex[:12]}"
     try:
         if scope:
