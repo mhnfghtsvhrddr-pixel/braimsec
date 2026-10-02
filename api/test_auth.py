@@ -239,9 +239,137 @@ def test_me_for_api_key_callers(client):
     assert r.json()["org_id"] == org
 
 
+def test_register_non_dict_body_400(client):
+    r = client.post("/api/auth/register", json=["not", "a", "dict"])
+    assert r.status_code == 400
+
+
+def test_register_non_string_password_400(client):
+    r = client.post("/api/auth/register",
+                    json={"email": f"ns-{os.urandom(4).hex()}@example.com",
+                          "password": 12345})
+    assert r.status_code == 400
+
+
+def test_login_non_string_password_401(client):
+    email = f"lns-{os.urandom(4).hex()}@example.com"
+    _register(client, email=email)
+    r = client.post("/api/auth/login",
+                    json={"email": email, "password": 12345})
+    assert r.status_code == 401
+
+
 def test_session_role_flows_to_rbac(client):
     # Owner sessions can do owner things (rotate keys); member API keys
     # tested elsewhere. Here: session role == owner.
     r = _register(client)
     me = client.get("/api/me", headers=_h(r.json()["session_token"]))
     assert me.json()["role"] == "owner"
+
+
+# ------------------------------------------------------- password reset
+
+def _reset_token_for(client, email):
+    r = _register(client, email=email)
+    user_id = r.json()["user"]["id"]
+    return authmod._create_reset_token(
+        user_id, r.json()["user"]["org_id"]), r
+
+
+def test_forgot_always_200_no_oracle(client):
+    email = f"forgot-{os.urandom(4).hex()}@example.com"
+    _register(client, email=email)
+    for e in [email, "nobody-there@example.com", "bad-email"]:
+        r = client.post("/api/auth/forgot", json={"email": e})
+        assert r.status_code == 200
+        assert r.json() == {"ok": True}
+
+
+def test_forgot_mints_token_for_real_user(client):
+    email = f"fm-{os.urandom(4).hex()}@example.com"
+    _register(client, email=email)
+    client.post("/api/auth/forgot", json={"email": email})
+    db = get_db()
+    n = db.execute(
+        "SELECT COUNT(*) c FROM password_resets pr JOIN users u "
+        "ON u.id=pr.user_id WHERE u.email=? AND pr.used=0",
+        (email,)).fetchone()["c"]
+    db.close()
+    assert n == 1  # SMTP unconfigured: token minted, email not dispatched
+
+
+def test_reset_flow(client):
+    email = f"reset-{os.urandom(4).hex()}@example.com"
+    token, r = _reset_token_for(client, email)
+    old_session = r.json()["session_token"]
+    assert r.status_code == 200
+    rr = client.post("/api/auth/reset",
+                     json={"token": token, "new_password": "brand-new-pass-99"})
+    assert rr.status_code == 200
+    # New password works, old one doesn't.
+    ok = client.post("/api/auth/login",
+                     json={"email": email,
+                           "password": "brand-new-pass-99"})
+    assert ok.status_code == 200
+    bad = client.post("/api/auth/login",
+                      json={"email": email, "password": "correct-horse-12"})
+    assert bad.status_code == 401
+    # All previous sessions revoked.
+    assert client.get("/api/me", headers=_h(old_session)).status_code == 401
+
+
+def test_reset_token_single_use(client):
+    email = f"reuse-{os.urandom(4).hex()}@example.com"
+    token, _ = _reset_token_for(client, email)
+    assert client.post("/api/auth/reset",
+                       json={"token": token,
+                             "new_password": "brand-new-pass-99"}).status_code == 200
+    r2 = client.post("/api/auth/reset",
+                     json={"token": token,
+                           "new_password": "another-new-pass-99"})
+    assert r2.status_code == 400
+
+
+def test_reset_bad_token_400(client):
+    r = client.post("/api/auth/reset",
+                    json={"token": "bsr_" + "0" * 64,
+                          "new_password": "brand-new-pass-99"})
+    assert r.status_code == 400
+    assert r.json()["detail"] == "Invalid or expired reset token"
+
+
+def test_reset_expired_token_400(client):
+    email = f"exp-{os.urandom(4).hex()}@example.com"
+    token, _ = _reset_token_for(client, email)
+    import hashlib
+    db = get_db()
+    db.execute("UPDATE password_resets SET expires_at='2000-01-01T00:00:00+00:00'"
+               " WHERE token_hash=?",
+               (hashlib.sha256(token.encode()).hexdigest(),))
+    db.commit()
+    db.close()
+    r = client.post("/api/auth/reset",
+                    json={"token": token, "new_password": "brand-new-pass-99"})
+    assert r.status_code == 400
+
+
+def test_reset_short_password_400(client):
+    email = f"spw-{os.urandom(4).hex()}@example.com"
+    token, _ = _reset_token_for(client, email)
+    r = client.post("/api/auth/reset",
+                    json={"token": token, "new_password": "short"})
+    assert r.status_code == 400
+
+
+def test_reset_logs_audit(client):
+    email = f"ra-{os.urandom(4).hex()}@example.com"
+    token, r = _reset_token_for(client, email)
+    org_id = r.json()["user"]["org_id"]
+    client.post("/api/auth/reset",
+                json={"token": token, "new_password": "brand-new-pass-99"})
+    db = get_db()
+    row = db.execute(
+        "SELECT action FROM audit_log WHERE org_id=? AND action=?",
+        (org_id, "user.password_reset")).fetchone()
+    db.close()
+    assert row is not None
