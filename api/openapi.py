@@ -1362,8 +1362,12 @@ _doc("POST", "/api/uptime-targets",
                   "keyword. The uptime.down alert fires after 2 consecutive "
                   "failures (anti-flap) and uptime.recovered on the first "
                   "success after a down alert; both fan out to every "
-                  "channel the org configured. Non-public resolved IPs are "
-                  "refused (SSRF guard). Member+, org scope."),
+                  "channel the org configured. latency_warn_ms (100.."
+                  "120000, optional) raises uptime.slow (warning) when a "
+                  "successful probe is slower than the threshold and "
+                  "uptime.fast (info) on the first probe back under it. "
+                  "Non-public resolved IPs are refused (SSRF guard). "
+                  "Member+, org scope."),
      auth="key", min_role="member", org_scope=True, rate_limit="10/minute",
      params=[],
      request_body={
@@ -1372,6 +1376,7 @@ _doc("POST", "/api/uptime-targets",
                          "path": "/health", "use_https": True,
                          "expected_status": 200, "keyword": "ok",
                          "check_interval_s": 300,
+                         "latency_warn_ms": 2000,
                          "webhook_url": "https://hooks.example/up"}}},
      responses={
          "200": _resp("Created target row with live probe state.",
@@ -1388,8 +1393,9 @@ _doc("PATCH", "/api/uptime-targets/{target_id}",
      tag="Alerts",
      summary="Update an uptime target",
      description=("Update keyword, expected_status (100..599, null "
-                  "clears), check_interval_s (60..3600), webhook_url or "
-                  "enabled. Member+, org scope."),
+                  "clears), check_interval_s (60..3600), webhook_url, "
+                  "latency_warn_ms (100..120000, null clears) or enabled. "
+                  "Member+, org scope."),
      auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
      params=[
          _param("target_id", "path", "integer",
