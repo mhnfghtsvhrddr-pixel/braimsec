@@ -64,8 +64,8 @@ def _docker_available() -> bool:
 def shared_dir() -> str | None:
     """The host directory shared with sibling sandbox containers.
 
-    Sandbox containers are spawned via the host docker socket, so any
-    host path mounted into them (-v) is resolved on the HOST, not in the
+    Sandbox containers are spawned via the Docker daemon (production: through
+    the filtered socket proxy), so any host path mounted into them (-v) is resolved on the HOST, not in the
     worker container. Paths under the worker's private /tmp would mount
     as empty host dirs. Production (compose) shares HOST_DATA_DIR at the
     same path everywhere; dev (same host) returns None -> system temp.
