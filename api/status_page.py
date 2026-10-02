@@ -474,9 +474,23 @@ def public_summary(db, slug: str) -> dict | None:
         overall = "outage"
     elif any(i["status"] in OPEN_STATUSES for i in incidents):
         overall = "degraded"
+    certs = [dict(r) for r in db.execute(
+        "SELECT hostname, port, warn_days, last_checked_at,"
+        " last_expires_at, last_days_left, last_status"
+        " FROM cert_domains WHERE org_id=? AND enabled=1"
+        " ORDER BY hostname",
+        (org_id,)).fetchall()]
+    # An expired certificate breaks the site for visitors (browsers
+    # refuse the connection) — surface it as an outage. A merely
+    # expiring one stays informational.
+    if any(c["last_status"] == "expiring"
+           and c["last_days_left"] is not None
+           and c["last_days_left"] <= 0 for c in certs):
+        overall = "outage"
     import maintenance as _mnt  # noqa: E402
     return {"title": page["title"], "headline": page["headline"],
             "slug": page["slug"], "overall": overall,
             "targets": targets, "incidents": incidents,
+            "certificates": certs,
             "maintenance": _mnt.public_windows(db, org_id),
             "generated_at": _now_iso()}
