@@ -256,8 +256,73 @@
     <script>document.getElementById('api-key').value = localStorage.getItem('braimsec_key') || '';</script>
     <button class="btn-ghost" title="إعادة معالج البداية" onclick="obRestart()"
       style="padding:0.45rem 0.7rem;font-size:0.9rem">🧭</button>
+    <button class="btn-ghost" id="auth-btn" onclick="openAuthModal()"
+      style="padding:0.45rem 0.7rem;font-size:0.85rem" title="تسجيل الدخول">👤 دخول</button>
   </div>
 </header>
+
+<div id="auth-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center">
+  <div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:1.5rem;width:min(22rem,90vw)">
+    <h3 style="margin:0 0 1rem">👤 <span id="auth-title">تسجيل الدخول</span></h3>
+    <div style="display:flex;gap:.5rem;margin-bottom:1rem">
+      <button class="btn-ghost" id="tab-login" onclick="authTab('login')">دخول</button>
+      <button class="btn-ghost" id="tab-register" onclick="authTab('register')">حساب جديد</button>
+    </div>
+    <input id="auth-email" type="email" placeholder="البريد الإلكتروني" dir="ltr"
+      style="width:100%;box-sizing:border-box;margin-bottom:.6rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:.5rem .7rem">
+    <input id="auth-pass" type="password" placeholder="كلمة المرور (10 أحرف على الأقل)" dir="ltr"
+      style="width:100%;box-sizing:border-box;margin-bottom:.6rem;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:.5rem .7rem">
+    <p id="auth-err" style="color:#f87171;font-size:.85rem;min-height:1.2em"></p>
+    <div style="display:flex;gap:.5rem;justify-content:flex-end">
+      <button class="btn-ghost" onclick="closeAuthModal()">إلغاء</button>
+      <button class="btn" id="auth-go" onclick="submitAuth()">دخول</button>
+    </div>
+  </div>
+</div>
+<script>
+let _authMode = 'login';
+function openAuthModal(){ document.getElementById('auth-modal').style.display='flex'; authTab(_authMode); }
+function closeAuthModal(){ document.getElementById('auth-modal').style.display='none'; document.getElementById('auth-err').textContent=''; }
+function authTab(m){ _authMode=m;
+  document.getElementById('auth-title').textContent = m==='login'?'تسجيل الدخول':'حساب جديد';
+  document.getElementById('auth-go').textContent = m==='login'?'دخول':'إنشاء الحساب';
+  document.getElementById('tab-login').style.opacity = m==='login'?1:.5;
+  document.getElementById('tab-register').style.opacity = m==='register'?1:.5;
+}
+async function submitAuth(){
+  const email=document.getElementById('auth-email').value.trim();
+  const password=document.getElementById('auth-pass').value;
+  const err=document.getElementById('auth-err'); err.textContent='';
+  try{
+    const r=await fetch('/api/auth/'+_authMode,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.detail||('خطأ '+r.status));
+    localStorage.setItem('braimsec_key', j.session_token);
+    document.getElementById('api-key').value=j.session_token;
+    closeAuthModal(); refreshAuthBtn(); location.reload();
+  }catch(e){ err.textContent=e.message; }
+}
+async function refreshAuthBtn(){
+  const btn=document.getElementById('auth-btn'); if(!btn) return;
+  const key=localStorage.getItem('braimsec_key')||'';
+  if(!key){ btn.textContent='👤 دخول'; btn.onclick=openAuthModal; return; }
+  try{
+    const r=await fetch('/api/me',{headers:{'X-API-Key':key}});
+    if(!r.ok) throw 0;
+    const me=await r.json();
+    if(me.type==='user'){ btn.textContent='👤 '+me.email+' (خروج)'; btn.onclick=logoutAuth; }
+    else { btn.textContent='🔑 مفتاح API'; btn.onclick=openAuthModal; }
+  }catch(e){ btn.textContent='👤 دخول'; btn.onclick=openAuthModal; }
+}
+async function logoutAuth(){
+  const key=localStorage.getItem('braimsec_key')||'';
+  try{ await fetch('/api/auth/logout',{method:'POST',headers:{'X-API-Key':key}}); }catch(e){}
+  localStorage.removeItem('braimsec_key');
+  document.getElementById('api-key').value='';
+  refreshAuthBtn(); location.reload();
+}
+document.addEventListener('DOMContentLoaded', refreshAuthBtn);
+</script>
 
 <nav>
   <button id="nav-scans" class="active" onclick="showView('scans')">📋 الفحوصات</button>
