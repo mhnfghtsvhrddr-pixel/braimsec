@@ -77,6 +77,14 @@ ACTIONS = frozenset({
     "uptime_target.removed",
     "uptime_target.down",
     "uptime_target.recovered",
+    "status_page.created",
+    "status_page.updated",
+    "status_page.deleted",
+    "incident.created",
+    "incident.updated",
+    "incident.resolved",
+    "incident.removed",
+    "incident_update.added",
 })
 
 # Archival never touches recent history: the window must be at least
