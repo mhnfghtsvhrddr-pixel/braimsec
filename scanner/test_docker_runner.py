@@ -175,6 +175,43 @@ def test_resolve_cpus_empty_returns_none(monkeypatch):
     assert docker_runner.resolve_cpus() is None
 
 
+def test_shared_dir_returns_env(monkeypatch):
+    monkeypatch.setenv("HOST_DATA_DIR", "/data/x")
+    assert docker_runner.shared_dir() == "/data/x"
+
+
+def test_shared_dir_none_when_unset(monkeypatch):
+    monkeypatch.delenv("HOST_DATA_DIR", raising=False)
+    assert docker_runner.shared_dir() is None
+
+
+def test_run_scan_isolated_out_dir_on_shared_volume(tmp_path, monkeypatch):
+    """Regression (2026-10-02): the sandbox /out mount is resolved on the
+    HOST (sibling container via docker socket). An out_dir under the
+    worker's private /tmp mounts as an empty host dir, so findings.json
+    is never visible -> 'produced no findings.json' on every scan."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    monkeypatch.setenv("HOST_DATA_DIR", str(shared))
+    monkeypatch.setattr(docker_runner, "_docker_available", lambda: True)
+
+    def fake_run(cmd, **kwargs):
+        host_out = None
+        for i, a in enumerate(cmd):
+            if a == "-v" and cmd[i + 1].endswith(":/out"):
+                host_out = cmd[i + 1].rsplit(":", 1)[0]
+        assert host_out is not None, cmd
+        assert host_out.startswith(str(shared)), host_out
+        with open(os.path.join(host_out, "findings.json"), "w") as f:
+            json.dump([], f)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(docker_runner.subprocess, "run", fake_run)
+    target = tmp_path / "t"
+    target.mkdir()
+    assert run_scan_isolated(str(target)) == []
+
+
 def test_build_command_name_flag(tmp_path):
     cmd = build_command(str(tmp_path), str(tmp_path), name="braimsec-scan-abc123")
     assert "--name" in cmd
