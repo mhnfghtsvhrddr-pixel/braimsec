@@ -2648,6 +2648,68 @@ _doc("POST", "/api/checkout/crypto",
          "503": _err503("Crypto checkout is not configured yet"),
      })
 
+_doc("POST", "/api/checkout/paddle",
+     tag="Billing",
+     summary="Card checkout session",
+     description=("Start a Paddle card checkout session. Public — new "
+                  "customers have no API key yet. Returns the Paddle price "
+                  "id plus the custom_data payload the site hands to the "
+                  "Paddle.js overlay; the webhook attributes the "
+                  "subscription back via that custom_data. A fresh API key "
+                  "is provisioned for NEW orgs and returned once. "
+                  "Renewals (same email) get api_key:null. 503 when card "
+                  "checkout is not configured on the server."),
+     auth="public", min_role=None, org_scope=False, rate_limit="10/minute",
+     params=[],
+     request_body=_body("Checkout request.",
+                        {"tier": "pro", "cycle": "monthly",
+                         "email": "buyer@acme.com"}),
+     responses={
+         "200": _resp("Price id + custom_data + one-time key for new orgs.",
+                      {"price_id": "pri_01h8x...",
+                       "custom_data": {"org_id": "org_9f8e7d6c5b4a",
+                                       "tier": "pro", "cycle": "monthly",
+                                       "email": "buyer@acme.com"},
+                       "api_key": "bs_9f8e7d6c5b4a39281706f5e4d3c2b1a3f4e"
+                                  "5d6c7b",
+                       "key_note": "Save this API key now — it is shown "
+                                   "only once."}),
+         "400": _err400("Unknown tier/cycle"),
+         "429": _err429(),
+         "503": _err503("Card checkout is not configured yet"),
+     })
+
+_doc("POST", "/api/webhooks/paddle",
+     tag="Webhooks",
+     summary="Paddle webhook receiver",
+     description=("Public receiver for Paddle Billing webhooks. Verified "
+                  "with HMAC-SHA256 over \"{ts}:{raw_body}\" against the "
+                  "Paddle-Signature header (ts=<unix>;h1=<hex>), with a "
+                  "300s replay window. Subscription events activate/sync/"
+                  "cancel the org subscription idempotently on event_id; "
+                  "transaction events are logged only. Returns 200 on a "
+                  "valid signature even for ignored events so Paddle stops "
+                  "retrying; 400 only on a bad signature or bad JSON."),
+     auth="public", min_role=None, org_scope=False, rate_limit="600/minute",
+     params=[],
+     request_body=_body("Paddle webhook event.",
+                        {"event_id": "evt_01h8x...",
+                         "event_type": "subscription.activated",
+                         "data": {"id": "sub_01h8x...",
+                                  "status": "active",
+                                  "custom_data": {"org_id": "org_9f8e7d6c5b4a",
+                                                  "tier": "pro",
+                                                  "cycle": "monthly"}}},
+                        content_type="application/json"),
+     responses={
+         "200": _resp("Event processed.",
+                      {"ok": True, "verdict": "fulfilled",
+                       "detail": "fulfilled"}),
+         "400": _resp("Bad signature or bad JSON.",
+                      {"ok": False, "error": "bad signature"}),
+         "429": _err429(),
+     })
+
 _doc("GET", "/api/checkout/status",
      tag="Billing",
      summary="Order status",
