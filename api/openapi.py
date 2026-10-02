@@ -1687,13 +1687,142 @@ _doc("DELETE", "/api/incidents/{incident_id}",
          "429": _err429(),
      })
 
+_doc("GET", "/api/maintenance",
+     tag="Alerts",
+     summary="List maintenance windows",
+     description=("Scheduled maintenance windows, active/upcoming first "
+                  "(viewer+, org scope). ?include_past=1 adds completed "
+                  "and cancelled windows."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="60/minute",
+     params=[
+         _param("include_past", "query", "string",
+                "Include completed/cancelled windows.", False,
+                example="1"),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Array of window rows with derived status.",
+                      [{"id": 1, "title": "DB upgrade",
+                        "status": "scheduled"}]),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/maintenance",
+     tag="Alerts",
+     summary="Schedule a maintenance window",
+     description=("Schedule a maintenance window (member+). While active, "
+                  "uptime.down alerts for covered targets are suppressed "
+                  "(logged, not sent) and no incident auto-opens; probes "
+                  "and daily aggregates keep running. Empty target_ids "
+                  "covers all targets. Max 30 days long."),
+     auth="key", min_role="member", org_scope=True, rate_limit="10/minute",
+     params=[],
+     request_body={
+         "application/json": {
+             "example": {"title": "DB upgrade",
+                         "description": "Primary DB failover test",
+                         "starts_at": "2026-10-03T02:00:00+00:00",
+                         "ends_at": "2026-10-03T04:00:00+00:00",
+                         "target_ids": []}}},
+     responses={
+         "200": _resp("Created window row.",
+                      {"id": 1, "status": "scheduled"}),
+         "400": _err400("ends_at before starts_at / bad target / too long"),
+         "401": _err401(),
+         "403": _err403(),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
+_doc("GET", "/api/maintenance/{window_id}",
+     tag="Alerts",
+     summary="Get a maintenance window",
+     description=("One maintenance window with its derived status "
+                  "(viewer+, org scope)."),
+     auth="key", min_role="viewer", org_scope=True, rate_limit="60/minute",
+     params=[
+         _param("window_id", "path", "integer",
+                "Window row id.", True, example=1),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Window row.", {"id": 1, "status": "active"}),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Window"),
+         "429": _err429(),
+     })
+
+_doc("PATCH", "/api/maintenance/{window_id}",
+     tag="Alerts",
+     summary="Edit a maintenance window",
+     description=("Edit title, description, times or target scope — only "
+                  "while the window is still scheduled (member+, org "
+                  "scope)."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[
+         _param("window_id", "path", "integer",
+                "Window row id.", True, example=1),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Updated window row.", {"id": 1}),
+         "400": _err400("Window already started / invalid times"),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Window"),
+         "429": _err429(),
+     })
+
+_doc("POST", "/api/maintenance/{window_id}/cancel",
+     tag="Alerts",
+     summary="Cancel a maintenance window",
+     description=("Cancel a scheduled or active window (member+, org "
+                  "scope). Alert suppression stops immediately."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[
+         _param("window_id", "path", "integer",
+                "Window row id.", True, example=1),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Cancelled window.", {"id": 1,
+                                            "status": "cancelled"}),
+         "400": _err400("Window already completed"),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Window"),
+         "429": _err429(),
+     })
+
+_doc("DELETE", "/api/maintenance/{window_id}",
+     tag="Alerts",
+     summary="Delete a maintenance window",
+     description=("Delete a maintenance window (member+, org scope)."),
+     auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
+     params=[
+         _param("window_id", "path", "integer",
+                "Window row id.", True, example=1),
+     ],
+     request_body=None,
+     responses={
+         "200": _resp("Deletion confirmation.", {"deleted": 1}),
+         "401": _err401(),
+         "403": _err403(),
+         "404": _err404("Window"),
+         "429": _err429(),
+     })
+
 _doc("GET", "/api/status/{slug}",
      tag="Alerts",
      summary="Public status page (JSON)",
      description=("Read-only public summary of an enabled status page: "
                   "overall state (operational|degraded|outage), targets "
                   "with 90-day uptime bars, active and recent public "
-                  "incidents with timelines. No authentication. 404 for "
+                  "incidents with timelines, and active/upcoming "
+                  "maintenance windows. No authentication. 404 for "
                   "unknown or disabled pages."),
      auth="public", min_role=None, org_scope=False, rate_limit="30/minute",
      params=[
@@ -1704,7 +1833,7 @@ _doc("GET", "/api/status/{slug}",
      responses={
          "200": _resp("Public status summary.",
                       {"title": "Acme status", "overall": "operational",
-                       "targets": [], "incidents": []}),
+                       "targets": [], "incidents": [], "maintenance": []}),
          "404": _err404("Status page"),
          "429": _err429(),
      })
