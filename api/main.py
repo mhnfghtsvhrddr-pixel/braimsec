@@ -100,6 +100,7 @@ from billing import (  # noqa: E402
     usage_count, verify_key,
 )
 import nowpayments_pay as nowpay  # noqa: E402
+import paddle_pay as paddlepay  # noqa: E402
 
 # Reuse the scan engine prototype
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -183,12 +184,17 @@ async def api_key_gate(request: Request, call_next):
     for the audit trail. The full key secret never leaves this middleware.
     /api/plans is public (pricing catalog for the marketing page).
     /api/checkout/crypto is public (new-customer crypto checkout; rate-limited).
+    /api/checkout/paddle is public (new-customer card checkout session;
+    rate-limited).
     /api/webhooks/nowpayments is public (NOWPayments IPN; secured by HMAC).
+    /api/webhooks/paddle is public (Paddle webhooks; secured by HMAC).
     /api/webhooks/github and /api/webhooks/gitlab are public (push receivers;
     secured by HMAC-SHA256 / token respectively).
     """
     public_paths = ("/api/plans", "/api/checkout/crypto",
+                    "/api/checkout/paddle",
                     "/api/checkout/status", "/api/webhooks/nowpayments",
+                    "/api/webhooks/paddle",
                     "/api/webhooks/github", "/api/webhooks/gitlab",
                     "/api/openapi.json",
                     "/api/health")
@@ -4307,6 +4313,58 @@ async def crypto_checkout(request: Request):
                          "Use the API key from your previous checkout.")}
 
 
+# ---------------------------------------------------------------------------
+# Paddle card checkout session. The site calls this first, then opens the
+# Paddle.js overlay with the returned price_id + custom_data. The webhook
+# (/api/webhooks/paddle) attributes the subscription back via custom_data.
+# Deploy-time env: PADDLE_PRICE_MAP (JSON price_id -> [tier, cycle]).
+# ---------------------------------------------------------------------------
+@app.post("/api/checkout/paddle")
+@limiter.limit("10/minute")
+async def paddle_checkout(request: Request):
+    """Start a Paddle card checkout session for a public tier.
+
+    Public (new customers have no API key yet); rate-limited to 10/min/IP.
+    Body: {tier: starter|pro|advanced, cycle: monthly|annual, email: str}
+    Returns: {price_id, custom_data, api_key}
+
+    Key delivery mirrors the crypto checkout: a fresh API key is
+    provisioned for NEW orgs and returned once (shown before payment; it
+    works on the free tier until the Paddle webhook upgrades the plan).
+    Renewals reuse the existing org (same email) and get api_key=null.
+    """
+    pmap = paddlepay.price_map()
+    if not pmap:
+        raise HTTPException(503, "Card checkout is not configured yet")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+    tier = str(body.get("tier", "")).lower()
+    cycle = str(body.get("cycle", "")).lower()
+    email = str(body.get("email", "")).strip()
+    entry = paddlepay.entry_for_tier_cycle(tier, cycle, pmap)
+    if not entry:
+        raise HTTPException(400, "Unknown tier/cycle")
+    if "@" not in email or len(email) > 254:
+        raise HTTPException(400, "A valid email is required")
+    price_id, _plan = entry
+
+    org_id = nowpay.find_org_by_email(email)
+    raw_key = None
+    if org_id is None:
+        org_id = create_org(email)
+        raw_key = provision_key(org_id, name="checkout")
+    ensure_subscription(org_id)
+    return {"price_id": price_id,
+            "custom_data": {"org_id": org_id, "tier": tier,
+                            "cycle": cycle, "email": email},
+            "api_key": raw_key,
+            "key_note": ("Save this API key now — it is shown only once."
+                         if raw_key else
+                         "Use the API key from your previous checkout.")}
+
+
 @app.get("/api/checkout/status")
 @limiter.limit("30/minute")
 async def checkout_status(request: Request, order_id: str = ""):
@@ -4390,6 +4448,33 @@ async def nowpayments_ipn(request: Request):
         return JSONResponse({"ok": False, "error": "bad json"},
                             status_code=400)
     verdict, info = nowpay.fulfill_ipn(payload)
+    return {"ok": True, "verdict": verdict,
+            "detail": info if isinstance(info, str) else "fulfilled"}
+
+
+@app.post("/api/webhooks/paddle")
+async def paddle_webhook(request: Request):
+    """Paddle Billing webhook receiver.
+
+    Public by necessity (called by Paddle). Security is the HMAC-SHA256
+    signature in the Paddle-Signature header (ts=<unix>;h1=<hex> over
+    "{ts}:{raw_body}"), verified against PADDLE_WEBHOOK_SECRET with a
+    300s replay window. Always returns 200 on a valid signature (even for
+    ignored events) so Paddle stops retrying; 400 only on bad
+    signature/JSON.
+    """
+    secret = os.environ.get("PADDLE_WEBHOOK_SECRET", "")
+    raw = await request.body()
+    sig = request.headers.get("Paddle-Signature")
+    if not paddlepay.verify_webhook_signature(raw, sig, secret):
+        return JSONResponse({"ok": False, "error": "bad signature"},
+                            status_code=400)
+    try:
+        event = json.loads(raw.decode())
+    except Exception:
+        return JSONResponse({"ok": False, "error": "bad json"},
+                            status_code=400)
+    verdict, info = paddlepay.fulfill_event(event)
     return {"ok": True, "verdict": verdict,
             "detail": info if isinstance(info, str) else "fulfilled"}
 
