@@ -151,6 +151,30 @@ def test_build_command_default_limits_present(tmp_path):
     assert "--cpus" in cmd
 
 
+def test_resolve_cpus_clamps_to_host_cpus(tmp_path, monkeypatch):
+    """Regression (2026-10-02): docker rejects --cpus 2 on a 1-vCPU host
+    with rc=125, failing every sandboxed scan. The request must clamp."""
+    import os as _os
+    monkeypatch.setattr(docker_runner, "CONTAINER_CPUS", "2")
+    monkeypatch.setattr(_os, "cpu_count", lambda: 1)
+    assert docker_runner.resolve_cpus() == "1"
+    cmd = build_command(str(tmp_path), str(tmp_path))
+    i = cmd.index("--cpus")
+    assert cmd[i + 1] == "1"
+
+
+def test_resolve_cpus_keeps_request_when_host_has_more(tmp_path, monkeypatch):
+    import os as _os
+    monkeypatch.setattr(docker_runner, "CONTAINER_CPUS", "2")
+    monkeypatch.setattr(_os, "cpu_count", lambda: 8)
+    assert docker_runner.resolve_cpus() == "2"
+
+
+def test_resolve_cpus_empty_returns_none(monkeypatch):
+    monkeypatch.setattr(docker_runner, "CONTAINER_CPUS", "")
+    assert docker_runner.resolve_cpus() is None
+
+
 def test_build_command_name_flag(tmp_path):
     cmd = build_command(str(tmp_path), str(tmp_path), name="braimsec-scan-abc123")
     assert "--name" in cmd
