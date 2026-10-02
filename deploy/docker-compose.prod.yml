@@ -66,27 +66,49 @@ services:
       # Sandboxed engines: semgrep+gitleaks run in throwaway containers.
       BRAIMSEC_SCAN_SANDBOX: ${BRAIMSEC_SCAN_SANDBOX:-docker}
       BRAIMSEC_SCAN_RUNNER_IMAGE: ${BRAIMSEC_SCAN_RUNNER_IMAGE:-braimsec/scan-runner:1.0}
-      BRAIMSEC_DOCKER_BIN: /usr/local/bin/docker
-      # The worker drives throwaway sandbox containers through the filtered
-      # socket proxy (never the raw host socket): container/image API
-      # sections only; build/swarm/secrets/networks/volumes stay denied.
-      # Residual risk documented on the socket-proxy service below.
-      DOCKER_HOST: tcp://socket-proxy:2375
+      # Sandboxed engines run behind the dedicated runner service (narrow
+      # scan-only HTTP API). The worker holds NO Docker access at all —
+      # no DOCKER_HOST, no socket, no CLI path to a daemon.
+      BRAIMSEC_RUNNER_URL: http://runner:8001
+      RUNNER_API_KEY: ${RUNNER_API_KEY}
     depends_on:
       - redis
-      - socket-proxy
+      - runner
     volumes:
       - ${HOST_DATA_DIR:-/data/braimsec}:${HOST_DATA_DIR:-/data/braimsec}
     command: ["celery", "-A", "tasks", "worker", "--loglevel=info", "--concurrency=2"]
 
+  # Dedicated scan-runner service: the ONLY component allowed to spawn
+  # sandbox containers, behind a narrow scan-only HTTP API
+  # (POST /v1/scans, Bearer RUNNER_API_KEY). The image, flags, mounts and
+  # target containment are server-side constants — the API exposes no way
+  # to pick an image, add mounts, enable the network, or exec. Internal
+  # compose network only: no published port, no Caddy route.
+  runner:
+    build:
+      context: ..
+      dockerfile: deploy/docker/runner.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      RUNNER_API_KEY: ${RUNNER_API_KEY}
+      HOST_DATA_DIR: ${HOST_DATA_DIR:-/data/braimsec}
+      BRAIMSEC_SCAN_RUNNER_IMAGE: ${BRAIMSEC_SCAN_RUNNER_IMAGE:-braimsec/scan-runner:1.0}
+      DOCKER_HOST: tcp://socket-proxy:2375
+    depends_on:
+      - socket-proxy
+    volumes:
+      # Same host path as everywhere else: -v mounts in sandbox
+      # containers are resolved by the Docker daemon on the HOST.
+      - ${HOST_DATA_DIR:-/data/braimsec}:${HOST_DATA_DIR:-/data/braimsec}
+
   # Filtered Docker API proxy: the ONLY holder of the host socket.
-  # The worker can create/start/stop/remove containers and read images
-  # (everything `docker run --rm` + logs needs); exec, build, swarm,
-  # secrets, volumes, networks and the rest are denied at the proxy.
-  # Residual risk: container CREATE with arbitrary bind mounts is still
-  # possible through the allowed endpoints, so a compromised worker is
-  # not fully contained — the complete fix is a dedicated runner
-  # service with a narrow scan-only API (planned before multi-tenant).
+  # Only the runner service reaches it now (the worker has no Docker
+  # access at all). The runner needs container/image API sections for
+  # `docker run --rm` + logs; build/swarm/secrets/networks/volumes and
+  # the rest stay denied at the proxy. Even if the runner were tricked,
+  # its own API cannot express exec, custom images or extra mounts.
   socket-proxy:
     image: tecnativa/docker-socket-proxy:v0.5.0
     restart: unless-stopped
