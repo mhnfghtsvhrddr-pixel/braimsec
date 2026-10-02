@@ -74,6 +74,8 @@ def _clean_status_state(ctx):
                (ctx["org"], ctx["other"]))
     db.execute("DELETE FROM status_pages WHERE org_id IN (?,?)",
                (ctx["org"], ctx["other"]))
+    db.execute("DELETE FROM cert_domains WHERE org_id IN (?,?)",
+               (ctx["org"], ctx["other"]))
     db.execute("DELETE FROM uptime_targets WHERE org_id IN (?,?)",
                (ctx["org"], ctx["other"]))
     db.commit()
@@ -435,3 +437,58 @@ def test_delete_target_cleans_daily(ctx):
     assert db.execute("SELECT COUNT(*) c FROM uptime_daily"
                       " WHERE target_id=?", (t["id"],)).fetchone()["c"] == 0
     db.close()
+
+
+# -------------------------------------------------- certificates on status
+
+def _add_cert(org, hostname, days_left, status, enabled=1):
+    db = get_db()
+    db.execute(
+        "INSERT INTO cert_domains (org_id, hostname, port, warn_days,"
+        " enabled, last_checked_at, last_expires_at, last_days_left,"
+        " last_status, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (org, hostname, 443, 14, enabled,
+         "2026-10-02T00:00:00+00:00",
+         "2026-12-31T00:00:00+00:00" if days_left and days_left > 0 else None,
+         days_left, status, "2026-10-02T00:00:00+00:00"))
+    db.commit()
+    db.close()
+
+
+def test_public_summary_certificates(ctx):
+    c = TestClient(main.app)
+    c.post("/api/status-pages", json={"title": "حالة", "slug": "cert-st"},
+           headers=_h(ctx["member"]))
+    _add_cert(ctx["org"], "good.example.com", 90, "ok")
+    _add_cert(ctx["org"], "soon.example.com", 5, "expiring")
+
+    r = c.get("/api/status/cert-st")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    certs = data["certificates"]
+    assert len(certs) == 2
+    by_host = {x["hostname"]: x for x in certs}
+    assert by_host["good.example.com"]["last_days_left"] == 90
+    assert by_host["soon.example.com"]["last_status"] == "expiring"
+    # no internal ids leak
+    assert all("id" not in x for x in certs)
+    # an expiring (not yet expired) cert is informational only
+    assert data["overall"] == "operational"
+
+    # an expired certificate counts as an outage
+    _add_cert(ctx["org"], "dead.example.com", 0, "expiring")
+    r = c.get("/api/status/cert-st")
+    assert r.json()["overall"] == "outage"
+
+    # disabled domains are hidden
+    _add_cert(ctx["org"], "hidden.example.com", 90, "ok", enabled=0)
+    r = c.get("/api/status/cert-st")
+    assert len(r.json()["certificates"]) == 3
+
+    # HTML renders the certificate states
+    r = c.get("/status/cert-st")
+    assert r.status_code == 200
+    assert "🔒 شهادات TLS" in r.text
+    assert "good.example.com" in r.text
+    assert "منتهية" in r.text
