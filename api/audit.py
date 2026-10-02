@@ -41,6 +41,8 @@ ACTIONS = frozenset({
     "finding.triaged_bulk",
     "api_key.created",
     "api_key.revoked",
+    "user.registered",
+    "user.login",
     "project.created",
     "project.deleted",
     "audit_log.archived",
