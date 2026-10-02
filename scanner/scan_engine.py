@@ -14,17 +14,24 @@ Env overrides:
     BRAIMSEC_TAINT_RULES  path to the custom taint rule pack
                           (default: scanner/rules/braimsec-taint.yaml;
                            empty string disables it)
+    BRAIMSEC_FULL_RULES=1 force the full semgrep rule set (disables
+                          language scoping; see scanner/rule_scope.py)
+    BRAIMSEC_RULE_SCOPING=0 disable language scoping entirely
     (SCA)         see sca.py: OSV_API_URL, OSV_TIMEOUT, SCA_TIMEOUT, SCA_OFFLINE
 """
 
 import argparse
 import json
+import logging
 import os
 import subprocess
 import sys
 import tempfile
 
 from sca import run_sca
+from rule_scope import select_rule_configs
+
+log = logging.getLogger(__name__)
 
 SEMGREP_BIN = os.environ.get("SEMGREP_BIN", "semgrep")
 GITLEAKS_BIN = os.environ.get("GITLEAKS_BIN", "gitleaks")
@@ -82,6 +89,24 @@ ENGINE_VERSION = "0.1.0"
 SEMGREP_SEVERITY = {"ERROR": "error", "WARNING": "warning", "INFO": "note"}
 
 
+def _custom_pack_specs():
+    """(name, path, languages) for each BraimSec custom rule pack.
+
+    Read from the module constants at call time (not import time) so
+    tests can monkeypatch individual packs. Languages are the semgrep
+    language names the pack's rules target (verified from each pack's
+    `languages:` fields, 2026-10-02).
+    """
+    return [
+        ("taint", BRAIMSEC_TAINT_RULES, {"python"}),
+        ("gha", BRAIMSEC_GHA_RULES, {"yaml"}),
+        ("inject", BRAIMSEC_INJECT_RULES,
+         {"python", "javascript", "typescript"}),
+        ("dockerfile", BRAIMSEC_DOCKERFILE_RULES, {"dockerfile"}),
+        ("terraform", BRAIMSEC_TERRAFORM_RULES, {"terraform"}),
+    ]
+
+
 class EngineError(RuntimeError):
     """A scanner binary is missing or timed out.
 
@@ -114,24 +139,22 @@ def run_semgrep(target, scope=None, base_configs=None):
     base_configs: configs replacing the default ``auto`` registry lookup
     (which needs the network). Used by the sandboxed scan runner, whose
     image vendors a pinned ruleset snapshot at build time. None = ["auto"].
+    Both the base configs and the custom packs are narrowed to the
+    target's detected languages (see scanner/rule_scope.py); pass
+    BRAIMSEC_FULL_RULES=1 to force the full rule set.
     """
     if scope is not None and len(scope) == 0:
         return []  # incremental scan with no changed files: nothing to do
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
         out_path = f.name
+    raw_base = base_configs if base_configs is not None else ["auto"]
+    base, packs = select_rule_configs(raw_base, _custom_pack_specs(),
+                                      target, scope)
     cmd = [SEMGREP_BIN]
-    for cfg in (base_configs if base_configs is not None else ["auto"]):
+    for cfg in base:
         cmd += ["--config", cfg]
-    if BRAIMSEC_TAINT_RULES and os.path.isfile(BRAIMSEC_TAINT_RULES):
-        cmd += ["--config", BRAIMSEC_TAINT_RULES]
-    if BRAIMSEC_GHA_RULES and os.path.isfile(BRAIMSEC_GHA_RULES):
-        cmd += ["--config", BRAIMSEC_GHA_RULES]
-    if BRAIMSEC_INJECT_RULES and os.path.isfile(BRAIMSEC_INJECT_RULES):
-        cmd += ["--config", BRAIMSEC_INJECT_RULES]
-    if BRAIMSEC_DOCKERFILE_RULES and os.path.isfile(BRAIMSEC_DOCKERFILE_RULES):
-        cmd += ["--config", BRAIMSEC_DOCKERFILE_RULES]
-    if BRAIMSEC_TERRAFORM_RULES and os.path.isfile(BRAIMSEC_TERRAFORM_RULES):
-        cmd += ["--config", BRAIMSEC_TERRAFORM_RULES]
+    for _pack_name, pack_path in packs:
+        cmd += ["--config", pack_path]
     targets = list(scope) if scope is not None else [target]
     cmd += ["--json", "-o", out_path] + targets
     try:
