@@ -43,10 +43,15 @@ jobs:
           AI_API_URL: ${{ secrets.BRAIMSEC_AI_API_URL }}
           AI_API_KEY: ${{ secrets.BRAIMSEC_AI_API_KEY }}
           AI_MODEL: ${{ secrets.BRAIMSEC_AI_MODEL }}
+          # PR context via env (never inline ${{ }} in run: — script injection).
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO_SLUG: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           python /tmp/braimsec/scanner/prbot.py . \
-            --base "${{ github.event.pull_request.base.sha }}" \
-            --head "${{ github.event.pull_request.head.sha }}" \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
             --post \
-            --repo-slug "${{ github.repository }}" \
-            --pr "${{ github.event.pull_request.number }}"
+            --repo-slug "$REPO_SLUG" \
+            --pr "$PR_NUMBER"
