@@ -8,7 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates && rm -rf /var/lib/apt/lists/*
 # Pinned snapshot of the registry ruleset ("auto" needs the network, so we
 # freeze it into the image). Sparse checkout keeps the layer small.
-ARG SEMGREP_RULES_REF=main
+# NOTE 2026-10-02: upstream renamed the default branch main -> develop.
+ARG SEMGREP_RULES_REF=develop
 RUN git clone --depth 1 --filter=blob:none --sparse \
         https://github.com/semgrep/semgrep-rules.git /opt/rules && \
     cd /opt/rules && \
