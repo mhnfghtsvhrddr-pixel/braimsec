@@ -42,4 +42,4 @@ def test_maintenance_api_calls_wired():
 
 def test_maintenance_loader_runs_with_sched_view():
     h = _html()
-    assert "loadMaintenance(); }" in h
+    assert "loadMaintenance(); loadDigestConfig(); }" in h
