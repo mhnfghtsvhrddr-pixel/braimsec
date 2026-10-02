@@ -68,8 +68,9 @@ services:
       BRAIMSEC_SCAN_RUNNER_IMAGE: ${BRAIMSEC_SCAN_RUNNER_IMAGE:-braimsec/scan-runner:1.0}
       BRAIMSEC_DOCKER_BIN: /usr/local/bin/docker
       # The worker drives throwaway sandbox containers through the filtered
-      # socket proxy (never the raw host socket): only container/image
-      # endpoints are exposed, exec/build/swarm/secrets stay denied.
+      # socket proxy (never the raw host socket): container/image API
+      # sections only; build/swarm/secrets/networks/volumes stay denied.
+      # Residual risk documented on the socket-proxy service below.
       DOCKER_HOST: tcp://socket-proxy:2375
     depends_on:
       - redis
@@ -90,12 +91,22 @@ services:
     image: tecnativa/docker-socket-proxy:v0.5.0
     restart: unless-stopped
     environment:
+      # Method gate: the proxy denies everything except GET unless POST=1.
+      # `docker run` needs POST (create/start/attach/wait).
+      POST: 1
       CONTAINERS: 1
       IMAGES: 1
       # Everything else defaults to 0 (denied): AUTH, BUILD, COMMIT,
       # CONFIGS, DISTRIBUTION, EXEC, INFO, NETWORKS, NODES, PLUGINS,
       # SECRETS, SERVICES, SESSION, SWARM, SYSTEM, TASKS, VOLUMES.
+      # NOTE: with POST=1 the generic /containers allow-list also covers
+      # the exec endpoint (the image has no separate exec deny) — exec
+      # into running containers is possible via the proxy. This plus
+      # create-with-arbitrary-mounts means a compromised worker is still
+      # not fully contained; the complete fix is a dedicated runner
+      # service with a narrow scan-only API (planned before multi-tenant).
     volumes:
+      # The proxy is the ONLY holder of the host socket (read-only mount).
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
   beat:
