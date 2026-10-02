@@ -262,12 +262,21 @@ assert len(fs) >= 1, 'expected at least 1 finding'
 "
 
     echo "--- 5/5 sandbox proof (worker log must show the isolated run)"
-    if docker compose -f docker-compose.prod.yml logs worker 2>/dev/null \
-        | grep -q "sandbox scan ok: container=braimsec-scan-"; then
-        docker compose -f docker-compose.prod.yml logs worker 2>/dev/null \
-            | grep "sandbox scan ok: container=braimsec-scan-" | tail -1
+    proof=""
+    for i in 1 2 3 4 5; do
+        if ! wlogs=$(docker compose -f docker-compose.prod.yml logs worker 2>&1); then
+            echo "WARN: 'docker compose logs worker' failed (attempt $i/5):" >&2
+            echo "$wlogs" | tail -3 >&2
+        else
+            proof=$(printf '%s\n' "$wlogs" | grep "sandbox scan ok: container=braimsec-scan-" | tail -1)
+            [ -n "$proof" ] && break
+        fi
+        [ "$i" -lt 5 ] && sleep 10
+    done
+    if [ -n "$proof" ]; then
+        echo "$proof"
     else
-        echo "ERROR: no sandbox run found in worker logs" >&2
+        echo "ERROR: no sandbox run found in worker logs after 5 attempts" >&2
         exit 1
     fi
 
