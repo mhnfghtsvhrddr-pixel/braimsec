@@ -101,6 +101,7 @@ from billing import (  # noqa: E402
 )
 import nowpayments_pay as nowpay  # noqa: E402
 import paddle_pay as paddlepay  # noqa: E402
+import dodo_pay as dodopay  # noqa: E402
 import auth as authmod  # noqa: E402
 
 # Reuse the scan engine prototype
@@ -190,15 +191,18 @@ async def api_key_gate(request: Request, call_next):
     /api/checkout/crypto is public (new-customer crypto checkout; rate-limited).
     /api/checkout/paddle is public (new-customer card checkout session;
     rate-limited).
+    /api/checkout/dodo is public (new-customer card checkout session via
+    Dodo Payments; rate-limited).
     /api/webhooks/nowpayments is public (NOWPayments IPN; secured by HMAC).
     /api/webhooks/paddle is public (Paddle webhooks; secured by HMAC).
+    /api/webhooks/dodo is public (Dodo webhooks; Standard Webhooks HMAC).
     /api/webhooks/github and /api/webhooks/gitlab are public (push receivers;
     secured by HMAC-SHA256 / token respectively).
     """
     public_paths = ("/api/plans", "/api/checkout/crypto",
-                    "/api/checkout/paddle",
+                    "/api/checkout/paddle", "/api/checkout/dodo",
                     "/api/checkout/status", "/api/webhooks/nowpayments",
-                    "/api/webhooks/paddle",
+                    "/api/webhooks/paddle", "/api/webhooks/dodo",
                     "/api/webhooks/github", "/api/webhooks/gitlab",
                     "/api/auth/register", "/api/auth/login",
                     "/api/auth/forgot", "/api/auth/reset",
@@ -4508,6 +4512,104 @@ async def paddle_webhook(request: Request):
         return JSONResponse({"ok": False, "error": "bad json"},
                             status_code=400)
     verdict, info = paddlepay.fulfill_event(event)
+    return {"ok": True, "verdict": verdict,
+            "detail": info if isinstance(info, str) else "fulfilled"}
+
+
+# ---------------------------------------------------------------------------
+# Dodo Payments card checkout (Merchant of Record). The checkout endpoint
+# creates a Dodo checkout session for the mapped product; the webhook
+# (/api/webhooks/dodo) attributes the subscription back via metadata.
+# Deploy-time env: DODO_API_KEY, DODO_API_BASE, DODO_WEBHOOK_SECRET,
+# DODO_PRODUCT_MAP (JSON product_id -> [tier, cycle]).
+# ---------------------------------------------------------------------------
+@app.post("/api/checkout/dodo")
+@limiter.limit("10/minute")
+async def dodo_checkout(request: Request):
+    """Start a Dodo card checkout session for a public tier.
+
+    Public (new customers have no API key yet); rate-limited to 10/min/IP.
+    Body: {tier: starter|pro|advanced, cycle: monthly|annual, email: str}
+    Returns: {checkout_url, session_id, api_key}
+
+    Key delivery mirrors the crypto checkout: a fresh API key is
+    provisioned for NEW orgs and returned once (shown before payment; it
+    works on the free tier until the Dodo webhook upgrades the plan).
+    Renewals reuse the existing org (same email) and get api_key=null.
+    """
+    pmap = dodopay.product_map()
+    if not pmap or not dodopay.api_key():
+        raise HTTPException(503, "Card checkout is not configured yet")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Invalid JSON body")
+    tier = str(body.get("tier", "")).lower()
+    cycle = str(body.get("cycle", "")).lower()
+    email = str(body.get("email", "")).strip()
+    entry = dodopay.entry_for_tier_cycle(tier, cycle, pmap)
+    if not entry:
+        raise HTTPException(400, "Unknown tier/cycle")
+    if "@" not in email or len(email) > 254:
+        raise HTTPException(400, "A valid email is required")
+    product_id, _plan = entry
+
+    org_id = nowpay.find_org_by_email(email)
+    raw_key = None
+    if org_id is None:
+        org_id = create_org(email)
+        raw_key = provision_key(org_id, name="checkout")
+    ensure_subscription(org_id)
+    base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    return_url = (f"{base}/checkout/success?provider=dodo"
+                  if base else "https://braimsec.world/checkout/success")
+    try:
+        checkout_url, session_id = dodopay.create_checkout_session(
+            product_id, email,
+            {"org_id": org_id, "tier": tier, "cycle": cycle,
+             "email": email},
+            return_url)
+    except RuntimeError as e:
+        raise HTTPException(502, f"Dodo checkout failed: {e}")
+    return {"checkout_url": checkout_url, "session_id": session_id,
+            "api_key": raw_key,
+            "key_note": ("Save this API key now — it is shown only once."
+                         if raw_key else
+                         "Use the API key from your previous checkout.")}
+
+
+@app.post("/api/webhooks/dodo")
+async def dodo_webhook(request: Request):
+    """Dodo Payments webhook receiver.
+
+    Public by necessity (called by Dodo). Security is the Standard
+    Webhooks HMAC-SHA256 signature (webhook-id / webhook-timestamp /
+    webhook-signature headers over "{id}.{ts}.{raw_body}"), verified
+    against DODO_WEBHOOK_SECRET with a 300s replay window. 503 while
+    Dodo checkout is unconfigured (so Dodo retries after the operator
+    configures it); 200 on a valid signature otherwise (even for ignored
+    events); 400 only on bad signature/JSON.
+    """
+    if not dodopay.product_map() or not dodopay.webhook_secret():
+        return JSONResponse({"ok": False, "error": "Dodo is not configured"},
+                            status_code=503)
+    raw = await request.body()
+    headers = {"webhook-id": request.headers.get("webhook-id"),
+               "webhook-timestamp": request.headers.get("webhook-timestamp"),
+               "webhook-signature":
+                   request.headers.get("webhook-signature")}
+    if not dodopay.verify_webhook_signature(raw, headers):
+        return JSONResponse({"ok": False, "error": "bad signature"},
+                            status_code=400)
+    try:
+        event = json.loads(raw.decode())
+    except Exception:
+        return JSONResponse({"ok": False, "error": "bad json"},
+                            status_code=400)
+    webhook_id = request.headers.get("webhook-id")
+    verdict, info = dodopay.fulfill_event(event, webhook_id)
     return {"ok": True, "verdict": verdict,
             "detail": info if isinstance(info, str) else "fulfilled"}
 
