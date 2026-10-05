@@ -63,9 +63,24 @@ input[type=email]{width:100%;background:#0b0f17;border:1px solid var(--line);bor
     <div class="methods">
       <button id="m-card" class="on" onclick="setMethod('card')">💳 Card</button>
       <button id="m-crypto" onclick="setMethod('crypto')">₮ Crypto (USDT)</button>
+      <button id="m-whish" onclick="setMethod('whish')">🇱🇧 Whish</button>
     </div>
     <button class="pay" id="payBtn" onclick="pay()">Continue →</button>
     <div class="err" id="err"></div>
+    <div class="keybox" id="whishbox" style="border-style:solid;border-color:var(--warn);display:none">
+      <div style="font-size:14px;margin-bottom:10px">🇱🇧 <b>Pay with Whish</b> (Lebanon)</div>
+      <ol style="font-size:14px;line-height:1.9;color:var(--txt);padding-left:20px;margin:0 0 12px">
+        <li>Open your Whish app and send exactly <b id="whishAmount" style="color:var(--warn)"></b> to:</li>
+      </ol>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+        <code id="whishNum" style="font-size:17px;color:var(--ok)">+96176084582</code>
+        <button onclick="copyWhish()" style="background:var(--acc);border:0;color:#fff;border-radius:8px;padding:8px 16px;font-weight:700;cursor:pointer">Copy</button>
+      </div>
+      <ol start="2" style="font-size:14px;line-height:1.9;color:var(--txt);padding-left:20px;margin:0">
+        <li>Email the transfer screenshot to <a href="mailto:support@braimsec.world" style="color:var(--acc)">support@braimsec.world</a> (from the email above).</li>
+        <li>We verify and activate your plan manually — usually within a few hours — and email your API key.</li>
+      </ol>
+    </div>
     <div class="keybox" id="keybox">
       <div style="font-size:13px;color:var(--dim);margin-bottom:8px">🔑 Your API key — shown <b>once</b>, save it now:</div>
       <code id="apikey"></code><br>
@@ -77,6 +92,7 @@ input[type=email]{width:100%;background:#0b0f17;border:1px solid var(--line);bor
 
   <div class="foot">
     Payments are processed by our Merchant of Record (Paddle) for cards and NOWPayments for crypto.
+    Customers in Lebanon can also pay with Whish (manual activation).
     BraimSec never sees or stores your card details. 14-day refund window —
     <a href="https://braimsec.world/refunds.html">refund policy</a>. Questions?
     <a href="mailto:support@braimsec.world">support@braimsec.world</a>
@@ -119,9 +135,20 @@ function setMethod(m){
   method = m;
   document.getElementById("m-card").classList.toggle("on", m === "card");
   document.getElementById("m-crypto").classList.toggle("on", m === "crypto");
+  document.getElementById("m-whish").classList.toggle("on", m === "whish");
+  document.getElementById("whishbox").style.display = "none";
+  document.getElementById("payBtn").style.display = "";
   document.getElementById("methodNote").textContent = m === "card"
     ? "Pay securely by card. You'll complete payment in a secure overlay — BraimSec never sees your card."
-    : "Pay with USDT (BNB Smart Chain). You'll get a hosted invoice; your plan activates automatically once the payment confirms.";
+    : m === "crypto"
+    ? "Pay with USDT (BNB Smart Chain). You'll get a hosted invoice; your plan activates automatically once the payment confirms."
+    : "For customers in Lebanon — pay from your Whish wallet. We activate your plan manually after verifying the transfer.";
+}
+function copyWhish(){
+  const t = document.getElementById("whishNum").textContent;
+  (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject())
+    .then(() => alert("Number copied."))
+    .catch(() => { const s = window.getSelection(); s.selectAllChildren(document.getElementById("whishNum")); });
 }
 function showErr(msg){
   const e = document.getElementById("err");
@@ -133,6 +160,15 @@ async function pay(){
   hideErr();
   const email = document.getElementById("email").value.trim();
   if (!email || email.indexOf("@") < 0){ showErr("Please enter a valid email address."); return; }
+  if (method === "whish"){
+    const amt = cycle === "monthly" ? "$"+TIERS[tier].mo : "$"+TIERS[tier].yr;
+    const per = cycle === "monthly" ? "/month" : "/year";
+    document.getElementById("whishAmount").textContent = amt + " USD " + per + " — " + TIERS[tier].name + " (" + cycle + ")";
+    document.getElementById("whishbox").style.display = "block";
+    document.getElementById("payBtn").style.display = "none";
+    document.getElementById("whishbox").scrollIntoView({behavior:"smooth", block:"center"});
+    return;
+  }
   const btn = document.getElementById("payBtn");
   btn.disabled = true; btn.textContent = "Processing…";
   try {
