@@ -2714,6 +2714,72 @@ _doc("POST", "/api/webhooks/paddle",
          "503": _err503("Paddle is not configured"),
      })
 
+_doc("POST", "/api/checkout/dodo",
+     tag="Billing",
+     summary="Card checkout session (Dodo)",
+     description=("Start a Dodo Payments card checkout session. Public — new "
+                  "customers have no API key yet. Returns the Dodo-hosted "
+                  "checkout_url plus the metadata payload stamped on the "
+                  "session; the webhook attributes the subscription back "
+                  "via that metadata. A fresh API key is provisioned for "
+                  "NEW orgs and returned once. Renewals (same email) get "
+                  "api_key:null. 503 when card checkout is not configured "
+                  "on the server."),
+     auth="public", min_role=None, org_scope=False, rate_limit="10/minute",
+     params=[],
+     request_body=_body("Checkout request.",
+                        {"tier": "pro", "cycle": "monthly",
+                         "email": "buyer@acme.com"}),
+     responses={
+         "200": _resp("Checkout URL + one-time key for new orgs.",
+                      {"checkout_url": "https://checkout.dodopayments.com/"
+                                      "sess_test_...",
+                       "session_id": "sess_test_...",
+                       "api_key": "bs_9f8e7d6c5b4a39281706f5e4d3c2b1a3f4e"
+                                  "5d6c7b",
+                       "key_note": "Save this API key now — it is shown "
+                                   "only once."}),
+         "400": _err400("Unknown tier/cycle"),
+         "429": _err429(),
+         "503": _err503("Card checkout is not configured yet"),
+     })
+
+_doc("POST", "/api/webhooks/dodo",
+     tag="Webhooks",
+     summary="Dodo webhook receiver",
+     description=("Public receiver for Dodo Payments webhooks. Verified "
+                  "per the Standard Webhooks spec: HMAC-SHA256 over "
+                  "\"{webhook-id}.{timestamp}.{raw_body}\" checked against "
+                  "the webhook-signature header, with a 300s replay "
+                  "window. Subscription events activate/sync/cancel the "
+                  "org subscription idempotently on the webhook-id header; "
+                  "payment events are logged only. 503 while Dodo is "
+                  "unconfigured (Dodo retries); 200 on a valid signature "
+                  "even for ignored events; 400 only on a bad signature "
+                  "or bad JSON."),
+     auth="public", min_role=None, org_scope=False, rate_limit="600/minute",
+     params=[],
+     request_body=_body("Dodo webhook event.",
+                        {"business_id": "biz_...",
+                         "timestamp": "2026-10-05T09:00:00Z",
+                         "type": "subscription.active",
+                         "data": {"subscription_id": "sub_...",
+                                  "product_id": "pdt_...",
+                                  "status": "active",
+                                  "metadata": {"org_id": "org_9f8e7d6c5b4a",
+                                               "tier": "pro",
+                                               "cycle": "monthly"}}},
+                        content_type="application/json"),
+     responses={
+         "200": _resp("Event processed.",
+                      {"ok": True, "verdict": "fulfilled",
+                       "detail": "fulfilled"}),
+         "400": _resp("Bad signature or bad JSON.",
+                      {"ok": False, "error": "bad signature"}),
+         "429": _err429(),
+         "503": _err503("Dodo is not configured"),
+     })
+
 # ============================ Auth =========================================
 
 _doc("POST", "/api/auth/register",
