@@ -232,7 +232,10 @@ def verify_webhook_signature(raw_body: bytes, headers: dict,
         key = _decode_secret(secret)
     except Exception:
         return False
-    signed = f"{msg_id}.{int(ts)}.".encode() + raw_body
+    # Standard Webhooks signs the exact header bytes: {id}.{timestamp}.{body}
+    # where timestamp is the raw webhook-timestamp header string, NOT a
+    # normalized integer (truncating a fractional ts would break verify).
+    signed = f"{msg_id}.{msg_ts}.".encode() + raw_body
     expected = hmac.new(key, signed, hashlib.sha256).digest()
     for part in str(msg_sig).split(" "):
         if "," not in part:
@@ -252,7 +255,7 @@ def verify_webhook_signature(raw_body: bytes, headers: dict,
 def _sign_for_test(msg_id, ts, raw_body: bytes, secret: str) -> str:
     """Test helper: produce a valid webhook-signature header value."""
     key = _decode_secret(secret)
-    signed = f"{msg_id}.{int(ts)}.".encode() + raw_body
+    signed = f"{msg_id}.{ts}.".encode() + raw_body
     sig = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest())
     return "v1," + sig.decode()
 
