@@ -181,6 +181,21 @@ def test_verify_secret_without_prefix():
     assert dp.verify_webhook_signature(raw, headers, no_prefix) is True
 
 
+def test_verify_fractional_timestamp_string():
+    # Standard Webhooks signs the exact webhook-timestamp header bytes.
+    # A fractional timestamp string must verify (regression: the signed
+    # payload used int(ts), so a fractional header ts never matched).
+    raw = b'{"type":"subscription.active"}'
+    ts_str = repr(time.time())  # e.g. "1728230400.123456"
+    key = dp._decode_secret(SECRET)
+    signed = f"msg_frac.{ts_str}.".encode() + raw
+    sig = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest())
+    headers = {"webhook-id": "msg_frac",
+               "webhook-timestamp": ts_str,
+               "webhook-signature": "v1," + sig.decode()}
+    assert dp.verify_webhook_signature(raw, headers, SECRET) is True
+
+
 # ------------------------------------------------------- evaluate_event
 
 def test_evaluate_active_fulfills(monkeypatch):
