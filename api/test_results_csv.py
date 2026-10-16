@@ -133,3 +133,29 @@ def test_csv_404_and_401(ctx):
     assert _csv(ctx["admin"], "nope_missing").status_code == 404
     # foreign org's scan is invisible -> 404, not 403 (no id oracle)
     assert _csv(ctx["o_member"], sid).status_code == 404
+
+
+def test_csv_formula_injection_neutralized(ctx):
+    # Regression: finding messages can carry attacker-influenced text from
+    # scanned code (e.g. "=cmd|'/c calc'!A0"). Cells that start with
+    # = + - @ (even after leading whitespace) must be prefixed with a
+    # single quote so spreadsheet apps open them as inert text.
+    sid = f"cv5_{ctx['uid']}"
+    payloads = ["=cmd|'/c calc'!A0", "+SUM(1+1)", "-2+3", "@SUM(1+1)",
+                "\t=HYPERLINK(\"http://x\",\"click\")", "  -2+2"]
+    findings = [("semgrep", f"r-f{i}", "error", p, "a.py", i + 1)
+                for i, p in enumerate(payloads)]
+    findings.append(("semgrep", "r-ok", "error", "plain message", "b.py", 9))
+    _mk_scan(ctx["org"], sid, findings)
+    r = _csv(ctx["admin"], sid)
+    assert r.status_code == 200
+    rows = list(csv.reader(io.StringIO(r.text)))
+    assert len(rows) == 1 + len(findings)
+    by_rule = {row[2]: row for row in rows[1:]}
+    for i, p in enumerate(payloads):
+        cell = by_rule[f"r-f{i}"][7]
+        assert cell == "'" + p, f"formula payload not neutralized: {cell!r}"
+    # benign values pass through untouched
+    assert by_rule["r-ok"][7] == "plain message"
+    assert main._csv_cell(None) == ""
+    assert main._csv_cell(12) == "12"
