@@ -116,3 +116,17 @@ def test_audit_csv_isolation_and_auth(ctx):
     assert f"only-org-a-{ctx['uid']}" not in r.text
     # project-scoped key rejected like /api/audit-log
     assert _export(ctx["scoped"]).status_code in (400, 403)
+
+
+def test_audit_csv_formula_injection_neutralized(ctx):
+    # Regression: actor strings are free text — a cell starting with
+    # = + - @ must be prefixed with ' so spreadsheet apps treat it as
+    # inert text (same guard as the scan-results CSV export).
+    evil = "=cmd|'/c calc'!A0"
+    _log(ctx["a"], evil, "scan.created", {"target": "x"})
+    r = _export(ctx["admin"])
+    assert r.status_code == 200
+    rows = list(csv.reader(io.StringIO(r.text)))
+    actors = [row[2] for row in rows[1:] if row[3] == "scan.created"]
+    assert actors, "expected the logged event in the export"
+    assert all(a == "'" + evil for a in actors)
