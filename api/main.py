@@ -677,6 +677,24 @@ CSV_COLUMNS = ("id", "tool", "rule_id", "severity", "file", "line", "col",
                "message", "triage_status", "triage_assignee",
                "ai_verdict", "ai_confidence")
 
+# CSV formula-injection guard. RFC 4180 quoting protects CSV *structure*
+# (commas/quotes/newlines) but not the *viewer*: a cell that starts with
+# =, +, - or @ is evaluated as a formula when the export is opened in
+# Excel/LibreOffice, and finding messages can carry attacker-influenced
+# text from scanned code (e.g. "=cmd|'/c calc'!A0"). Prefixing such cells
+# with a single quote keeps them inert text while staying human-readable.
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def _csv_cell(value):
+    """Neutralize spreadsheet formula injection in one CSV cell."""
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else str(value)
+    if text.lstrip()[:1] in _CSV_FORMULA_PREFIXES:
+        return "'" + text
+    return text
+
 
 @app.get("/api/scans/{scan_id}/results.csv")
 @limiter.limit("30/minute")
@@ -687,6 +705,8 @@ def scan_results_csv(request: Request, scan_id: str,
     Same filters/visibility as GET /api/scans/{id}/results (org-scoped,
     RBAC, 404 for a missing or foreign scan). RFC 4180 quoting via the
     csv module — messages with commas/quotes/newlines stay intact.
+    Cells starting with = + - @ are prefixed with ' (formula-injection
+    guard — finding messages may carry attacker-influenced text).
     Downloads as ``braimsec-<scan_id>-results.csv``.
     """
     findings = scan_results(request, scan_id, severity=severity)
@@ -694,7 +714,7 @@ def scan_results_csv(request: Request, scan_id: str,
     w = csv.writer(buf, lineterminator="\r\n")
     w.writerow(CSV_COLUMNS)
     for f in findings:
-        w.writerow([f.get(c, "") for c in CSV_COLUMNS])
+        w.writerow([_csv_cell(f.get(c, "")) for c in CSV_COLUMNS])
     body = buf.getvalue().encode("utf-8")
     return Response(
         content=body, media_type="text/csv; charset=utf-8",
@@ -962,7 +982,8 @@ def export_audit_log_csv(request: Request, action: str | None = None):
     Newest-first, up to 5,000 rows per export (use archives for deeper
     history). Same visibility as GET /api/audit-log: org-scoped, viewers
     may read; project-scoped keys are rejected. ``detail`` is embedded as
-    a JSON string in its column (RFC 4180 quoting). Downloads as
+    a JSON string in its column (RFC 4180 quoting). Cells starting with
+    = + - @ are prefixed with ' (formula-injection guard). Downloads as
     ``braimsec-audit-<org_id>.csv``.
     """
     require_org_scope(request)
@@ -972,10 +993,10 @@ def export_audit_log_csv(request: Request, action: str | None = None):
     w = csv.writer(buf, lineterminator="\r\n")
     w.writerow(cols)
     for e in events:
-        w.writerow([e.get("id", ""), e.get("created_at", ""),
-                    e.get("actor", ""), e.get("action", ""),
-                    json.dumps(e.get("detail") or {},
-                               ensure_ascii=False, sort_keys=True)])
+        w.writerow([_csv_cell(e.get("id", "")), _csv_cell(e.get("created_at", "")),
+                    _csv_cell(e.get("actor", "")), _csv_cell(e.get("action", "")),
+                    _csv_cell(json.dumps(e.get("detail") or {},
+                                         ensure_ascii=False, sort_keys=True))])
     body = buf.getvalue().encode("utf-8")
     return Response(
         content=body, media_type="text/csv; charset=utf-8",
