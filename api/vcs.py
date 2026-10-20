@@ -328,6 +328,54 @@ def clone_repo(repo_url: str, branch: str, sha: str, dest_dir: str,
         raise RuntimeError(f"git failed (rc={e.returncode}): {tail}")
 
 
+# Trial clones are capped so a huge public repo cannot fill the disk.
+TRIAL_CLONE_MAX_BYTES = 200 * 1024 * 1024
+
+
+def clone_public_repo(repo_url: str, dest_dir: str,
+                      timeout: int = 120) -> str:
+    """Shallow-clone a public repo's default branch. Returns HEAD sha.
+
+    For the anonymous trial flow, where no branch/sha is known up front
+    (unlike :func:`clone_repo`, which serves verified push webhooks).
+    Raises RuntimeError on any failure, including an oversized clone.
+    """
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    os.makedirs(dest_dir, exist_ok=True)
+    try:
+        subprocess.run(
+            ["git", "clone", "--depth", "1", "--single-branch",
+             repo_url, dest_dir],
+            check=True, capture_output=True, text=True, timeout=timeout,
+            env=env)
+        rev = subprocess.run(
+            ["git", "-C", dest_dir, "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True, timeout=60,
+            env=env)
+        actual = rev.stdout.strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", actual):
+            raise RuntimeError(f"unexpected rev-parse output: {actual!r}")
+    except FileNotFoundError:
+        raise RuntimeError("git binary not found on this host")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"git clone timed out after {timeout}s")
+    except subprocess.CalledProcessError as e:
+        tail = (e.stderr or e.stdout or "")[-300:]
+        raise RuntimeError(f"git failed (rc={e.returncode}): {tail}")
+    total = 0
+    for root, _dirs, files in os.walk(dest_dir):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+            if total > TRIAL_CLONE_MAX_BYTES:
+                raise RuntimeError(
+                    "repository too large for a trial scan "
+                    f"(> {TRIAL_CLONE_MAX_BYTES // (1024 * 1024)} MB)")
+    return actual
+
+
 # ---------------------------------------------------------------------------
 # Ingest: verified push -> scan
 # ---------------------------------------------------------------------------
