@@ -1,11 +1,11 @@
 # BraimSec injection rules (v1) — first principles, not holdout-tuned.
 #
 # Why these exist: the frozen registry snapshot (`--config auto` vendored at
-# image build time) covers generic injection patterns, but these nine rules
+# image build time) covers generic injection patterns, but these ten rules
 # encode BraimSec's precision-first taint specifications for the highest-value
 # OWASP Top 10 families our customers ask about: OS command injection,
-# XXE, insecure deserialization, SQL injection, XSS (server + DOM), and
-# Python/JavaScript code injection. Verified with Semgrep 1.178.0 on paired
+# XXE, insecure deserialization, SQL injection, XSS (server + DOM),
+# Python/JavaScript code injection, and CSV formula injection. Verified with Semgrep 1.178.0 on paired
 # vuln/safe repros (see scanner/test_inject_rules.py): every rule fires on
 # its true-positive sample and stays silent on clean code.
 #
@@ -366,4 +366,35 @@ rules:
       - pattern: request.POST[...]
       - pattern: input(...)
       - pattern: sys.argv[...]
+  severity: ERROR
+- id: braimsec.inject.csv-formula-injection
+  languages:
+  - python
+  message: CSV cell written without the formula-injection guard (_csv_cell) —
+    a cell starting with =, +, - or @ is evaluated as a spreadsheet formula
+    when the export is opened. Wrap every data cell in _csv_cell(...).
+  metadata:
+    category: security
+    confidence: MEDIUM
+    cwe: 'CWE-1236: Improper Neutralization of Formula Elements in a CSV File'
+    impact: MEDIUM
+    owasp: A03:2021 - Injection
+  mode: taint
+  pattern-sanitizers:
+  - patterns:
+    - pattern-either:
+      - pattern: _csv_cell(...)
+      - pattern: csv_cell(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-inside: $W.writerow($ROW, ...)
+    - focus-metavariable: $ROW
+  - patterns:
+    - pattern-inside: $W.writerows($ROWS, ...)
+    - focus-metavariable: $ROWS
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $X.get(...)
+      - pattern: $X[...]
   severity: ERROR
