@@ -245,6 +245,24 @@ def test_trial_summary_dedupes_cross_pack_keeps_distinct_advisories():
     assert body["severity_summary"] == {"warning": 1, "error": 2}
 
 
+def test_trial_summary_dedupes_eval_family_per_line():
+    sid = _done_scan_with_findings([
+        # Three packs flag eval() on the same line: one issue.
+        ("opt.rules.javascript.browser.security.eval-detected",
+         "error", "app/routes.js", 32),
+        ("opt.rules.javascript.lang.security.audit.code-string-concat",
+         "error", "app/routes.js", 32),
+        ("opt.rules-braimsec.braimsec.inject.js-code-eval",
+         "error", "app/routes.js", 32),
+        # The same issue on a different line stays a separate finding.
+        ("opt.rules-braimsec.braimsec.inject.js-code-eval",
+         "error", "app/routes.js", 33),
+    ])
+    body = client.get(f"/api/trial/scans/{sid}").json()
+    assert body["total_findings"] == 2
+    assert body["severity_summary"] == {"error": 2}
+
+
 def test_trial_top_findings_diversified_code_first():
     lock = "package-lock.json"
     rows = [(f"GHSA-{i:04d}", "error", lock, i + 1) for i in range(5)]
