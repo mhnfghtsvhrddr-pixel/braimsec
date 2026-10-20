@@ -64,4 +64,12 @@ RUN SEMGREP_SEND_METRICS=off /opt/engines/bin/semgrep --validate \
         --config /opt/rules-braimsec
 ENV SEMGREP_BIN=/opt/engines/bin/semgrep \
     GITLEAKS_BIN=/opt/engines/bin/gitleaks
+# Run the sandbox as uid/gid 10001 (never root). The entrypoint only reads
+# /opt and /target (mounted read-only) and writes /out — a per-scan dir
+# the runner service creates with this same uid — plus /tmp (a tmpfs at
+# runtime; HOME is already /tmp above for engine caches). The build-time
+# --validate steps above intentionally still run as root.
+RUN groupadd --gid 10001 braimsec \
+    && useradd --uid 10001 --gid 10001 --no-create-home braimsec
+USER 10001
 ENTRYPOINT ["python3", "/opt/runner-entrypoint.py"]
