@@ -54,8 +54,24 @@ COPY ai/ ./ai/
 COPY reports/ ./reports/
 COPY dashboard/ ./dashboard/
 
+# --- Non-root runtime user ------------------------------------------------
+# The API, worker and beat all run as uid/gid 10001 (never root). Every
+# runtime write path is covered: the SQLite DB, scans/ and uploads/ live on
+# the HOST_DATA_DIR bind mount (ownership is handed to 10001 once on the
+# host — see docker-compose.prod.yml "Server prep"), celerybeat's schedule
+# file is in /tmp, and tool caches (git/semgrep in local mode) land in the
+# user's home. /app is chowned as belt-and-braces for anything that insists
+# on writing next to the code (bytecode is disabled above, so it is not
+# expected to be needed).
+RUN groupadd --gid 10001 braimsec \
+    && useradd --uid 10001 --gid 10001 \
+        --home-dir /home/braimsec --create-home braimsec \
+    && chown -R braimsec:braimsec /app /home/braimsec
+ENV HOME=/home/braimsec
+
 WORKDIR /app/api
 EXPOSE 8000
+USER 10001
 
 # Overridden per-service in docker-compose (uvicorn api vs celery worker).
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
