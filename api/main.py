@@ -214,6 +214,8 @@ async def api_key_gate(request: Request, call_next):
     /api/webhooks/dodo is public (Dodo webhooks; Standard Webhooks HMAC).
     /api/webhooks/github and /api/webhooks/gitlab are public (push receivers;
     secured by HMAC-SHA256 / token respectively).
+    /api/trial/* is public (anonymous trial scans; layered rate limits and
+    daily caps are the abuse control — see the trial section below).
     """
     public_paths = ("/api/plans", "/api/checkout/crypto",
                     "/api/checkout/paddle", "/api/checkout/dodo",
@@ -233,8 +235,9 @@ async def api_key_gate(request: Request, call_next):
     # their org's targets / public incidents — no auth material, no keys.
     is_status = (path.startswith("/api/status/") or
                  path.startswith("/status/"))
+    is_trial = path.startswith("/api/trial/")
     if (path.startswith("/api/") and path not in public_paths
-            and not is_badge and not is_status):
+            and not is_badge and not is_status and not is_trial):
         presented = request.headers.get("x-api-key", "")
         org = None
         actor = ""
@@ -429,13 +432,18 @@ def _new_scan(org_id: str, target_name: str, target_dir: str,
               project_id: str | None = None,
               scan_id: str | None = None,
               vcs_repo_id: str | None = None,
-              commit_sha: str | None = None):
+              commit_sha: str | None = None,
+              consume_quota: bool = True):
     """Create a scan owned by org_id. Consumes one unit of monthly quota.
 
     Raises HTTPException(402) when the org's plan quota is exhausted,
     HTTPException(503) when the durable queue is configured but unreachable.
+
+    ``consume_quota=False`` is for system flows with their own abuse caps
+    (the public trial): the scan is still recorded, just not billed
+    against the owning org's plan quota.
     """
-    if not consume_scan(org_id):
+    if consume_quota and not consume_scan(org_id):
         allowed, used, quota = quota_status(org_id)
         raise HTTPException(
             402,
@@ -4277,6 +4285,212 @@ def run_report_schedule_endpoint(request: Request, schedule_id: str):
 # ---------------------------------------------------------------------------
 # Subscriptions (Phase 1): plans, current subscription, usage.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Public trial scans (no signup): scan a public repo, see a summary.
+#
+# Abuse controls are layered: the slowapi per-IP rate limit, a per-IP
+# daily cap, and a global daily cap (trial_scans rows are the ledger).
+# Trial scans run under a dedicated system org and do not consume its
+# plan quota (consume_quota=False) — the caps here are the quota. Only a
+# summary is ever exposed (severity counts + top findings); the full
+# report stays behind signup.
+# ---------------------------------------------------------------------------
+
+TRIAL_ORG_NAME = "BraimSec Trial (system)"
+TRIAL_PER_IP_DAILY = 3
+TRIAL_GLOBAL_DAILY = 30
+TRIAL_TOP_FINDINGS = 5
+_TRIAL_SEV_RANK = {"error": 0, "critical": 0, "high": 1, "warning": 2,
+                   "medium": 3, "note": 4, "info": 4, "low": 5}
+
+
+def _trial_org_id() -> str:
+    db = get_db()
+    try:
+        row = db.execute("SELECT id FROM organizations WHERE name=?",
+                         (TRIAL_ORG_NAME,)).fetchone()
+    finally:
+        db.close()
+    if row:
+        return row["id"]
+    return create_org(TRIAL_ORG_NAME)
+
+
+def _trial_counts(ip: str) -> tuple[int, int]:
+    day_start = (datetime.now(timezone.utc).date().isoformat()
+                 + "T00:00:00+00:00")
+    db = get_db()
+    try:
+        per_ip = db.execute(
+            "SELECT COUNT(*) AS c FROM trial_scans WHERE ip=?"
+            " AND created_at>=?", (ip, day_start)).fetchone()["c"]
+        total = db.execute(
+            "SELECT COUNT(*) AS c FROM trial_scans WHERE created_at>=?",
+            (day_start,)).fetchone()["c"]
+    finally:
+        db.close()
+    return per_ip, total
+
+
+@app.post("/api/trial/scans")
+@limiter.limit("3/hour")
+async def create_trial_scan(request: Request,
+                            background_tasks: BackgroundTasks,
+                            repo_url: str = Form(...)):
+    """Start a free trial scan of a public GitHub/GitLab repository."""
+    import shutil
+
+    from vcs import clone_public_repo, validate_repo_url
+    try:
+        url = validate_repo_url(repo_url)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    ip = get_remote_address(request)
+    per_ip, total = _trial_counts(ip)
+    if per_ip >= TRIAL_PER_IP_DAILY:
+        raise HTTPException(
+            429, "Daily trial limit reached for your network. "
+                 "Create a free account to keep scanning.")
+    if total >= TRIAL_GLOBAL_DAILY:
+        raise HTTPException(
+            429, "Trial capacity is full for today. "
+                 "Create a free account to scan right away.")
+    # Same shared-dir rule as zip uploads: the worker must see the target.
+    shared = os.environ.get("HOST_DATA_DIR")
+    base = os.path.join(shared, "uploads") if shared else tempfile.gettempdir()
+    os.makedirs(base, exist_ok=True)
+    workdir = tempfile.mkdtemp(prefix="braimsec-trial-", dir=base)
+    target_dir = os.path.join(workdir, "src")
+    try:
+        sha = clone_public_repo(url, target_dir)
+    except RuntimeError as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise HTTPException(
+            400, f"Could not clone that repository ({e}). "
+                 "Only public repositories can be trial-scanned.")
+    org_id = _trial_org_id()
+    result = _new_scan(org_id, url[len("https://"):], target_dir, workdir,
+                       background_tasks, consume_quota=False, commit_sha=sha)
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO trial_scans (scan_id, ip, repo_url, created_at)"
+            " VALUES (?,?,?,?)",
+            (result["scan_id"], ip, url, now()))
+        db.commit()
+    finally:
+        db.close()
+    return {"scan_id": result["scan_id"], "status": "queued",
+            "poll_url": f"/api/trial/scans/{result['scan_id']}"}
+
+
+@app.get("/api/trial/scans/{scan_id}")
+@limiter.limit("60/minute")
+def trial_scan_status(request: Request, scan_id: str):
+    """Public summary of a trial scan (counts + top findings only)."""
+    db = get_db()
+    try:
+        trial = db.execute(
+            "SELECT scan_id FROM trial_scans WHERE scan_id=?",
+            (scan_id,)).fetchone()
+        if not trial:
+            raise HTTPException(404, "Trial scan not found")
+        row = db.execute(
+            "SELECT target_name, status, created_at, finished_at,"
+            " total_findings, error FROM scans WHERE id=?",
+            (scan_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Trial scan not found")
+        out = {"scan_id": scan_id, "target": row["target_name"],
+               "status": row["status"], "created_at": row["created_at"],
+               "finished_at": row["finished_at"]}
+        if row["status"] == "failed":
+            out["error"] = (row["error"] or "")[:200]
+        if row["status"] == "done":
+            summary = db.execute(
+                "SELECT severity, COUNT(*) AS c FROM findings"
+                " WHERE scan_id=? GROUP BY severity", (scan_id,)).fetchall()
+            out["total_findings"] = row["total_findings"] or 0
+            out["severity_summary"] = {r["severity"]: r["c"] for r in summary}
+            findings = db.execute(
+                "SELECT rule_id, severity, message, file, line"
+                " FROM findings WHERE scan_id=?", (scan_id,)).fetchall()
+            findings = sorted(
+                findings,
+                key=lambda f: _TRIAL_SEV_RANK.get(
+                    (f["severity"] or "").lower(), 9))[:TRIAL_TOP_FINDINGS]
+            out["top_findings"] = [dict(f) for f in findings]
+            out["note"] = ("Summary only — create a free account for the "
+                           "full report with fix suggestions.")
+        return out
+    finally:
+        db.close()
+
+
+@app.get("/trial", response_class=HTMLResponse)
+def trial_page(request: Request):
+    """Minimal public page for the no-signup trial scan."""
+    return """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BraimSec — Free trial scan</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0b1020;color:#e6e9f5;
+margin:0;display:flex;justify-content:center;padding:40px 16px}
+main{max-width:640px;width:100%}
+h1{font-size:26px} p.sub{color:#9aa3c7}
+form{display:flex;gap:8px;margin:20px 0}
+input{flex:1;padding:12px;border-radius:8px;border:1px solid #2a3358;
+background:#121833;color:#e6e9f5;font-size:15px}
+button{padding:12px 18px;border:0;border-radius:8px;background:#4f6df5;
+color:#fff;font-size:15px;cursor:pointer}
+button:disabled{opacity:.5}
+.chip{display:inline-block;padding:2px 10px;border-radius:99px;margin:2px;
+background:#1b2350;font-size:13px}
+.finding{border:1px solid #2a3358;border-radius:8px;padding:10px 12px;
+margin:8px 0;font-size:14px}
+.finding b{color:#ffb4b4} code{color:#9fd0ff}
+#status{margin:14px 0;color:#c8ceea} a{color:#8fb0ff}
+</style></head><body><main>
+<h1>🛡️ BraimSec — free trial scan</h1>
+<p class="sub">Paste a public GitHub or GitLab repository URL and get a
+security scan summary in a few minutes. No signup, no card.</p>
+<form id="f"><input id="u" type="url" required
+placeholder="https://github.com/owner/repo">
+<button id="b" type="submit">Scan</button></form>
+<div id="status"></div><div id="out"></div>
+<p class="sub">Trial limits: 3 scans per network per day. The full report
+with fix suggestions needs a <a href="/">free account</a>.</p>
+<script>
+const f=document.getElementById('f'),b=document.getElementById('b'),
+s=document.getElementById('status'),o=document.getElementById('out');
+function esc(t){const d=document.createElement('div');d.textContent=t;return d.innerHTML}
+f.addEventListener('submit',async e=>{e.preventDefault();b.disabled=true;o.innerHTML='';
+s.textContent='Starting scan…';
+try{
+const r=await fetch('/api/trial/scans',{method:'POST',
+body:new URLSearchParams({repo_url:document.getElementById('u').value})});
+const j=await r.json();
+if(!r.ok){s.textContent='Error: '+(j.detail||r.status);b.disabled=false;return}
+poll(j.scan_id);
+}catch(err){s.textContent='Network error: '+err;b.disabled=false}});
+async function poll(id){
+const r=await fetch('/api/trial/scans/'+id);const j=await r.json();
+if(j.status==='done'){
+s.innerHTML='✅ Scan complete — <b>'+j.total_findings+'</b> findings in '+esc(j.target);
+let h='';
+for(const [k,v] of Object.entries(j.severity_summary||{}))
+h+='<span class="chip">'+esc(k)+': '+v+'</span>';
+o.innerHTML=h+(j.top_findings||[]).map(x=>
+'<div class="finding"><b>'+esc(x.severity)+'</b> '+esc(x.rule_id)+
+'<br><code>'+esc(x.file)+':'+x.line+'</code><br>'+esc(x.message||'')+'</div>').join('')
++'<p>'+esc(j.note||'')+'</p>';b.disabled=false;return}
+if(j.status==='failed'){s.textContent='❌ Scan failed: '+(j.error||'unknown error');b.disabled=false;return}
+s.textContent='⏳ Scanning '+id+' — status: '+j.status+' (this can take a few minutes)';
+setTimeout(()=>poll(id),4000)}
+</script></main></body></html>"""
+
 
 @app.get("/api/plans")
 def api_plans():
