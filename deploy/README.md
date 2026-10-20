@@ -25,6 +25,47 @@ the build). After changing any rule file, rebuild the runner image on the
 server: `deploy.sh --rebuild-runner` (the image is cached otherwise, so
 rule edits do NOT take effect until you rebuild).
 
+## Non-root containers
+
+Every BraimSec-owned image runs as **uid/gid 10001** (`braimsec`), never
+root: the app image (api + worker + beat, `Dockerfile.prod`), the runner
+service (`docker/runner.Dockerfile`), the scan sandbox
+(`docker/scan-runner.Dockerfile`), and the dev image (root `Dockerfile`).
+Each Dockerfile sets `USER 10001`, and the compose file repeats the pin
+(`user: "10001:10001"`) on the four long-running services. Vendor images
+(redis, caddy, socket-proxy) are unchanged. The runner's Docker boundary
+is unaffected: it still talks to the daemon only through the
+socket-proxy over HTTP, so no socket-file permissions are involved.
+
+Write paths were audited before the switch: the SQLite DB, `scans/` and
+`uploads/` live on the `HOST_DATA_DIR` bind mount; celerybeat's schedule
+file is in `/tmp`; the runner creates the per-scan out dirs itself
+(`tempfile.mkdtemp`, mode 0700) with the same uid the sandbox runs as;
+engine caches land in `$HOME`/`/tmp`.
+
+**One-time host preparation** (existing installs — the data dir was
+created by root and is bind-mounted read-write):
+
+```sh
+cd deploy
+docker compose -f docker-compose.prod.yml down
+sudo chown -R 10001:10001 /data/braimsec        # or $HOST_DATA_DIR
+docker build -f docker/scan-runner.Dockerfile \
+    -t braimsec/scan-runner:1.0 ..              # from the repo root
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+Fresh installs need none of this: `deploy.sh` chowns the data dir
+itself. Re-run the `chown` after any restore performed as root (a
+restored DB lands root-owned and the API could no longer write it).
+
+**Rollback:** check out the commit before the non-root change on the
+server, rebuild every image exactly as above (`up -d --build` + the
+scan-runner build), and — only if the root images are restored
+permanently — hand the data dir back: `sudo chown -R 0:0 /data/braimsec`.
+
+## Scan engine modes
+
 - `BRAIMSEC_SCAN_SANDBOX=docker` (default in compose; `local` = dev only)
 - `BRAIMSEC_SCAN_RUNNER_IMAGE=braimsec/scan-runner:1.0`
 - Fail-closed: a container error fails the scan loudly — never a silent
