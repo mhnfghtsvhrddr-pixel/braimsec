@@ -121,3 +121,24 @@ def test_startup_triggers_recovery(monkeypatch):
                         lambda: called.append(1) or 0)
     main.startup()
     assert called == [1]
+
+
+def test_lifespan_runs_full_startup_sequence(monkeypatch):
+    """Regression for the on_event -> lifespan migration: entering the
+    app (TestClient context triggers the lifespan handler) must run the
+    exact startup sequence the deprecated @app.on_event("startup") hook
+    ran — all five steps, in order."""
+    from fastapi.testclient import TestClient
+
+    calls = []
+
+    def _recorder(name):
+        return lambda *a, **k: calls.append(name)
+
+    for name in ("init_db", "seed_plans", "ensure_owner_org",
+                 "ensure_subscription", "_recover_orphaned_scans"):
+        monkeypatch.setattr(main, name, _recorder(name))
+    with TestClient(main.app):
+        pass
+    assert calls == ["init_db", "seed_plans", "ensure_owner_org",
+                     "ensure_subscription", "_recover_orphaned_scans"]
