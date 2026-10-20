@@ -151,6 +151,10 @@ prepare_data_dir() {
     [[ -z "$dir" ]] && dir="/data/braimsec"
     step "data dir: $dir"
     mkdir -p "$dir"
+    # The app containers run as uid/gid 10001 (non-root) and the data dir
+    # is bind-mounted read-write into them — it must belong to the
+    # runtime user. Idempotent; also repairs ownership after a restore.
+    chown -R 10001:10001 "$dir"
     echo "HOST_DATA_DIR=$dir"
 }
 
