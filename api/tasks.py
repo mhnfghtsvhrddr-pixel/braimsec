@@ -198,6 +198,44 @@ def _deliver_webhook(scan_id: str) -> None:
               row["webhook_url"], WEBHOOK_ATTEMPTS, scan_id)
 
 
+def _deliver_failure_email(scan_id: str) -> None:
+    """Email the org when an on-demand scan fails terminally.
+
+    Scheduled scans alert through evaluate_schedule_alerts and VCS scans
+    through evaluate_vcs_alerts (both already include email). A plain
+    API/dashboard scan previously fired only its webhook — an org that
+    launched it and walked away heard nothing when it failed. Best-effort:
+    never raises, never breaks scan completion.
+    """
+    try:
+        db = get_db()
+        try:
+            row = db.execute(
+                "SELECT org_id, status, target_name, error, vcs_repo_id"
+                " FROM scans WHERE id=?", (scan_id,)).fetchone()
+            if not row or row["status"] != "failed" or row["vcs_repo_id"]:
+                return
+            # Scheduled scans are linked from the schedule side and alert
+            # through evaluate_schedule_alerts — never double-send.
+            sched = db.execute(
+                "SELECT 1 FROM schedules WHERE last_scan_id=?",
+                (scan_id,)).fetchone()
+            if sched:
+                return
+            from email_alerts import dispatch_email_alerts  # noqa: E402
+            dispatch_email_alerts(
+                db, org_id=row["org_id"], schedule_id=None, vcs_repo_id=None,
+                scan_id=scan_id, event="scan.failed", severity="error",
+                new_count=0,
+                heading=row["target_name"] or scan_id,
+                subheading=(row["error"] or "unknown error")[:200],
+                findings=[])
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - best-effort by design
+        log.exception("failure email dispatch crashed for %s", scan_id)
+
+
 @celery_app.task(name="braimsec.run_scan", bind=True, max_retries=2,
                  soft_time_limit=SCAN_SOFT_LIMIT_S)
 def run_scan(self, scan_id: str, target_dir: str, cleanup_dir: str | None = None,
@@ -401,6 +439,7 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
             shutil.rmtree(cleanup_dir, ignore_errors=True)
     if not will_retry:
         _deliver_webhook(scan_id)
+        _deliver_failure_email(scan_id)
         # Scheduled scans: diff vs the previous scheduled run and fire the
         # new-findings alert webhook. Best-effort: alerting must never break
         # scan completion.
