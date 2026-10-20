@@ -2575,6 +2575,69 @@ _doc("GET", "/api/health",
                                   "broker": "inline-mode"}}),
      })
 
+_doc("POST", "/api/trial/scans",
+     tag="Trial",
+     summary="Start a trial scan",
+     description=("Public no-signup trial: shallow-clone a public "
+                  "GitHub/GitLab repository and scan it under a dedicated "
+                  "system org. Layered abuse caps: 3/hour per IP (slowapi), "
+                  "3/day per IP and 30/day globally (trial_scans ledger). "
+                  "Only a summary is ever exposed — the full report "
+                  "requires an account."),
+     auth="public", min_role=None, org_scope=False, rate_limit="3/hour",
+     params=[],
+     request_body=_body(
+         "multipart/form-data: repo_url (public https repository URL).",
+         {"repo_url": "https://github.com/owner/repo"},
+         content_type="multipart/form-data"),
+     responses={
+         "200": _resp("Trial scan queued.",
+                      {"scan_id": "a1b2c3d4e5f6", "status": "queued",
+                       "poll_url": "/api/trial/scans/a1b2c3d4e5f6"}),
+         "400": _err400("repo_url must use https"),
+         "422": _err422(),
+         "429": _err429(),
+         "503": _err503("Scan queue unavailable, try again shortly."),
+     })
+
+_doc("GET", "/api/trial/scans/{scan_id}",
+     tag="Trial",
+     summary="Trial scan summary",
+     description=("Public status and summary of a trial scan: severity "
+                  "counts plus the top 5 findings once done. Unknown or "
+                  "non-trial scan ids -> 404."),
+     auth="public", min_role=None, org_scope=False, rate_limit="60/minute",
+     params=[_param("scan_id", "path", "string", "Trial scan id.", True,
+                    example="a1b2c3d4e5f6")],
+     request_body=None,
+     responses={
+         "200": _resp("Trial scan status/summary.",
+                      {"scan_id": "a1b2c3d4e5f6",
+                       "target": "github.com/owner/repo", "status": "done",
+                       "total_findings": 7,
+                       "severity_summary": {"error": 2, "warning": 5},
+                       "top_findings": [
+                           {"rule_id": "python.lang.security.audit",
+                            "severity": "error", "file": "app.py",
+                            "line": 12,
+                            "message": "Possible SQL injection"}]}),
+         "404": _err404("Trial scan not found"),
+         "429": _err429(),
+     })
+
+_doc("GET", "/trial",
+     tag="Trial",
+     summary="Trial scan page",
+     description="Public HTML page hosting the no-signup trial-scan form.",
+     auth="public", min_role=None, org_scope=False, rate_limit="600/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("HTML page.", "<html>...</html>",
+                      content_type="text/html"),
+         "429": _err429(),
+     })
+
 _doc("GET", "/api/subscription",
      tag="Billing",
      summary="Current subscription",
