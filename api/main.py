@@ -4313,6 +4313,16 @@ _TRIAL_RULE_FAMILY = {
     "opt.rules.yaml.github-actions.security.github-actions-mutable-action-tag":
         "gha.action-not-pinned",
     "opt.rules-braimsec.braimsec.gha.unpinned-action": "gha.action-not-pinned",
+    "opt.rules.javascript.browser.security.eval-detected":
+        "js.eval-code-execution",
+    "opt.rules.javascript.lang.security.audit.code-string-concat":
+        "js.eval-code-execution",
+    "opt.rules-braimsec.braimsec.inject.js-code-eval":
+        "js.eval-code-execution",
+    "opt.rules.generic.secrets.security.detected-private-key":
+        "secret.private-key",
+    "opt.rules.generic.secrets.gitleaks.private-key": "secret.private-key",
+    "private-key": "secret.private-key",
 }
 _TRIAL_LOCKFILES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml",
                     "poetry.lock", "pipfile.lock", "composer.lock",
