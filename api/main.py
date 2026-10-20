@@ -4304,6 +4304,44 @@ TRIAL_TOP_FINDINGS = 5
 _TRIAL_SEV_RANK = {"error": 0, "critical": 0, "high": 1, "warning": 2,
                    "medium": 3, "note": 4, "info": 4, "low": 5}
 
+# Rule packs overlap: two packs can flag the same line for the same issue
+# (both GitHub-Actions pinning rules fire on every unpinned `uses:` line).
+# For the public summary, findings sharing (file, line, family) count
+# once. Distinct advisories on one line (different GHSA ids against one
+# lockfile entry) are NOT duplicates and stay distinct.
+_TRIAL_RULE_FAMILY = {
+    "opt.rules.yaml.github-actions.security.github-actions-mutable-action-tag":
+        "gha.action-not-pinned",
+    "opt.rules-braimsec.braimsec.gha.unpinned-action": "gha.action-not-pinned",
+}
+_TRIAL_LOCKFILES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+                    "poetry.lock", "pipfile.lock", "composer.lock",
+                    "gemfile.lock", "cargo.lock", "go.sum"}
+_TRIAL_SOURCE_EXTS = (".py", ".js", ".ts", ".jsx", ".tsx", ".rb", ".go",
+                      ".java", ".php")
+
+
+def _trial_rel_path(file):
+    """Repo-relative path for public display: findings are stored under
+    <workdir>/src/... — never leak the server's upload layout."""
+    if not file:
+        return file
+    if "/src/" in file and ("/uploads/" in file or "braimsec-" in file):
+        return file.split("/src/", 1)[1]
+    return file
+
+
+def _trial_area_rank(rel_file):
+    """Top-findings ordering: application source first, other files next,
+    dependency lockfiles last (their advisories matter, but five lockfile
+    rows in a row undersell a code scanner)."""
+    base = (rel_file or "").rsplit("/", 1)[-1].lower()
+    if base in _TRIAL_LOCKFILES:
+        return 2
+    if (rel_file or "").lower().endswith(_TRIAL_SOURCE_EXTS):
+        return 0
+    return 1
+
 
 def _trial_org_id() -> str:
     db = get_db()
@@ -4408,19 +4446,55 @@ def trial_scan_status(request: Request, scan_id: str):
         if row["status"] == "failed":
             out["error"] = (row["error"] or "")[:200]
         if row["status"] == "done":
-            summary = db.execute(
-                "SELECT severity, COUNT(*) AS c FROM findings"
-                " WHERE scan_id=? GROUP BY severity", (scan_id,)).fetchall()
-            out["total_findings"] = row["total_findings"] or 0
-            out["severity_summary"] = {r["severity"]: r["c"] for r in summary}
-            findings = db.execute(
+            raw = db.execute(
                 "SELECT rule_id, severity, message, file, line"
                 " FROM findings WHERE scan_id=?", (scan_id,)).fetchall()
-            findings = sorted(
-                findings,
-                key=lambda f: _TRIAL_SEV_RANK.get(
-                    (f["severity"] or "").lower(), 9))[:TRIAL_TOP_FINDINGS]
-            out["top_findings"] = [dict(f) for f in findings]
+            # Collapse cross-pack duplicates (same file, line and issue
+            # family), keeping the highest severity per duplicate group.
+            best = {}
+            for f in raw:
+                rel = _trial_rel_path(f["file"])
+                fam = _TRIAL_RULE_FAMILY.get(f["rule_id"], f["rule_id"])
+                key = (rel, f["line"], fam)
+                item = {"rule_id": f["rule_id"],
+                        "severity": f["severity"],
+                        "message": f["message"],
+                        "file": rel, "line": f["line"]}
+                cur = best.get(key)
+                if (cur is None or _TRIAL_SEV_RANK.get(
+                        (f["severity"] or "").lower(), 9) < _TRIAL_SEV_RANK.get(
+                        (cur["severity"] or "").lower(), 9)):
+                    best[key] = item
+            unique = list(best.values())
+            summary = {}
+            for f in unique:
+                summary[f["severity"]] = summary.get(f["severity"], 0) + 1
+            out["total_findings"] = len(unique)
+            out["severity_summary"] = summary
+            ranked = sorted(
+                unique,
+                key=lambda f: (_TRIAL_SEV_RANK.get(
+                    (f["severity"] or "").lower(), 9),
+                    _trial_area_rank(f["file"]),
+                    f["file"] or "", f["line"] or 0))
+            # Diversify: at most two findings per file in the top list,
+            # backfilling in ranked order if that starves the list.
+            top, per_file = [], {}
+            for f in ranked:
+                if len(top) >= TRIAL_TOP_FINDINGS:
+                    break
+                if per_file.get(f["file"], 0) >= 2:
+                    continue
+                per_file[f["file"]] = per_file.get(f["file"], 0) + 1
+                top.append(f)
+            if len(top) < min(TRIAL_TOP_FINDINGS, len(ranked)):
+                chosen = {id(f) for f in top}
+                for f in ranked:
+                    if len(top) >= TRIAL_TOP_FINDINGS:
+                        break
+                    if id(f) not in chosen:
+                        top.append(f)
+            out["top_findings"] = top
             out["note"] = ("Summary only — create a free account for the "
                            "full report with fix suggestions.")
         return out
