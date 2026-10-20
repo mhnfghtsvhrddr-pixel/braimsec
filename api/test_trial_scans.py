@@ -203,3 +203,71 @@ def test_trial_status_done_summary_top_findings():
     # Highest severity first.
     assert body["top_findings"][0]["severity"] == "error"
     assert "free account" in body["note"]
+
+
+def _done_scan_with_findings(findings):
+    """Insert a done trial scan with (rule_id, severity, file, line)
+    findings rows and return its scan_id."""
+    org_id = main._trial_org_id()
+    sid = "trial-" + uuid.uuid4().hex[:12]
+    db = get_db()
+    db.execute(
+        "INSERT INTO scans (id, org_id, target_name, status, created_at,"
+        " finished_at, total_findings) VALUES (?,?,?,?,?,?,?)",
+        (sid, org_id, "github.com/acme/widgets", "done", main.now(),
+         main.now(), len(findings)))
+    for rule_id, sev, path, line in findings:
+        db.execute(
+            "INSERT INTO findings (scan_id, tool, rule_id, severity,"
+            " message, file, line, col) VALUES (?,?,?,?,?,?,?,?)",
+            (sid, "semgrep", rule_id, sev, f"msg {rule_id}", path, line, 1))
+    db.commit()
+    db.close()
+    _trial_row(sid)
+    return sid
+
+
+def test_trial_summary_dedupes_cross_pack_keeps_distinct_advisories():
+    wf = ".github/workflows/ci.yml"
+    lock = "package-lock.json"
+    sid = _done_scan_with_findings([
+        # Two rule packs flag the same workflow line for the same issue.
+        ("opt.rules.yaml.github-actions.security."
+         "github-actions-mutable-action-tag", "warning", wf, 10),
+        ("opt.rules-braimsec.braimsec.gha.unpinned-action",
+         "warning", wf, 10),
+        # Two distinct advisories against one lockfile line: both stay.
+        ("GHSA-aaaa-1111", "error", lock, 5),
+        ("GHSA-bbbb-2222", "error", lock, 5),
+    ])
+    body = client.get(f"/api/trial/scans/{sid}").json()
+    assert body["total_findings"] == 3
+    assert body["severity_summary"] == {"warning": 1, "error": 2}
+
+
+def test_trial_top_findings_diversified_code_first():
+    lock = "package-lock.json"
+    rows = [(f"GHSA-{i:04d}", "error", lock, i + 1) for i in range(5)]
+    rows += [
+        ("python.sql-injection", "error", "app/views.py", 42),
+        ("python.weak-hash", "warning", "app/util.py", 7),
+        ("js.xss", "warning", "web/ui.js", 9),
+    ]
+    sid = _done_scan_with_findings(rows)
+    body = client.get(f"/api/trial/scans/{sid}").json()
+    top = body["top_findings"]
+    assert len(top) == main.TRIAL_TOP_FINDINGS
+    # A code error outranks lockfile errors at equal severity.
+    assert top[0]["file"] == "app/views.py"
+    # At most two rows from the lockfile in the top list.
+    assert sum(1 for f in top if f["file"] == lock) == 2
+
+
+def test_trial_top_findings_paths_are_repo_relative():
+    sid = _done_scan_with_findings([
+        ("python.sql-injection", "error",
+         "/data/braimsec/uploads/braimsec-trial-xyz/src/app/main.py", 3),
+    ])
+    body = client.get(f"/api/trial/scans/{sid}").json()
+    assert body["top_findings"][0]["file"] == "app/main.py"
+    assert "/data/" not in body["top_findings"][0]["file"]
