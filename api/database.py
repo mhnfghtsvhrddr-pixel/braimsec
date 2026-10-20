@@ -229,6 +229,16 @@ CREATE TABLE IF NOT EXISTS alert_emails (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_emails_org_email
     ON alert_emails(org_id, email);
+CREATE TABLE IF NOT EXISTS trial_scans (
+    scan_id TEXT PRIMARY KEY REFERENCES scans(id),
+    ip TEXT NOT NULL,
+    repo_url TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trial_scans_created
+    ON trial_scans(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trial_scans_ip
+    ON trial_scans(ip, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_emails_org ON alert_emails(org_id);
 -- Telegram alert chats: per-org chat ids for new-findings alerts.
 -- The list itself is the switch: no rows => no telegram alerts.
