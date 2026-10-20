@@ -14,6 +14,23 @@
 #   docker build -f deploy/docker/scan-runner.Dockerfile \
 #       -t braimsec/scan-runner:1.0 .
 #
+# Non-root containers (one-time migration for existing installs):
+#   api, worker, beat, runner and the scan sandbox all run as uid/gid
+#   10001 (USER in their Dockerfiles + the `user:` pins below). The data
+#   dir was created by root and is bind-mounted read-write into those
+#   containers, so hand it to the runtime user ONCE (and again after any
+#   restore performed as root):
+#     docker compose -f docker-compose.prod.yml down
+#     sudo chown -R 10001:10001 $HOST_DATA_DIR
+#     docker build -f deploy/docker/scan-runner.Dockerfile \
+#         -t braimsec/scan-runner:1.0 .   # sandbox image: rebuilt too
+#     docker compose -f docker-compose.prod.yml up -d --build
+#   deploy.sh performs the chown itself on fresh installs.
+#   Rollback: check out the commit before the non-root change, rebuild
+#   every image the same way (compose --build + the scan-runner build
+#   above); chown the data dir back only if root images are restored
+#   permanently:  sudo chown -R 0:0 $HOST_DATA_DIR
+#
 # Usage (on the server, inside deploy/):
 #   cp .env.example .env   # then fill SITE_ADDRESS (+ secrets when needed)
 #   docker compose -f docker-compose.prod.yml up -d --build
@@ -32,6 +49,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.prod
+    user: "10001:10001"
     restart: unless-stopped
     depends_on:
       - redis
@@ -55,6 +73,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.prod
+    user: "10001:10001"
     restart: unless-stopped
     env_file:
       - .env
@@ -88,6 +107,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/docker/runner.Dockerfile
+    user: "10001:10001"
     restart: unless-stopped
     env_file:
       - .env
@@ -135,6 +155,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.prod
+    user: "10001:10001"
     restart: unless-stopped
     depends_on:
       - redis
