@@ -1,6 +1,6 @@
 """Custom injection-rule pack tests (scanner/rules/braimsec-inject.yaml).
 
-- Rule-pack hygiene: 9 rules, braimsec.inject.* ids (no binary needed)
+- Rule-pack hygiene: 10 rules, braimsec.inject.* ids (no binary needed)
 - Behavior: paired vuln/safe snippets — every rule fires on its true
   positive and stays silent on clean code (needs semgrep; skipped when
   the binary is absent). This is the FP-discipline gate: a rule that
@@ -66,6 +66,7 @@ def _run_rules(files):
 
 EXPECTED_IDS = [
     "braimsec.inject.command-injection",
+    "braimsec.inject.csv-formula-injection",
     "braimsec.inject.deserialization",
     "braimsec.inject.js-code-eval",
     "braimsec.inject.js-dom-xss",
@@ -79,11 +80,11 @@ EXPECTED_IDS = [
 TAINT_IDS = [i for i in EXPECTED_IDS if i != "braimsec.inject.xxe-unsafe-parser"]
 
 
-def test_pack_has_nine_inject_rules():
+def test_pack_has_ten_inject_rules():
     with open(RULES) as f:
         pack = yaml.safe_load(f)
     rules = pack["rules"]
-    assert len(rules) == 9
+    assert len(rules) == 10
     assert sorted(r["id"] for r in rules) == EXPECTED_IDS
 
 
@@ -97,6 +98,7 @@ def test_taint_rules_are_taint_mode_and_python_or_js():
               "braimsec.inject.xxe-tainted-parse",
               "braimsec.inject.deserialization", "braimsec.inject.sqli",
               "braimsec.inject.python-code-eval",
+              "braimsec.inject.csv-formula-injection",
               "braimsec.inject.xss-render-template-string"}
     js_ids = {"braimsec.inject.js-code-eval", "braimsec.inject.js-dom-xss"}
     for rid in py_ids:
@@ -146,6 +148,16 @@ VULN = {
                  "    return str(eval(expr))\n"
                  "def run():\n"
                  "    exec(request.form['code'])\n"),
+    # record cells written raw: dict reads flow into writerow unguarded
+    "csvfmt.py": ("import csv, io, json\n"
+                  "def export(findings, events):\n"
+                  "    buf = io.StringIO()\n"
+                  "    w = csv.writer(buf)\n"
+                  "    w.writerow(['severity', 'message'])\n"
+                  "    for f in findings:\n"
+                  "        w.writerow([f.get('severity', ''), f['message']])\n"
+                  "    for e in events:\n"
+                  "        w.writerow([e.get('actor', ''), json.dumps(e.get('detail') or {})])\n"),
 }
 
 SAFE = {
@@ -184,6 +196,19 @@ SAFE = {
                       "    a = eval('1+2')\n"
                       "    b = ast.literal_eval(request.args.get('e'))\n"
                       "    return (a, b)\n"),
+    # csv exports: constant headers are never tainted, and every data
+    # cell passes through the _csv_cell sanitizer -> silent
+    "csvfmt_safe.py": ("import csv, io, json\n"
+                       "def _csv_cell(v):\n"
+                       "    return v\n"
+                       "def export(findings, events):\n"
+                       "    buf = io.StringIO()\n"
+                       "    w = csv.writer(buf)\n"
+                       "    w.writerow(['severity', 'message'])\n"
+                       "    for f in findings:\n"
+                       "        w.writerow([_csv_cell(f.get('severity', '')), _csv_cell(f['message'])])\n"
+                       "    for e in events:\n"
+                       "        w.writerow([_csv_cell(e.get('actor', '')), _csv_cell(json.dumps(e.get('detail') or {}))])\n"),
 }
 
 
@@ -199,6 +224,7 @@ def test_vuln_snippets_fire():
     assert ("braimsec.inject.js-code-eval", "eval.js") in got
     assert ("braimsec.inject.js-dom-xss", "domxss.js") in got
     assert ("braimsec.inject.python-code-eval", "peval.py") in got
+    assert ("braimsec.inject.csv-formula-injection", "csvfmt.py") in got
 
 
 @needs_sg
