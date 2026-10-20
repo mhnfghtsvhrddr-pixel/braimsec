@@ -29,6 +29,19 @@ RUN curl -sSL -o /tmp/docker.tgz \
 WORKDIR /srv/runner
 COPY runner/runner.py ./runner.py
 
+# --- Non-root runtime user (uid/gid 10001, same as every BraimSec image) --
+# The runner creates uploads/ + sandbox-out/ and the per-scan out dirs
+# under the HOST_DATA_DIR bind mount (tempfile.mkdtemp dirs are mode
+# 0700), so its uid MUST match the scan-sandbox containers' uid or the
+# sandboxes could not write their findings. Docker access is unaffected:
+# it goes to the socket-proxy over HTTP (DOCKER_HOST=tcp://...), never
+# to a socket file, so no group/socket permissions are involved.
+RUN groupadd --gid 10001 braimsec \
+    && useradd --uid 10001 --gid 10001 \
+        --home-dir /home/braimsec --create-home braimsec
+ENV HOME=/home/braimsec
+USER 10001
+
 # Internal compose network only — never published, no Caddy route.
 EXPOSE 8001
 
