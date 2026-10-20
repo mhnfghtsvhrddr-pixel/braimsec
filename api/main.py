@@ -22,6 +22,7 @@ import tempfile
 import time
 import uuid
 import zipfile
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -144,7 +145,22 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan: run the startup sequence before serving.
+
+    Replaces the deprecated @app.on_event("startup") hook. The work
+    itself stays in startup() (defined below) so tests can invoke it
+    directly; this handler runs at server start, by which time the
+    module is fully loaded. No shutdown teardown existed under
+    on_event and none is needed now.
+    """
+    startup()
+    yield
+
+
 app = FastAPI(title="BraimSec API", version="0.1.0",
+                lifespan=lifespan,
                 # Built-in docs are disabled: the curated, fail-closed API
                 # reference lives at GET /docs (+ /api/openapi.json),
                 # generated from api/openapi.py.
@@ -393,8 +409,11 @@ def _recover_orphaned_scans() -> int:
         db.close()
 
 
-@app.on_event("startup")
 def startup():
+    """Startup sequence, run by the lifespan handler (see above).
+
+    Kept as a plain function so tests can invoke it directly.
+    """
     init_db()
     seed_plans()
     ensure_owner_org()
