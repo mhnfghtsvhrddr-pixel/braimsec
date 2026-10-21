@@ -107,6 +107,12 @@ celery_app.conf.update(
             "task": "braimsec.heartbeat",
             "schedule": 60.0,
         },
+        # Trial-lead second reminder: every 6h, nudge leads whose first
+        # report email went out 3+ days ago and who never got reminded.
+        "braimsec.trial-reminders": {
+            "task": "braimsec.trial_reminders",
+            "schedule": 6 * 3600.0,
+        },
     },
 )
 
@@ -684,6 +690,61 @@ def heartbeat():
     except Exception:  # noqa: BLE001 - heartbeat must never raise
         log.exception("heartbeat stamp failed")
     return "ok"
+
+
+@celery_app.task(name="braimsec.trial_reminders")
+def trial_reminders():
+    """Second nudge for trial leads (beat: every 6h).
+
+    Leads whose first report email was delivered 3+ days ago and who never
+    got a reminder receive one gentle follow-up pointing at the free
+    account. Idempotent via the reminded_at stamp. Never raises.
+    """
+    from datetime import datetime, timedelta, timezone
+    from email_alerts import send_email
+    sent = 0
+    try:
+        db = get_db()
+        try:
+            cutoff = (datetime.now(timezone.utc)
+                      - timedelta(days=3)).isoformat()
+            rows = db.execute(
+                "SELECT l.email, t.repo_url FROM trial_leads l"
+                " LEFT JOIN trial_scans t ON t.scan_id=l.scan_id"
+                " WHERE l.emailed_at IS NOT NULL AND l.reminded_at IS NULL"
+                " AND l.emailed_at < ?", (cutoff,)).fetchall()
+            for r in rows:
+                repo = f" of {r['repo_url']}" if r["repo_url"] else ""
+                subject = "Still thinking about your BraimSec scan?"
+                text = (
+                    "Hi,\n\nThree days ago you ran a trial security scan"
+                    f"{repo} with BraimSec.\n\n"
+                    "The findings are still waiting — and with a free "
+                    "account you get AI fix suggestions for each one plus "
+                    "a PDF report you can hand to your team.\n\n"
+                    "Start your 7-day free trial (no card needed): "
+                    "https://braimsec.world\n\n— The BraimSec team\n")
+                html = (
+                    "<p>Hi,</p><p>Three days ago you ran a trial security "
+                    f"scan{repo} with BraimSec.</p>"
+                    "<p>The findings are still waiting — and with a free "
+                    "account you get AI fix suggestions for each one plus "
+                    "a PDF report you can hand to your team.</p>"
+                    '<p><a href="https://braimsec.world">Start your 7-day '
+                    "free trial</a> (no card needed).</p>"
+                    "<p>— The BraimSec team</p>")
+                ok, _, _ = send_email(r["email"], subject, text, html)
+                if ok:
+                    db.execute(
+                        "UPDATE trial_leads SET reminded_at=? WHERE email=?",
+                        (_now_iso(), r["email"]))
+                    sent += 1
+            db.commit()
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - reminders must never raise
+        log.exception("trial reminders failed")
+    return {"reminded": sent}
 
 
 def enqueue_vcs_ingest(repo_id: str, sha: str,
