@@ -158,5 +158,12 @@ def test_leads_view_wired():
     # i18n keys used by the view must exist in both languages
     for key in ["nav.leads", "leads.title", "leads.desc", "leads.email",
                 "leads.repo", "leads.captured", "leads.emailed", "leads.yes",
-                "leads.no", "leads.empty", "leads.forbidden"]:
+                "leads.no", "leads.empty", "leads.forbidden", "leads.export",
+                "leads.st_scans", "leads.st_done", "leads.st_leads",
+                "leads.st_conv"]:
         assert key in h, key
+    # funnel stats + CSV export wired
+    assert 'id="leads-stats"' in h
+    assert 'api("/trial/stats")' in h
+    assert "async function exportLeadsCsv()" in h
+    assert '"/trial/leads.csv"' in h
