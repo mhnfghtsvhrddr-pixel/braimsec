@@ -2666,15 +2666,50 @@ _doc("GET", "/api/trial/email-preview",
                   "the exact builder the background task uses, with sample "
                   "findings, so the dashboard shows what leads receive."),
      auth="key", min_role="owner", org_scope=False, rate_limit="60/minute",
-     params=[],
+     params=[_param("lang", "query", "string",
+                    "Preview language: ar or en (default ar).", False,
+                    example="ar")],
      request_body=None,
      responses={
          "200": _resp("Email subject, plain-text and HTML bodies.",
                       {"subject": "Your BraimSec trial scan report (4 findings)",
                        "text": "Hi,\n\nFull findings list...\n",
-                       "html": "<p>Hi,</p><p>Full findings list..."}),
+                       "html": "<p>Hi,</p><p>Full findings list...",
+                       "lang": "en"}),
          "401": _err401(),
          "403": _err403(),
+         "429": _err429(),
+     })
+
+_doc("GET", "/api/trial/public-stats",
+     tag="Trial",
+     summary="Public trial counters",
+     description=("Public aggregate trial counters for the social-proof "
+                  "badge on the trial page. Totals only — no per-scan or "
+                  "per-lead data."),
+     auth=None, rate_limit="60/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("Aggregate counters.",
+                      {"trial_scans": 128, "trial_scans_done": 120}),
+         "429": _err429(),
+     })
+
+_doc("GET", "/trial/r/{scan_id}",
+     tag="Trial",
+     summary="Shareable trial report page",
+     description=("Public read-only HTML report for a trial scan — the same "
+                  "payload as the JSON status endpoint, rendered as a "
+                  "shareable page with social preview tags."),
+     auth=None, rate_limit="60/minute",
+     params=[_param("scan_id", "path", "string",
+                    "Trial scan id.", True, example="a1b2c3d4e5f6")],
+     request_body=None,
+     responses={
+         "200": _resp("HTML report page.", "<html>...",
+                      content_type="text/html"),
+         "404": _err404(),
          "429": _err429(),
      })
 
@@ -2689,7 +2724,7 @@ _doc("GET", "/api/trial/leads.csv",
      responses={
          "200": _resp("CSV file.",
                       "email,scan_id,repo_url,created_at,emailed_at,"
-                      "reminded_at\n",
+                      "reminded_at,lang\n",
                       content_type="text/csv"),
          "401": _err401(),
          "403": _err403(),
