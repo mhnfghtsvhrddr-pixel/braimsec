@@ -2659,6 +2659,25 @@ _doc("GET", "/api/trial/leads",
          "429": _err429(),
      })
 
+_doc("GET", "/api/trial/email-preview",
+     tag="Trial",
+     summary="Preview the trial follow-up email",
+     description=("Owner-only preview of the lead follow-up email: renders "
+                  "the exact builder the background task uses, with sample "
+                  "findings, so the dashboard shows what leads receive."),
+     auth="key", min_role="owner", org_scope=False, rate_limit="60/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("Email subject, plain-text and HTML bodies.",
+                      {"subject": "Your BraimSec trial scan report (4 findings)",
+                       "text": "Hi,\n\nFull findings list...\n",
+                       "html": "<p>Hi,</p><p>Full findings list..."}),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
 _doc("GET", "/api/trial/leads.csv",
      tag="Trial",
      summary="Export trial leads (CSV)",
