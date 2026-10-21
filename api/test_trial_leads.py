@@ -388,10 +388,16 @@ def test_email_preview_owner_only():
                    headers={"X-API-Key": owner_key})
     assert r.status_code == 200
     body = r.json()
-    assert "BraimSec trial scan report" in body["subject"]
+    assert body["lang"] == "ar"  # dashboard default
+    assert "تقرير فحص BraimSec" in body["subject"]
     assert "<ul>" in body["html"]
     assert "shop/views.py" in body["html"]
     assert "braimsec.world" in body["html"]
+    r = client.get("/api/trial/email-preview?lang=en",
+                   headers={"X-API-Key": owner_key})
+    body = r.json()
+    assert body["lang"] == "en"
+    assert "BraimSec trial scan report" in body["subject"]
     assert "Full findings list" in body["text"]
     r = client.get("/api/trial/email-preview",
                    headers={"X-API-Key": member_key})
@@ -405,8 +411,8 @@ def test_email_preview_uses_same_builder_as_sender():
     # same builder, same sample data.
     owner_key, _ = _mk_keys()
     subject, text, html = main._build_trial_lead_email(
-        "demo/example-repo", list(main._TRIAL_PREVIEW_SAMPLE))
-    r = client.get("/api/trial/email-preview",
+        "demo/example-repo", list(main._TRIAL_PREVIEW_SAMPLE), "en")
+    r = client.get("/api/trial/email-preview?lang=en",
                    headers={"X-API-Key": owner_key})
     assert r.status_code == 200
     body = r.json()
@@ -434,3 +440,98 @@ def test_lead_report_email_unchanged_after_refactor(monkeypatch):
     assert "python.test.rule" in text
     assert "a.py:3" in text
     assert "braimsec.world" in html
+
+
+def test_lead_capture_stores_lang():
+    r = client.post("/api/trial/leads",
+                    data={"email": "ar@example.com", "lang": "ar"})
+    assert r.status_code == 200
+    db = get_db()
+    row = db.execute("SELECT lang FROM trial_leads WHERE email=?",
+                     ("ar@example.com",)).fetchone()
+    db.close()
+    assert row["lang"] == "ar"
+    # invalid lang falls back to en
+    r = client.post("/api/trial/leads",
+                    data={"email": "xx@example.com", "lang": "fr"})
+    assert r.status_code == 200
+    db = get_db()
+    row = db.execute("SELECT lang FROM trial_leads WHERE email=?",
+                     ("xx@example.com",)).fetchone()
+    db.close()
+    assert row["lang"] == "en"
+
+
+def test_lead_report_email_arabic(monkeypatch):
+    import email_alerts
+    import main as m
+    scan_id = _mk_done_trial_scan_with_findings()
+    db = get_db()
+    db.execute("INSERT OR IGNORE INTO trial_leads (email, scan_id, ip,"
+               " created_at, lang) VALUES (?,?,?,?,?)",
+               ("arlead@example.com", scan_id, "5.5.5.5",
+                "2026-01-01T00:00:00+00:00", "ar"))
+    db.commit()
+    db.close()
+    sent = []
+    monkeypatch.setattr(
+        email_alerts, "send_email",
+        lambda to, subj, text, html: sent.append((to, subj, text, html))
+        or (True, 1, None))
+    m._send_trial_lead_report("arlead@example.com", scan_id)
+    assert len(sent) == 1
+    to, subj, text, html = sent[0]
+    assert subj == "Your BraimSec trial scan report (1 finding)".replace(
+        "Your BraimSec trial scan report (1 finding)",
+        "تقرير فحص BraimSec التجريبي (1 نتيجة)")
+    assert "اقتراحات إصلاح بالذكاء الاصطناعي" in text
+    assert 'dir="rtl"' in html
+
+
+def test_email_preview_lang_param():
+    owner_key, _ = _mk_keys()
+    r = client.get("/api/trial/email-preview",
+                   headers={"X-API-Key": owner_key})
+    assert r.status_code == 200
+    assert r.json()["lang"] == "ar"
+    assert "تقرير فحص BraimSec" in r.json()["subject"]
+    r = client.get("/api/trial/email-preview?lang=en",
+                   headers={"X-API-Key": owner_key})
+    assert r.status_code == 200
+    assert r.json()["lang"] == "en"
+    assert "trial scan report" in r.json()["subject"]
+
+
+def test_public_stats_no_auth():
+    init_db()
+    r = client.get("/api/trial/public-stats")
+    assert r.status_code == 200
+    body = r.json()
+    assert "trial_scans" in body and "trial_scans_done" in body
+    assert isinstance(body["trial_scans"], int)
+
+
+def test_shareable_report_page():
+    scan_id = _mk_done_trial_scan_with_findings()
+    r = client.get(f"/trial/r/{scan_id}")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "github.com/o/r" in r.text
+    assert "python.test.rule" in r.text
+    assert 'property="og:title"' in r.text
+    # unknown scan -> 404
+    r = client.get("/trial/r/does_not_exist")
+    assert r.status_code == 404
+    # report page exposes nothing beyond the public JSON endpoint
+    r = client.get(f"/trial/r/{scan_id}")
+    j = client.get(f"/api/trial/scans/{scan_id}").json()
+    assert str(j["total_findings"]) in r.text
+
+
+def test_csv_includes_lang_column():
+    owner_key, _ = _mk_keys()
+    r = client.get("/api/trial/leads.csv",
+                   headers={"X-API-Key": owner_key})
+    assert r.status_code == 200
+    assert r.text.splitlines()[0].strip() == \
+        "email,scan_id,repo_url,created_at,emailed_at,reminded_at,lang"
