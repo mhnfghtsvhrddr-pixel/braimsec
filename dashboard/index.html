@@ -473,6 +473,7 @@ document.addEventListener('DOMContentLoaded', ()=>{ if(_resetToken) openAuthModa
   <button id="nav-vcs" data-i18n="nav.vcs" onclick="showView('vcs')">🔗 المستودعات</button>
   <button id="nav-billing" data-i18n="nav.billing" onclick="showView('billing')">💳 الاشتراك والاستخدام</button>
   <button id="nav-keys" data-i18n="nav.keys" onclick="showView('keys')">🔑 مفاتيح API</button>
+  <button id="nav-leads" data-i18n="nav.leads" onclick="showView('leads')">🎯 الليدز</button>
 </nav>
 
 <main>
@@ -776,6 +777,14 @@ document.addEventListener('DOMContentLoaded', ()=>{ if(_resetToken) openAuthModa
     </div>
     <div id="keys-notice"></div>
     <div id="keys-wrap"></div>
+  </section>
+  <section id="view-leads" hidden>
+    <div class="toolbar">
+      <h2 data-i18n="leads.title">🎯 ليدز التجربة</h2>
+      <button class="btn-ghost" data-i18n="cmn.refresh" onclick="loadLeads()">↻ تحديث</button>
+    </div>
+    <p style="color:var(--muted);font-size:0.9rem;margin:0 0 1rem" data-i18n="leads.desc">إيميلات الزوار الذين أكملوا فحصاً تجريبياً وطلبوا التقرير الكامل — للمتابعة البيعية.</p>
+    <div id="leads-wrap"></div>
   </section>
 </main>
 
@@ -1133,6 +1142,17 @@ const I18N = {
   "nav.vcs": "🔗 المستودعات",
   "nav.billing": "💳 الاشتراك والاستخدام",
   "nav.keys": "🔑 مفاتيح API",
+  "nav.leads": "🎯 الليدز",
+  "leads.title": "🎯 ليدز التجربة",
+  "leads.desc": "إيميلات الزوار الذين أكملوا فحصاً تجريبياً وطلبوا التقرير الكامل — للمتابعة البيعية.",
+  "leads.email": "الإيميل",
+  "leads.repo": "المستودع",
+  "leads.captured": "وقت الالتقاط",
+  "leads.emailed": "وصل الإيميل",
+  "leads.yes": "✅ نعم",
+  "leads.no": "⏳ بانتظار",
+  "leads.empty": "لا يوجد ليدز بعد — شارك صفحة التجربة المجانية.",
+  "leads.forbidden": "عرض الليدز يتطلب مفتاح المالك (owner).",
   "scans.title": "📋 عمليات الفحص",
   "scans.exec_report": "📊 تقرير تنفيذي",
   "scans.new": "+ فحص جديد",
@@ -1766,6 +1786,17 @@ const I18N = {
   "nav.vcs": "🔗 Repositories",
   "nav.billing": "💳 Billing & Usage",
   "nav.keys": "🔑 API Keys",
+  "nav.leads": "🎯 Leads",
+  "leads.title": "🎯 Trial leads",
+  "leads.desc": "Emails of visitors who completed a trial scan and requested the full report — for sales follow-up.",
+  "leads.email": "Email",
+  "leads.repo": "Repository",
+  "leads.captured": "Captured",
+  "leads.emailed": "Email sent",
+  "leads.yes": "✅ Yes",
+  "leads.no": "⏳ Pending",
+  "leads.empty": "No leads yet — share the free trial page.",
+  "leads.forbidden": "Viewing leads requires the owner key.",
   "scans.title": "📋 Scans",
   "scans.exec_report": "📊 Executive report",
   "scans.new": "+ New scan",
@@ -2421,7 +2452,7 @@ document.addEventListener("DOMContentLoaded", applyI18n);
 let curView = "scans";
 function showView(name) {
   curView = name;
-  ["scans", "trends", "sched", "reports", "vcs", "billing", "keys"].forEach(v => {
+  ["scans", "trends", "sched", "reports", "vcs", "billing", "keys", "leads"].forEach(v => {
     document.getElementById("nav-" + v).classList.toggle("active", v === name);
   });
   document.getElementById("view-scans").hidden = name !== "scans";
@@ -2432,6 +2463,7 @@ function showView(name) {
   document.getElementById("view-vcs").hidden = name !== "vcs";
   document.getElementById("view-billing").hidden = name !== "billing";
   document.getElementById("view-keys").hidden = name !== "keys";
+  document.getElementById("view-leads").hidden = name !== "leads";
   clearInterval(pollTimer);
   if (name === "scans") loadScans();
   if (name === "trends") loadTrends();
@@ -2440,6 +2472,7 @@ function showView(name) {
   if (name === "vcs") loadVcsRepos();
   if (name === "billing") loadBilling();
   if (name === "keys") loadKeys();
+  if (name === "leads") loadLeads();
 }
 
 /* ---------- الفحوصات ---------- */
@@ -2825,6 +2858,33 @@ async function loadBilling() {
 }
 
 /* ---------- مفاتيح API ---------- */
+/* ---------- ليدز التجربة ---------- */
+async function loadLeads() {
+  const wrap = document.getElementById("leads-wrap");
+  wrap.innerHTML = `<p style="color:var(--muted)"><span class="spinner"></span> ${t("cmn.loading")}</p>`;
+  let data;
+  try {
+    data = await api("/trial/leads");
+  } catch (e) {
+    wrap.innerHTML = `<div class="notice">🔒 ${t("leads.forbidden")}</div>`;
+    return;
+  }
+  const leads = (data && data.leads) || [];
+  if (!leads.length) {
+    wrap.innerHTML = `<div class="empty"><p>${t("leads.empty")}</p></div>`;
+    return;
+  }
+  wrap.innerHTML = `<table><thead><tr>
+      <th>${t("leads.email")}</th><th>${t("leads.repo")}</th><th>${t("leads.captured")}</th><th>${t("leads.emailed")}</th>
+    </tr></thead><tbody>` + leads.map(l =>
+    `<tr>
+      <td dir="ltr">${esc(l.email)}</td>
+      <td dir="ltr" style="max-width:16rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.repo_url || "")}">${esc(l.repo_url || "—")}</td>
+      <td>${esc(fmtDT(l.created_at))}</td>
+      <td>${l.emailed ? t("leads.yes") : t("leads.no")}</td>
+    </tr>`).join("") + `</tbody></table>`;
+}
+
 async function loadKeys() {
   const wrap = document.getElementById("keys-wrap");
   const notice = document.getElementById("keys-notice");
