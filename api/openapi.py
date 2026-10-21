@@ -2637,6 +2637,28 @@ _doc("GET", "/api/trial/scans/{scan_id}",
          "429": _err429(),
      })
 
+_doc("GET", "/api/trial/leads",
+     tag="Trial",
+     summary="List trial leads",
+     description=("Owner-only sales follow-up list: captured trial-lead "
+                  "emails with their scan, capture time and whether the "
+                  "follow-up report email was delivered."),
+     auth="key", min_role="owner", org_scope=False, rate_limit="60/minute",
+     params=[_param("limit", "query", "integer",
+                    "Max rows (1-500, default 100).", False, example=100)],
+     request_body=None,
+     responses={
+         "200": _resp("Trial leads, newest first.",
+                      {"leads": [{"email": "founder@example.com",
+                                  "scan_id": "a1b2c3d4e5f6",
+                                  "repo_url": "https://github.com/owner/repo",
+                                  "created_at": "2026-10-21T10:00:00+00:00",
+                                  "emailed": True}]}),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
 _doc("GET", "/trial",
      tag="Trial",
      summary="Trial scan page",
