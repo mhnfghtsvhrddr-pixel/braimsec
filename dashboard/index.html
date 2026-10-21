@@ -429,18 +429,23 @@
 <script>
 let _authMode = 'login';
 let _resetToken = new URLSearchParams(location.search).get('reset_token') || '';
-/* قفل تمرير الصفحة خلف أي نافذة عائمة: اللمس/السحب خلف النافذة
-   لا يحرّك الصفحة من ورائها (مشكلة شائعة على الموبايل). */
+/* قفل تمرير الصفحة تلقائياً خلف أي نافذة عائمة: مراقب واحد يغطي كل
+   النوافذ (modal-back + auth + preview) — الحالية وأي نافذة مستقبلية —
+   فاللمس/السحب خلف النافذة لا يحرّك الصفحة من ورائها على الموبايل. */
 function updateBodyScrollLock() {
-  const ids = ["auth-modal", "email-preview-modal"];
-  const modalOpen = ids.some(id => {
+  const anyBack = [...document.querySelectorAll(".modal-back")]
+    .some(el => !el.hidden);
+  const anyFlex = ["auth-modal", "email-preview-modal"].some(id => {
     const el = document.getElementById(id);
     return el && el.style.display === "flex";
-  }) || !document.getElementById("ob-back").hidden;
-  document.body.style.overflow = modalOpen ? "hidden" : "";
+  });
+  document.body.style.overflow = (anyBack || anyFlex) ? "hidden" : "";
 }
-function openAuthModal(){ document.getElementById('auth-modal').style.display='flex'; updateBodyScrollLock(); authTab(_resetToken?'reset':_authMode); }
-function closeAuthModal(){ document.getElementById('auth-modal').style.display='none'; updateBodyScrollLock(); document.getElementById('auth-err').textContent=''; }
+new MutationObserver(updateBodyScrollLock).observe(document.body, {
+  attributes: true, subtree: true, attributeFilter: ["hidden", "style"]
+});
+function openAuthModal(){ document.getElementById('auth-modal').style.display='flex'; authTab(_resetToken?'reset':_authMode); }
+function closeAuthModal(){ document.getElementById('auth-modal').style.display='none'; document.getElementById('auth-err').textContent=''; }
 function authTab(m){ _authMode=m;
   const titles={login:t("auth.title_in"),register:t("auth.tab_register"),forgot:t("auth.forgot_t"),reset:t("auth.reset_t")};
   const gos={login:t("auth.go"),register:t("auth.go_reg"),forgot:t("auth.go_forgot"),reset:t("auth.go_reset")};
@@ -2968,7 +2973,6 @@ async function previewLeadEmail() {
   const m = document.getElementById("email-preview-modal");
   const body = document.getElementById("email-preview-body");
   m.style.display = "flex";
-  updateBodyScrollLock();
   body.innerHTML = `<p style="color:var(--muted)"><span class="spinner"></span> ${t("cmn.loading")}</p>`;
   try {
     const r = await api("/trial/email-preview");
@@ -2980,7 +2984,6 @@ async function previewLeadEmail() {
 }
 function closeEmailPreview() {
   document.getElementById("email-preview-modal").style.display = "none";
-  updateBodyScrollLock();
 }
 
 async function loadKeys() {
@@ -4160,7 +4163,7 @@ let obRawKey = "";
 const OB_DONE = "braimsec_onboarding_done";
 const obState = { key: false, scan: false, email: false };
 
-function obShow() { document.getElementById("ob-back").hidden = false; updateBodyScrollLock(); obGo(1); }
+function obShow() { document.getElementById("ob-back").hidden = false; obGo(1); }
 function obGo(n) {
   obStep = Math.min(5, Math.max(1, n));
   for (let i = 1; i <= 5; i++) document.getElementById("ob-pane-" + i).hidden = i !== obStep;
@@ -4188,7 +4191,6 @@ function obFinish(skip) {
   if (obPoll) { clearInterval(obPoll); obPoll = null; }
   localStorage.setItem(OB_DONE, "1");
   document.getElementById("ob-back").hidden = true;
-  updateBodyScrollLock();
   if (!skip) showView("scans");
 }
 function obRestart() {
