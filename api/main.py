@@ -4503,10 +4503,11 @@ async def create_trial_scan(request: Request,
             "poll_url": f"/api/trial/scans/{result['scan_id']}"}
 
 
-@app.get("/api/trial/scans/{scan_id}")
-@limiter.limit("60/minute")
-def trial_scan_status(request: Request, scan_id: str):
-    """Public summary of a trial scan (counts + top findings only)."""
+def _trial_scan_public_payload(scan_id: str) -> dict:
+    """Shared public payload for the trial scan JSON API and the shareable
+    HTML report page. Exposes only counts + top findings — the same data
+    the public JSON endpoint already serves."""
+
     db = get_db()
     try:
         trial = db.execute(
@@ -4582,6 +4583,103 @@ def trial_scan_status(request: Request, scan_id: str):
         db.close()
 
 
+@app.get("/api/trial/scans/{scan_id}")
+@limiter.limit("60/minute")
+def trial_scan_status(request: Request, scan_id: str):
+    """Public summary of a trial scan (counts + top findings only)."""
+    return _trial_scan_public_payload(scan_id)
+
+
+@app.get("/api/trial/public-stats")
+@limiter.limit("60/minute")
+def trial_public_stats(request: Request):
+    """Public aggregate trial counters for the social-proof badge.
+
+    Totals only — no per-scan or per-lead data, safe to expose."""
+    db = get_db()
+    try:
+        n = db.execute("SELECT COUNT(*) FROM trial_scans").fetchone()[0]
+        done = db.execute(
+            "SELECT COUNT(*) FROM trial_scans t JOIN scans s"
+            " ON s.id=t.scan_id WHERE s.status='done'").fetchone()[0]
+    finally:
+        db.close()
+    return {"trial_scans": n, "trial_scans_done": done}
+
+
+@app.get("/trial/r/{scan_id}", response_class=HTMLResponse)
+@limiter.limit("60/minute")
+def trial_report_page(request: Request, scan_id: str):
+    """Shareable read-only report page for a trial scan.
+
+    Renders the exact same public payload as the JSON endpoint — no new
+    data exposure. Visitors can share this link with their team.
+    """
+    import html as _html
+    data = _trial_scan_public_payload(scan_id)
+    target = _html.escape(str(data.get("target") or "repository"))
+    sid = _html.escape(scan_id)
+    status = data.get("status")
+    if status == "done":
+        n = data.get("total_findings", 0)
+        title = "BraimSec scan report: %d finding%s in %s" % (
+            n, "" if n == 1 else "s", target)
+        chips = "".join(
+            '<span class="chip">%s: %s</span>'
+            % (_html.escape(str(k)), v)
+            for k, v in (data.get("severity_summary") or {}).items())
+        rows = "".join(
+            '<div class="finding"><b>%s</b> %s<br><code>%s:%s</code><br>%s</div>'
+            % (_html.escape(str(x.get("severity") or "")),
+               _html.escape(str(x.get("rule_id") or "")),
+               _html.escape(str(x.get("file") or "")),
+               _html.escape(str(x.get("line") or "")),
+               _html.escape(str(x.get("message") or "")))
+            for x in (data.get("top_findings") or []))
+        body = ("<h1>\U0001f6e1\U0000fe0f %s</h1>"
+                "<p class=\"sub\">%s</p>"
+                "<div>%s</div>%s"
+                "<p class=\"sub\">%s</p>" % (
+                    title, "Top findings from the free trial scan.",
+                    chips, rows,
+                    _html.escape(str(data.get("note") or ""))))
+    elif status == "failed":
+        title = "BraimSec scan report: failed"
+        body = ("<h1>\U0001f6e1\U0000fe0f Scan failed</h1>"
+                "<p class=\"sub\">The trial scan of %s could not complete.</p>"
+                % target)
+    else:
+        title = "BraimSec scan report: in progress"
+        body = ("<h1>\U0001f6e1\U0000fe0f Scan in progress</h1>"
+                "<p class=\"sub\">The trial scan of %s is still running "
+                "\u2014 <a href=\"/trial\">watch it on the trial page</a>.</p>"
+                % target)
+    return ("""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>""" + _html.escape(title) + """</title>
+<meta property="og:title" content=\"""" + _html.escape(title) + """\">
+<meta property="og:description" content="Free BraimSec trial security scan \u2014 no signup.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://api.braimsec.world/trial/r/""" + sid + """\">
+<meta property="og:image" content="https://api.braimsec.world/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+body{font-family:system-ui,sans-serif;background:#0b1020;color:#e6e9f5;margin:0;
+display:flex;justify-content:center;padding:40px 16px}
+main{max-width:640px;width:100%} h1{font-size:24px} p.sub{color:#9aa3c7}
+.chip{display:inline-block;padding:2px 10px;border-radius:99px;margin:2px;background:#1b2350;font-size:13px}
+.finding{border:1px solid #2a3358;border-radius:8px;padding:10px 12px;margin:8px 0;font-size:14px}
+.finding b{color:#ffb4b4} code{color:#9fd0ff} a{color:#8fb0ff}
+.cta{margin-top:18px;border:1px solid #4f6df5;border-radius:10px;padding:14px;background:#121a3a}
+</style></head><body><main>""" + body + """
+<div class="cta"><b>Want the full report with AI fix suggestions?</b><br>
+<span style="color:#9aa3c7;font-size:14px">Create a free account at
+<a href="https://braimsec.world">braimsec.world</a> \u2014 or
+<a href="/trial">run your own free trial scan</a>.</span></div>
+</main></body></html>""")
+
+
 def _alert_owner_new_lead(email: str, scan_id: str | None,
                             repo_url: str | None):
     """Ping the owner the moment a NEW trial lead is captured (best-effort).
@@ -4610,52 +4708,119 @@ def _alert_owner_new_lead(email: str, scan_id: str | None,
         log.exception("trial lead owner alert failed")
 
 
-def _build_trial_lead_email(target, findings):
+def _build_trial_lead_email(target, findings, lang="en"):
     """Build the trial follow-up email: returns (subject, text, html).
 
     Pure function of its inputs so the dashboard preview endpoint renders
-    exactly what the background task sends to leads.
+    exactly what the background task sends to leads. Bilingual: "ar" for
+    Arabic-speaking leads, English otherwise.
     """
+    ar = (lang == "ar")
     summary = {}
     for f in findings:
         summary[f["severity"]] = summary.get(f["severity"], 0) + 1
     if findings:
-        lines = [f"  [{f['severity']}] {f['rule_id']} — "
+        lines = [f"  [{f['severity']}] {f['rule_id']} \u2014 "
                  f"{f['file']}:{f['line']}\n    {f['message'] or ''}"
                  for f in findings]
-        detail = ("Full findings list for %s:\n\n%s\n\n"
-                  % (target, "\n".join(lines)))
-        detail_html = ("<p>Full findings list for <b>%s</b>:</p><ul>%s</ul>"
-                       % (target, "".join(
+        if ar:
+            detail = ("\u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0646\u062a\u0627\u0626\u062c "
+                      "\u0627\u0644\u0643\u0627\u0645\u0644\u0629 \u0644ـ %s:\n\n%s\n\n"
+                      % (target, "\n".join(lines)))
+        else:
+            detail = ("Full findings list for %s:\n\n%s\n\n"
+                      % (target, "\n".join(lines)))
+        detail_html = ("<p>%s <b>%s</b>:</p><ul>%s</ul>"
+                       % ("\u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0646\u062a\u0627\u0626\u062c "
+                          "\u0627\u0644\u0643\u0627\u0645\u0644\u0629 \u0644ـ" if ar
+                          else "Full findings list for",
+                          target, "".join(
                            "<li><b>[%s]</b> %s<br><code>%s:%s</code><br>%s</li>"
                            % (f["severity"], f["rule_id"], f["file"],
                               f["line"], f["message"] or "")
                            for f in findings)))
     elif target:
-        detail = ("Your scan of %s is still running — open "
-                  "https://api.braimsec.world/trial to watch it finish.\n"
-                  % target)
-        detail_html = ("<p>Your scan of <b>%s</b> is still running — "
-                       "watch it finish on the trial page.</p>" % target)
+        if ar:
+            detail = ("\u0641\u062d\u0635 %s \u0645\u0627 \u0632\u0627\u0644 "
+                      "\u062c\u0627\u0631\u064a\u0627\u064b \u2014 "
+                      "\u062a\u0627\u0628\u0639 \u0627\u0643\u062a\u0645\u0627\u0644\u0647 "
+                      "\u0639\u0644\u0649 https://api.braimsec.world/trial.\n" % target)
+            detail_html = ("<p>\u0641\u062d\u0635 <b>%s</b> "
+                           "\u0645\u0627 \u0632\u0627\u0644 \u062c\u0627\u0631\u064a\u0627\u064b "
+                           "\u2014 \u062a\u0627\u0628\u0639 \u0627\u0643\u062a\u0645\u0627\u0644\u0647 "
+                           "\u0639\u0644\u0649 \u0635\u0641\u062d\u0629 \u0627\u0644\u062a\u062c\u0631\u0628\u0629.</p>"
+                           % target)
+        else:
+            detail = ("Your scan of %s is still running \u2014 open "
+                      "https://api.braimsec.world/trial to watch it finish.\n"
+                      % target)
+            detail_html = ("<p>Your scan of <b>%s</b> is still running \u2014 "
+                           "watch it finish on the trial page.</p>" % target)
     else:
-        detail = ("Thanks for trying BraimSec — scan any public repo at "
-                  "https://api.braimsec.world/trial, no signup needed.\n")
-        detail_html = ("<p>Thanks for trying BraimSec — scan any public repo "
-                       "on the trial page, no signup needed.</p>")
+        if ar:
+            detail = ("\u0634\u0643\u0631\u0627\u064b \u0644\u062a\u062c\u0631\u0628\u0629 "
+                      "BraimSec \u2014 \u0627\u0641\u062d\u0635 \u0623\u064a "
+                      "\u0645\u0633\u062a\u0648\u062f\u0639 \u0639\u0627\u0645 \u0639\u0644\u0649 "
+                      "https://api.braimsec.world/trial\u060c \u0628\u0644\u0627 "
+                      "\u062a\u0633\u062c\u064a\u0644.\n")
+            detail_html = ("<p>\u0634\u0643\u0631\u0627\u064b \u0644\u062a\u062c\u0631\u0628\u0629 "
+                           "BraimSec \u2014 \u0627\u0641\u062d\u0635 \u0623\u064a "
+                           "\u0645\u0633\u062a\u0648\u062f\u0639 \u0639\u0627\u0645 "
+                           "\u0639\u0644\u0649 \u0635\u0641\u062d\u0629 "
+                           "\u0627\u0644\u062a\u062c\u0631\u0628\u0629\u060c "
+                           "\u0628\u0644\u0627 \u062a\u0633\u062c\u064a\u0644.</p>")
+        else:
+            detail = ("Thanks for trying BraimSec \u2014 scan any public repo at "
+                      "https://api.braimsec.world/trial, no signup needed.\n")
+            detail_html = ("<p>Thanks for trying BraimSec \u2014 scan any public "
+                           "repo on the trial page, no signup needed.</p>")
     n = sum(summary.values())
-    subject = "Your BraimSec trial scan report (%d finding%s)" % (
-        n, "" if n == 1 else "s")
-    text = ("Hi,\n\n%s\n"
-            "Want AI fix suggestions and a PDF report? Create a free "
-            "account at https://braimsec.world — every plan starts with a "
-            "7-day free trial.\n\n— The BraimSec team\n" % detail)
-    html = ("<p>Hi,</p>%s<p>Want AI fix suggestions and a PDF report? "
-            "Create a free account at "
-            "<a href=\"https://braimsec.world\">braimsec.world</a> — every "
-            "plan starts with a 7-day free trial.</p>"
-            "<p>— The BraimSec team</p>" % detail_html)
+    if ar:
+        subject = ("\u062a\u0642\u0631\u064a\u0631 \u0641\u062d\u0635 "
+                   "BraimSec \u0627\u0644\u062a\u062c\u0631\u064a\u0628\u064a "
+                   "(%d %s)" % (n, "\u0646\u062a\u064a\u062c\u0629"
+                               if n == 1 else "\u0646\u062a\u0627\u0626\u062c"))
+        text = ("\u0645\u0631\u062d\u0628\u0627\u064b\u060c\n\n%s\n"
+                "\u0647\u0644 \u062a\u0631\u064a\u062f \u0627\u0642\u062a\u0631\u0627\u062d\u0627\u062a "
+                "\u0625\u0635\u0644\u0627\u062d \u0628\u0627\u0644\u0630\u0643\u0627\u0621 "
+                "\u0627\u0644\u0627\u0635\u0637\u0646\u0627\u0639\u064a "
+                "\u0648\u062a\u0642\u0631\u064a\u0631 PDF\u061f "
+                "\u0623\u0646\u0634\u0626 \u062d\u0633\u0627\u0628\u0627\u064b "
+                "\u0645\u062c\u0627\u0646\u064a\u0627\u064b \u0639\u0644\u0649 "
+                "https://braimsec.world \u2014 \u0643\u0644 \u0627\u0644\u062e\u0637\u0637 "
+                "\u062a\u0628\u062f\u0623 \u0628\u062a\u062c\u0631\u0628\u0629 "
+                "\u0645\u062c\u0627\u0646\u064a\u0629 \u0644\u0645\u062f\u0629 7 "
+                "\u0623\u064a\u0627\u0645.\n\n\u2014 \u0641\u0631\u064a\u0642 BraimSec\n"
+                % detail)
+        html = ("<p dir=\"rtl\">\u0645\u0631\u062d\u0628\u0627\u064b\u060c</p>"
+                "%s<p dir=\"rtl\">\u0647\u0644 \u062a\u0631\u064a\u062f "
+                "\u0627\u0642\u062a\u0631\u0627\u062d\u0627\u062a "
+                "\u0625\u0635\u0644\u0627\u062d \u0628\u0627\u0644\u0630\u0643\u0627\u0621 "
+                "\u0627\u0644\u0627\u0635\u0637\u0646\u0627\u0639\u064a "
+                "\u0648\u062a\u0642\u0631\u064a\u0631 PDF\u061f "
+                "\u0623\u0646\u0634\u0626 \u062d\u0633\u0627\u0628\u0627\u064b "
+                "\u0645\u062c\u0627\u0646\u064a\u0627\u064b \u0639\u0644\u0649 "
+                "<a href=\"https://braimsec.world\">braimsec.world</a> "
+                "\u2014 \u0643\u0644 \u0627\u0644\u062e\u0637\u0637 "
+                "\u062a\u0628\u062f\u0623 \u0628\u062a\u062c\u0631\u0628\u0629 "
+                "\u0645\u062c\u0627\u0646\u064a\u0629 \u0644\u0645\u062f\u0629 7 "
+                "\u0623\u064a\u0627\u0645.</p>"
+                "<p dir=\"rtl\">\u2014 \u0641\u0631\u064a\u0642 BraimSec</p>"
+                % detail_html)
+    else:
+        subject = "Your BraimSec trial scan report (%d finding%s)" % (
+            n, "" if n == 1 else "s")
+        text = ("Hi,\n\n%s\n"
+                "Want AI fix suggestions and a PDF report? Create a free "
+                "account at https://braimsec.world \u2014 every plan starts "
+                "with a 7-day free trial.\n\n\u2014 The BraimSec team\n"
+                % detail)
+        html = ("<p>Hi,</p>%s<p>Want AI fix suggestions and a PDF report? "
+                "Create a free account at "
+                "<a href=\"https://braimsec.world\">braimsec.world</a> "
+                "\u2014 every plan starts with a 7-day free trial.</p>"
+                "<p>\u2014 The BraimSec team</p>" % detail_html)
     return subject, text, html
-
 
 # Sample data for the owner-only email preview (dashboard "preview" button).
 _TRIAL_PREVIEW_SAMPLE = [
@@ -4682,7 +4847,7 @@ def _send_trial_lead_report(email: str, scan_id: str | None):
     NULL so ops can see it was not delivered.
     """
     from email_alerts import send_email  # noqa: E402
-    target, findings = None, []
+    target, findings, lang = None, [], "en"
     if scan_id:
         db = get_db()
         try:
@@ -4700,9 +4865,15 @@ def _send_trial_lead_report(email: str, scan_id: str | None):
                         "rule_id": f["rule_id"], "severity": f["severity"],
                         "message": f["message"],
                         "file": _trial_rel_path(f["file"]), "line": f["line"]})
+            lrow = db.execute(
+                "SELECT lang FROM trial_leads WHERE email=? AND "
+                "(scan_id=? OR (scan_id IS NULL AND ? IS NULL))",
+                (email, scan_id, scan_id)).fetchone()
+            if lrow and lrow["lang"] == "ar":
+                lang = "ar"
         finally:
             db.close()
-    subject, text, html = _build_trial_lead_email(target, findings)
+    subject, text, html = _build_trial_lead_email(target, findings, lang)
     ok, _, _ = send_email(email, subject, text, html)
     if ok and scan_id:
         db = get_db()
@@ -4729,7 +4900,8 @@ def _valid_lead_email(email: str) -> bool:
 async def create_trial_lead(request: Request,
                             background_tasks: BackgroundTasks,
                             email: str = Form(...),
-                            scan_id: str = Form("")):
+                            scan_id: str = Form(""),
+                            lang: str = Form("en")):
     """Capture an email on the /trial CTA after a scan completes.
 
     Public (the visitor has no account yet); heavily rate-limited. Stores
@@ -4738,6 +4910,7 @@ async def create_trial_lead(request: Request,
     email = (email or "").strip().lower()
     if not _valid_lead_email(email):
         raise HTTPException(400, "Please enter a valid email address.")
+    lang = "ar" if (lang or "").strip().lower() == "ar" else "en"
     db = get_db()
     try:
         if scan_id:
@@ -4749,9 +4922,9 @@ async def create_trial_lead(request: Request,
         else:
             scan_id = None
         cur = db.execute(
-            "INSERT OR IGNORE INTO trial_leads (email, scan_id, ip, created_at)"
-            " VALUES (?,?,?,?)",
-            (email, scan_id, get_remote_address(request), now()))
+            "INSERT OR IGNORE INTO trial_leads (email, scan_id, ip, created_at,"
+            " lang) VALUES (?,?,?,?,?)",
+            (email, scan_id, get_remote_address(request), now(), lang))
         db.commit()
         is_new = cur.rowcount > 0
         repo_url = None
@@ -4799,7 +4972,7 @@ def list_trial_leads(request: Request, limit: int = 100):
 
 @app.get("/api/trial/email-preview")
 @limiter.limit("60/minute")
-def trial_email_preview(request: Request):
+def trial_email_preview(request: Request, lang: str = "ar"):
     """Owner-only preview of the trial follow-up email.
 
     Renders the exact same builder the background task uses, with sample
@@ -4808,9 +4981,10 @@ def trial_email_preview(request: Request):
     """
     require_org_scope(request)
     require_role(request, "owner")
+    lang = "ar" if (lang or "").lower() == "ar" else "en"
     subject, text, html = _build_trial_lead_email(
-        "demo/example-repo", list(_TRIAL_PREVIEW_SAMPLE))
-    return {"subject": subject, "text": text, "html": html}
+        "demo/example-repo", list(_TRIAL_PREVIEW_SAMPLE), lang)
+    return {"subject": subject, "text": text, "html": html, "lang": lang}
 
 
 @app.get("/api/trial/leads.csv")
@@ -4825,7 +4999,7 @@ def export_trial_leads(request: Request):
     try:
         rows = db.execute(
             "SELECT l.email, l.scan_id, t.repo_url, l.created_at,"
-            " l.emailed_at, l.reminded_at FROM trial_leads l"
+            " l.emailed_at, l.reminded_at, l.lang FROM trial_leads l"
             " LEFT JOIN trial_scans t ON t.scan_id=l.scan_id"
             " ORDER BY l.created_at DESC").fetchall()
     finally:
@@ -4833,11 +5007,12 @@ def export_trial_leads(request: Request):
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["email", "scan_id", "repo_url", "created_at", "emailed_at",
-                "reminded_at"])
+                "reminded_at", "lang"])
     for r in rows:
         w.writerow([_csv_cell(r["email"]), _csv_cell(r["scan_id"]),
                     _csv_cell(r["repo_url"]), _csv_cell(r["created_at"]),
-                    _csv_cell(r["emailed_at"]), _csv_cell(r["reminded_at"])])
+                    _csv_cell(r["emailed_at"]), _csv_cell(r["reminded_at"]),
+                    _csv_cell(r["lang"])])
     return Response(content=buf.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition":
                              "attachment; filename=trial-leads.csv"})
@@ -4902,6 +5077,12 @@ margin:8px 0;font-size:14px}
 #pbar{display:none;height:10px;border-radius:99px;background:#1b2350;overflow:hidden;margin:12px 0}
 #pfill{height:100%;width:0;border-radius:99px;background:linear-gradient(90deg,#4f6df5,#8fb0ff);transition:width 1.4s ease}
 .priv{font-size:13px;color:#8b93b8;margin:4px 0 0;line-height:1.6}
+.counter{font-size:14px;color:#c8ceea;margin:14px 0 0}
+#faq{margin-top:26px} #faq h3{font-size:16px;color:#e6e9f5}
+details{border:1px solid #2a3358;border-radius:8px;padding:10px 12px;margin:8px 0;font-size:14px}
+summary{cursor:pointer;font-weight:600;color:#c8ceea}
+details p{color:#9aa3c7;margin:8px 0 2px;line-height:1.6}
+.btn2{padding:10px 14px;border:1px solid #2a3358;border-radius:8px;background:#1b2350;color:#e6e9f5;font-size:14px;cursor:pointer;margin:4px 4px 0 0}
 #lang-btn{position:fixed;top:12px;inset-inline-end:12px;background:#1b2350;
 border:1px solid #2a3358;color:#e6e9f5;padding:8px 14px;border-radius:99px;
 font-size:13px;cursor:pointer}
@@ -4911,12 +5092,20 @@ font-size:13px;cursor:pointer}
 <h1 id="t-h1">\U0001f6e1\U0000fe0f BraimSec — free trial scan</h1>
 <p class="sub" id="t-sub"></p>
 <p class="priv" id="t-priv"></p>
+<p class="counter" id="t-count"></p>
 <form id="f"><input id="u" type="url" required
 placeholder="https://github.com/owner/repo">
 <button id="b" type="submit">Scan</button></form>
+<p><button class="btn2" id="demo-b" type="button">\u26a1</button></p>
 <div id="status"></div>
 <div id="pbar"><div id="pfill"></div></div><div id="out"></div>
 <p class="sub" id="t-limits"></p>
+<div id="faq"><h3 id="t-faq-t"></h3>
+<details><summary id="t-fq1"></summary><p id="t-fa1"></p></details>
+<details><summary id="t-fq2"></summary><p id="t-fa2"></p></details>
+<details><summary id="t-fq3"></summary><p id="t-fa3"></p></details>
+<details><summary id="t-fq4"></summary><p id="t-fa4"></p></details>
+</div>
 <script>
 const STR={
 en:{sub:"Paste a public GitHub or GitLab repository URL and get a security scan summary in a few minutes. No signup, no card.",
@@ -4925,16 +5114,20 @@ starting:"Starting scan\u2026",complete:"\u2705 Scan complete",findings:"finding
 failed:"\u274c Scan failed: ",scanning:"\u23f3 Scanning",cantake:"(this can take a few minutes)",
 cta_t:"Want the full report?",cta_d:"Leave your email and get the complete findings with AI fix suggestions.",
 cta_b:"Send me the report",sending:"Sending\u2026",cta_ok:"Done \u2014 we will be in touch soon.",
-neterr:"Network error: ",err:"Error: ",privacy:"\U0001f512 Privacy: we clone, scan, then delete — your code is never stored.",checks:"100+ checks: leaked secrets, injection flaws, insecure configs & more.",toggle:"\u0639\u0631\u0628\u064a"},
+neterr:"Network error: ",err:"Error: ",privacy:"\U0001f512 Privacy: we clone, scan, then delete — your code is never stored.",checks:"100+ checks: leaked secrets, injection flaws, insecure configs & more.",counter:"\U0001f525 {n} free trial scans completed so far",counter_early:"\U0001f331 Be among the first to try the free scan",rescan:"\U0001f501 Rescan",share:"\U0001f517 Share report",copied:"Link copied \u2713",demo:"\u26a1 Try a demo repo",faq_t:"Common questions",fq1:"What happens to my code?",fa1:"We shallow-clone the repo, run the scan, then delete everything. Your code is never stored or used for anything else.",fq2:"What are the trial limits?",fa2:"3 scans per network per day. Each scan shows severity counts and the top 5 findings.",fq3:"How long does a scan take?",fa3:"Usually a few minutes depending on repo size. You can watch the progress live on this page.",fq4:"What do I get with a free account?",fa4:"The full findings list (up to 100), AI fix suggestions for each issue, and a PDF report \u2014 every plan starts with a 7-day free trial.",toggle:"\u0639\u0631\u0628\u064a"},
 ar:{sub:"\u0627\u0644\u0635\u0642 \u0631\u0627\u0628\u0637 \u0645\u0633\u062a\u0648\u062f\u0639 \u0639\u0627\u0645 \u0639\u0644\u0649 GitHub \u0623\u0648 GitLab \u0648\u0627\u062d\u0635\u0644 \u0639\u0644\u0649 \u0645\u0644\u062e\u0635 \u0641\u062d\u0635 \u0623\u0645\u0646\u064a \u062e\u0644\u0627\u0644 \u062f\u0642\u0627\u0626\u0642. \u0628\u0644\u0627 \u062a\u0633\u062c\u064a\u0644\u060c \u0628\u0644\u0627 \u0628\u0637\u0627\u0642\u0629.",
 scan:"\u0627\u0641\u062d\u0635",limits:'\u062d\u062f\u0648\u062f \u0627\u0644\u062a\u062c\u0631\u0628\u0629: 3 \u0641\u062d\u0648\u0635\u0627\u062a \u0644\u0643\u0644 \u0634\u0628\u0643\u0629 \u064a\u0648\u0645\u064a\u0627\u064b. \u0627\u0644\u062a\u0642\u0631\u064a\u0631 \u0627\u0644\u0643\u0627\u0645\u0644 \u0645\u0639 \u0627\u0642\u062a\u0631\u0627\u062d\u0627\u062a \u0627\u0644\u0625\u0635\u0644\u0627\u062d \u064a\u062a\u0637\u0644\u0628 <a href=\"/\">\u062d\u0633\u0627\u0628\u0627\u064b \u0645\u062c\u0627\u0646\u064a\u0627\u064b</a>.',
 starting:"\u062c\u0627\u0631\u064d \u0628\u062f\u0621 \u0627\u0644\u0641\u062d\u0635\u2026",complete:"\u2705 \u0627\u0643\u062a\u0645\u0644 \u0627\u0644\u0641\u062d\u0635",findings:"\u0646\u062a\u064a\u062c\u0629 \u0641\u064a",
 failed:"\u274c \u0641\u0634\u0644 \u0627\u0644\u0641\u062d\u0635: ",scanning:"\u23f3 \u062c\u0627\u0631\u064d \u0641\u062d\u0635",cantake:"(\u0642\u062f \u064a\u0633\u062a\u063a\u0631\u0642 \u0628\u0636\u0639 \u062f\u0642\u0627\u0626\u0642)",
 cta_t:"\u062a\u0631\u064a\u062f \u0627\u0644\u062a\u0642\u0631\u064a\u0631 \u0627\u0644\u0643\u0627\u0645\u0644\u061f",cta_d:"\u0627\u062a\u0631\u0643 \u0628\u0631\u064a\u062f\u0643 \u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a \u0648\u0627\u062d\u0635\u0644 \u0639\u0644\u0649 \u0643\u0644 \u0627\u0644\u0646\u062a\u0627\u0626\u062c \u0645\u0639 \u0627\u0642\u062a\u0631\u0627\u062d\u0627\u062a \u0627\u0644\u0630\u0643\u0627\u0621 \u0627\u0644\u0627\u0635\u0637\u0646\u0627\u0639\u064a.",
 cta_b:"\u0623\u0631\u0633\u0644 \u0644\u064a \u0627\u0644\u062a\u0642\u0631\u064a\u0631",sending:"\u062c\u0627\u0631\u064d \u0627\u0644\u0625\u0631\u0633\u0627\u0644\u2026",cta_ok:"\u062a\u0645 \u2014 \u0633\u0646\u062a\u0648\u0627\u0635\u0644 \u0645\u0639\u0643 \u0642\u0631\u064a\u0628\u0627\u064b.",
-neterr:"\u062e\u0637\u0623 \u0634\u0628\u0643\u0629: ",err:"\u062e\u0637\u0623: ",privacy:"\U0001f512 \u062e\u0635\u0648\u0635\u064a\u062a\u0643: \u0646\u0646\u0633\u062e \u0627\u0644\u0645\u0633\u062a\u0648\u062f\u0639\u060c \u0646\u0641\u062d\u0635\u0647\u060c \u062b\u0645 \u0646\u062d\u0630\u0641\u0647 — \u0643\u0648\u062f\u0643 \u0644\u0627 \u064a\u064f\u062e\u0632\u064e\u0651\u0646 \u0623\u0628\u062f\u0627\u064b.",checks:"\u0623\u0643\u062b\u0631 \u0645\u0646 100 \u0641\u062d\u0635: \u0623\u0633\u0631\u0627\u0631 \u0645\u0633\u0631\u064e\u0651\u0628\u0629\u060c \u062b\u063a\u0631\u0627\u062a \u062d\u0642\u0646\u060c \u0625\u0639\u062f\u0627\u062f\u0627\u062a \u063a\u064a\u0631 \u0622\u0645\u0646\u0629 \u0648\u0627\u0644\u0645\u0632\u064a\u062f.",toggle:"EN"}};
+neterr:"\u062e\u0637\u0623 \u0634\u0628\u0643\u0629: ",err:"\u062e\u0637\u0623: ",privacy:"\U0001f512 \u062e\u0635\u0648\u0635\u064a\u062a\u0643: \u0646\u0646\u0633\u062e \u0627\u0644\u0645\u0633\u062a\u0648\u062f\u0639\u060c \u0646\u0641\u062d\u0635\u0647\u060c \u062b\u0645 \u0646\u062d\u0630\u0641\u0647 — \u0643\u0648\u062f\u0643 \u0644\u0627 \u064a\u064f\u062e\u0632\u064e\u0651\u0646 \u0623\u0628\u062f\u0627\u064b.",checks:"\u0623\u0643\u062b\u0631 \u0645\u0646 100 \u0641\u062d\u0635: \u0623\u0633\u0631\u0627\u0631 \u0645\u0633\u0631\u064e\u0651\u0628\u0629\u060c \u062b\u063a\u0631\u0627\u062a \u062d\u0642\u0646\u060c \u0625\u0639\u062f\u0627\u062f\u0627\u062a \u063a\u064a\u0631 \u0622\u0645\u0646\u0629 \u0648\u0627\u0644\u0645\u0632\u064a\u062f.",counter:"\u1f525 {n} \u0641\u062d\u0635\u0627\u064b \u062a\u062c\u0631\u064a\u0628\u064a\u0627\u064b \u0645\u062c\u0627\u0646\u064a\u0627\u064b \u062d\u062a\u0649 \u0627\u0644\u0622\u0646",counter_early:"\u1f331 \u0643\u0646 \u0645\u0646 \u0623\u0648\u0627\u0626\u0644 \u0645\u0646 \u064a\u062c\u0631\u0651\u0628 \u0627\u0644\u0641\u062d\u0635 \u0627\u0644\u0645\u062c\u0627\u0646\u064a",rescan:"\u1f501 \u0625\u0639\u0627\u062f\u0629 \u0627\u0644\u0641\u062d\u0635",share:"\u1f517 \u0645\u0634\u0627\u0631\u0643\u0629 \u0627\u0644\u062a\u0642\u0631\u064a\u0631",copied:"\u062a\u0645 \u0646\u0633\u062e \u0627\u0644\u0631\u0627\u0628\u0637 \u2713",demo:"\u26a1 \u062c\u0631\u0651\u0628 \u0645\u0633\u062a\u0648\u062f\u0639\u0627\u064b \u062a\u062c\u0631\u064a\u0628\u064a\u0627\u064b",faq_t:"\u0623\u0633\u0626\u0644\u0629 \u0634\u0627\u0626\u0639\u0629",fq1:"\u0634\u0648 \u0628\u064a\u0635\u064a\u0631 \u0628\u0627\u0644\u0643\u0648\u062f \u062a\u0628\u0639\u064a\u061f",fa1:"\u0645\u0646\u0646\u0633\u062e \u0627\u0644\u0645\u0633\u062a\u0648\u062f\u0639 \u0646\u0633\u062e\u0629 \u0633\u0637\u062d\u064a\u0629\u060c \u0645\u0646\u0634\u063a\u0651\u0644 \u0627\u0644\u0641\u062d\u0635\u060c \u062b\u0645 \u0645\u0646\u062d\u0630\u0641 \u0643\u0644 \u0634\u064a. \u0643\u0648\u062f\u0643 \u0644\u0627 \u064a\u064f\u062e\u0632\u064e\u0651\u0646 \u0623\u0628\u062f\u0627\u064b \u0648\u0644\u0627 \u064a\u064f\u0633\u062a\u062e\u062f\u0645 \u0644\u0623\u064a \u0634\u064a \u062b\u0627\u0646\u064d.",fq2:"\u0634\u0648 \u062d\u062f\u0648\u062f \u0627\u0644\u062a\u062c\u0631\u0628\u0629\u061f",fa2:"3 \u0641\u062d\u0648\u0635\u0627\u062a \u0644\u0643\u0644 \u0634\u0628\u0643\u0629 \u064a\u0648\u0645\u064a\u0627\u064b. \u0643\u0644 \u0641\u062d\u0635 \u0628\u064a\u0639\u0631\u0636 \u0639\u062f\u062f \u0627\u0644\u0646\u062a\u0627\u0626\u062c \u062d\u0633\u0628 \u0627\u0644\u062e\u0637\u0648\u0631\u0629 \u0648\u0623\u0647\u0645 5 \u0646\u062a\u0627\u0626\u062c.",fq3:"\u0642\u062f\u064a\u0634 \u0628\u064a\u0627\u062e\u062f \u0627\u0644\u0641\u062d\u0635\u061f",fa3:"\u0639\u0627\u062f\u0629 \u0628\u0636\u0639 \u062f\u0642\u0627\u0626\u0642 \u062d\u0633\u0628 \u062d\u062c\u0645 \u0627\u0644\u0645\u0633\u062a\u0648\u062f\u0639. \u0641\u064a\u0643 \u062a\u062a\u0627\u0628\u0639 \u0627\u0644\u062a\u0642\u062f\u0645 \u0645\u0628\u0627\u0634\u0631\u0629 \u0628\u0647\u0627\u0644\u0635\u0641\u062d\u0629.",fq4:"\u0634\u0648 \u0628\u062d\u0635\u0644 \u0645\u0639 \u062d\u0633\u0627\u0628 \u0645\u062c\u0627\u0646\u064a\u061f",fa4:"\u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0646\u062a\u0627\u0626\u062c \u0627\u0644\u0643\u0627\u0645\u0644\u0629 (\u062d\u062a\u0649 100)\u060c \u0627\u0642\u062a\u0631\u0627\u062d\u0627\u062a \u0625\u0635\u0644\u0627\u062d \u0628\u0627\u0644\u0630\u0643\u0627\u0621 \u0627\u0644\u0627\u0635\u0637\u0646\u0627\u0639\u064a \u0644\u0643\u0644 \u062b\u063a\u0631\u0629\u060c \u0648\u062a\u0642\u0631\u064a\u0631 PDF \u2014 \u0643\u0644 \u0627\u0644\u062e\u0637\u0637 \u0628\u062a\u0628\u062f\u0623 \u0628\u062a\u062c\u0631\u0628\u0629 \u0645\u062c\u0627\u0646\u064a\u0629 7 \u0623\u064a\u0627\u0645.",toggle:"EN"}};
 let LANG=localStorage.getItem("braimsec_trial_lang")||((navigator.language||"en").startsWith("ar")?"ar":"en");
 const T=k=>(STR[LANG]&&STR[LANG][k])||STR.en[k]||k;
+let LASTN=null;
+function renderCount(){
+const el=document.getElementById("t-count");
+el.textContent=LASTN>=10?T("counter").replace("{n}",LASTN):T("counter_early");}
 function applyLang(){
 document.documentElement.lang=LANG;document.documentElement.dir=LANG==="ar"?"rtl":"ltr";
 document.getElementById("t-h1").textContent=LANG==="ar"?"\U0001f6e1\U0000fe0f BraimSec \u2014 \u0641\u062d\u0635 \u062a\u062c\u0631\u064a\u0628\u064a \u0645\u062c\u0627\u0646\u064a":"\U0001f6e1\U0000fe0f BraimSec \u2014 free trial scan";
@@ -4942,15 +5135,26 @@ document.getElementById("t-sub").textContent=T("sub");
 document.getElementById("t-priv").textContent=T("privacy")+" "+T("checks");
 document.getElementById("b").textContent=T("scan");
 document.getElementById("t-limits").innerHTML=T("limits");
-document.getElementById("lang-btn").textContent=T("toggle");}
+document.getElementById("lang-btn").textContent=T("toggle");
+document.getElementById("demo-b").textContent=T("demo");
+document.getElementById("t-faq-t").textContent=T("faq_t");
+for(let i=1;i<=4;i++){document.getElementById("t-fq"+i).textContent=T("fq"+i);
+document.getElementById("t-fa"+i).textContent=T("fa"+i);}
+if(LASTN!==null)renderCount();}
 document.getElementById("lang-btn").addEventListener("click",()=>{
 LANG=LANG==="ar"?"en":"ar";localStorage.setItem("braimsec_trial_lang",LANG);applyLang();});
 applyLang();
 const f=document.getElementById("f"),b=document.getElementById("b"),
 s=document.getElementById("status"),o=document.getElementById("out");
-let PC=0;
+let PC=0;let LASTU="";
+const DEMO_URL="https://github.com/appsecco/dvna";
+fetch("/api/trial/public-stats").then(r=>r.json()).then(st=>{
+LASTN=st.trial_scans_done||0;renderCount();}).catch(()=>{});
+document.getElementById("demo-b").addEventListener("click",()=>{
+document.getElementById("u").value=DEMO_URL;f.requestSubmit();});
 function esc(t){const d=document.createElement("div");d.textContent=t;return d.innerHTML}
-f.addEventListener("submit",async e=>{e.preventDefault();b.disabled=true;o.innerHTML="";PC=0;document.getElementById("pbar").style.display="none";document.getElementById("pfill").style.width="0";
+f.addEventListener("submit",async e=>{e.preventDefault();b.disabled=true;o.innerHTML="";PC=0;
+LASTU=document.getElementById("u").value;document.getElementById("pbar").style.display="none";document.getElementById("pfill").style.width="0";
 s.textContent=T("starting");
 try{
 const r=await fetch("/api/trial/scans",{method:"POST",
@@ -4979,12 +5183,22 @@ o.innerHTML=h+(j.top_findings||[]).map(x=>
 +'<form id="lead-f" style="display:flex;gap:8px;margin-top:10px">'
 +'<input id="lead-e" type="email" required placeholder="you@company.com" style="flex:1;padding:10px;border-radius:8px;border:1px solid #2a3358;background:#0b1020;color:#e6e9f5">'
 +'<button type="submit">'+T("cta_b")+"</button></form>"
-+'<div id="lead-m" style="margin-top:8px;font-size:14px"></div></div>';
++'<div id="lead-m" style="margin-top:8px;font-size:14px"></div></div>'
++'<div style="margin-top:10px"><button class="btn2" id="rs-b">'+T("rescan")+"</button>"
++'<button class="btn2" id="sh-b">'+T("share")+"</button>"
++'<span id="sh-m" style="margin-inline-start:8px;font-size:13px;color:#8fb0ff"></span></div>';
+document.getElementById("rs-b").addEventListener("click",()=>{
+document.getElementById("u").value=LASTU;f.requestSubmit();window.scrollTo(0,0);});
+document.getElementById("sh-b").addEventListener("click",async()=>{
+const url=location.origin+"/trial/r/"+id;
+try{await navigator.clipboard.writeText(url);
+document.getElementById("sh-m").textContent=T("copied");}
+catch(e){document.getElementById("sh-m").textContent=url;}});
 var lf=document.getElementById("lead-f");
 lf.addEventListener("submit",async ev=>{ev.preventDefault();
 var m=document.getElementById("lead-m");m.textContent=T("sending");
 try{var rr=await fetch("/api/trial/leads",{method:"POST",
-body:new URLSearchParams({email:document.getElementById("lead-e").value,scan_id:id})});
+body:new URLSearchParams({email:document.getElementById("lead-e").value,scan_id:id,lang:LANG})});
 if(rr.ok){m.textContent=T("cta_ok");lf.style.display="none"}
 else{var jj=await rr.json();m.textContent=""+(jj.detail||rr.status)}}catch(e){m.textContent=T("neterr")+e}});
 b.disabled=false;return}
