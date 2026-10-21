@@ -261,6 +261,7 @@ CREATE TABLE IF NOT EXISTS trial_leads (
     ip TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     emailed_at TEXT,
+    reminded_at TEXT,
     UNIQUE(email, scan_id)
 );
 CREATE INDEX IF NOT EXISTS idx_trial_leads_created
@@ -570,6 +571,8 @@ def init_db():
                  for r in conn.execute("PRAGMA table_info(trial_leads)")}
     if "emailed_at" not in lead_cols:
         conn.execute("ALTER TABLE trial_leads ADD COLUMN emailed_at TEXT")
+    if "reminded_at" not in lead_cols:
+        conn.execute("ALTER TABLE trial_leads ADD COLUMN reminded_at TEXT")
     # Lightweight migration: latency-degradation alerts on uptime targets.
     uptime_cols = {r["name"]
                    for r in conn.execute("PRAGMA table_info(uptime_targets)")}
