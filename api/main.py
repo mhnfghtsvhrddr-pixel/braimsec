@@ -4577,6 +4577,83 @@ def trial_scan_status(request: Request, scan_id: str):
         db.close()
 
 
+def _send_trial_lead_report(email: str, scan_id: str | None):
+    """Email the trial lead their full findings list (best-effort).
+
+    Runs as a background task after POST /api/trial/leads. Never raises:
+    the lead row is already stored; a failed email just leaves emailed_at
+    NULL so ops can see it was not delivered.
+    """
+    from email_alerts import send_email  # noqa: E402
+    target, summary, findings = None, {}, []
+    if scan_id:
+        db = get_db()
+        try:
+            row = db.execute(
+                "SELECT s.target_name, s.status FROM scans s"
+                " JOIN trial_scans t ON t.scan_id=s.id WHERE t.scan_id=?",
+                (scan_id,)).fetchone()
+            if row and row["status"] == "done":
+                target = row["target_name"]
+                for f in db.execute(
+                        "SELECT rule_id, severity, message, file, line"
+                        " FROM findings WHERE scan_id=? ORDER BY"
+                        " severity, file, line LIMIT 100", (scan_id,)):
+                    findings.append({
+                        "rule_id": f["rule_id"], "severity": f["severity"],
+                        "message": f["message"],
+                        "file": _trial_rel_path(f["file"]), "line": f["line"]})
+                    summary[f["severity"]] = summary.get(f["severity"], 0) + 1
+        finally:
+            db.close()
+    if findings:
+        lines = [f"  [{f['severity']}] {f['rule_id']} — "
+                 f"{f['file']}:{f['line']}\n    {f['message'] or ''}"
+                 for f in findings]
+        detail = ("Full findings list for %s:\n\n%s\n\n"
+                  % (target, "\n".join(lines)))
+        detail_html = ("<p>Full findings list for <b>%s</b>:</p><ul>%s</ul>"
+                       % (target, "".join(
+                           "<li><b>[%s]</b> %s<br><code>%s:%s</code><br>%s</li>"
+                           % (f["severity"], f["rule_id"], f["file"],
+                              f["line"], f["message"] or "")
+                           for f in findings)))
+    elif target:
+        detail = ("Your scan of %s is still running — open "
+                  "https://api.braimsec.world/trial to watch it finish.\n"
+                  % target)
+        detail_html = ("<p>Your scan of <b>%s</b> is still running — "
+                       "watch it finish on the trial page.</p>" % target)
+    else:
+        detail = ("Thanks for trying BraimSec — scan any public repo at "
+                  "https://api.braimsec.world/trial, no signup needed.\n")
+        detail_html = ("<p>Thanks for trying BraimSec — scan any public repo "
+                       "on the trial page, no signup needed.</p>")
+    n = sum(summary.values())
+    subject = "Your BraimSec trial scan report (%d finding%s)" % (
+        n, "" if n == 1 else "s")
+    text = ("Hi,\n\n%s\n"
+            "Want AI fix suggestions and a PDF report? Create a free "
+            "account at https://braimsec.world — every plan starts with a "
+            "7-day free trial.\n\n— The BraimSec team\n" % detail)
+    html = ("<p>Hi,</p>%s<p>Want AI fix suggestions and a PDF report? "
+            "Create a free account at "
+            "<a href=\"https://braimsec.world\">braimsec.world</a> — every "
+            "plan starts with a 7-day free trial.</p>"
+            "<p>— The BraimSec team</p>" % detail_html)
+    ok, _, _ = send_email(email, subject, text, html)
+    if ok and scan_id:
+        db = get_db()
+        try:
+            db.execute(
+                "UPDATE trial_leads SET emailed_at=? WHERE email=? AND "
+                "(scan_id=? OR (scan_id IS NULL AND ? IS NULL))",
+                (now(), email, scan_id, scan_id))
+            db.commit()
+        finally:
+            db.close()
+
+
 def _valid_lead_email(email: str) -> bool:
     """Minimal sanity check for trial lead capture (no regex import needed)."""
     e = (email or "").strip()
@@ -4589,6 +4666,7 @@ def _valid_lead_email(email: str) -> bool:
 @app.post("/api/trial/leads")
 @limiter.limit("10/hour")
 async def create_trial_lead(request: Request,
+                            background_tasks: BackgroundTasks,
                             email: str = Form(...),
                             scan_id: str = Form("")):
     """Capture an email on the /trial CTA after a scan completes.
@@ -4616,6 +4694,9 @@ async def create_trial_lead(request: Request,
         db.commit()
     finally:
         db.close()
+    # Best-effort follow-up email; never blocks or breaks the capture.
+    background_tasks.add_task(_send_trial_lead_report, email,
+                             scan_id or None)
     return {"ok": True}
 
 
