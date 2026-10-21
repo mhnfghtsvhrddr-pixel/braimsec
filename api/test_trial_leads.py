@@ -172,3 +172,26 @@ def test_lead_stored_even_when_email_fails(monkeypatch):
     db.close()
     assert row is not None
     assert row["emailed_at"] is None
+
+
+def test_migration_adds_emailed_at_to_legacy_table(tmp_path):
+    """DBs created before emailed_at existed get the column via init_db."""
+    import sqlite3
+    legacy = str(tmp_path / "legacy.db")
+    db = sqlite3.connect(legacy)
+    db.execute(
+        "CREATE TABLE trial_leads (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " email TEXT NOT NULL, scan_id TEXT, ip TEXT NOT NULL DEFAULT '',"
+        " created_at TEXT NOT NULL, UNIQUE(email, scan_id))")
+    db.commit()
+    db.close()
+    import database
+    old_path, database.DB_PATH = database.DB_PATH, legacy
+    try:
+        init_db()
+    finally:
+        database.DB_PATH = old_path
+    db = sqlite3.connect(legacy)
+    cols = {r[1] for r in db.execute("PRAGMA table_info(trial_leads)")}
+    db.close()
+    assert "emailed_at" in cols
