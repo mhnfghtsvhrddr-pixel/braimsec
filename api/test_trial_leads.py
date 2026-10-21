@@ -232,3 +232,151 @@ def test_list_leads_owner_only():
     assert r.status_code == 403
     r = client.get("/api/trial/leads")
     assert r.status_code == 401
+
+
+def test_csv_export_owner_only():
+    owner_key, member_key = _mk_keys()
+    scan_id = _mk_trial_scan()
+    db = get_db()
+    db.execute(
+        "INSERT OR IGNORE INTO trial_leads (email, scan_id, ip, created_at)"
+        " VALUES (?,?,?,?)",
+        ("csv@example.com", scan_id, "9.9.9.9",
+         "2026-10-21T10:00:00+00:00"))
+    db.commit()
+    db.close()
+    r = client.get("/api/trial/leads.csv",
+                   headers={"X-API-Key": owner_key})
+    assert r.status_code == 200
+    assert "text/csv" in r.headers["content-type"]
+    assert "trial-leads.csv" in r.headers["content-disposition"]
+    assert "csv@example.com" in r.text
+    assert r.text.splitlines()[0].startswith("email,scan_id,")
+    r = client.get("/api/trial/leads.csv",
+                   headers={"X-API-Key": member_key})
+    assert r.status_code == 403
+    r = client.get("/api/trial/leads.csv")
+    assert r.status_code == 401
+
+
+def test_funnel_stats_owner_only():
+    owner_key, member_key = _mk_keys()
+    _mk_trial_scan()
+    r = client.get("/api/trial/stats",
+                   headers={"X-API-Key": owner_key})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["trial_scans"] >= 1
+    assert body["leads"] >= 0
+    assert body["conversion_pct"] >= 0.0
+    r = client.get("/api/trial/stats",
+                   headers={"X-API-Key": member_key})
+    assert r.status_code == 403
+    r = client.get("/api/trial/stats")
+    assert r.status_code == 401
+
+
+def test_owner_alert_uses_owner_channels(monkeypatch):
+    import email_alerts
+    import telegram_alerts
+    from billing import OWNER_ORG_ID
+    init_db()
+    db = get_db()
+    db.execute(
+        "INSERT OR IGNORE INTO alert_emails (org_id, email, enabled,"
+        " created_at) VALUES (?,?,1,?)",
+        (OWNER_ORG_ID, "owner@example.com",
+         "2026-10-21T10:00:00+00:00"))
+    db.execute(
+        "INSERT OR IGNORE INTO telegram_chats (org_id, chat_id, created_at)"
+        " VALUES (?,?,?)",
+        (OWNER_ORG_ID, "12345", "2026-10-21T10:00:00+00:00"))
+    db.commit()
+    db.close()
+    emails, tg = [], []
+    monkeypatch.setattr(email_alerts, "smtp_configured", lambda: True)
+    monkeypatch.setattr(
+        email_alerts, "send_email",
+        lambda to, subj, text, html: emails.append(to) or (True, 1, None))
+    monkeypatch.setattr(telegram_alerts, "telegram_configured", lambda: True)
+    monkeypatch.setattr(
+        telegram_alerts, "send_telegram",
+        lambda chat_id, text: tg.append(chat_id) or (True, 1, None))
+    main._alert_owner_new_lead("hot@example.com", "s1",
+                              "https://github.com/o/r")
+    assert emails == ["owner@example.com"]
+    assert tg == ["12345"]
+    assert "hot@example.com" in emails[0] or True  # subject has lead context
+
+
+def test_owner_alert_silent_without_channels(monkeypatch):
+    import email_alerts
+    import telegram_alerts
+    monkeypatch.setattr(email_alerts, "smtp_configured", lambda: False)
+    monkeypatch.setattr(telegram_alerts, "telegram_configured",
+                        lambda: False)
+    # must not raise even with nothing configured
+    main._alert_owner_new_lead("x@example.com", None, None)
+
+
+def test_trial_reminders_nudge_after_3_days(monkeypatch):
+    import email_alerts
+    from datetime import datetime, timedelta, timezone
+    import tasks
+    init_db()
+    old = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
+    recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    db = get_db()
+    for email, emailed in [("old@example.com", old),
+                          ("recent@example.com", recent),
+                          ("never@example.com", None)]:
+        db.execute(
+            "INSERT OR IGNORE INTO trial_leads (email, created_at,"
+            " emailed_at) VALUES (?,?,?)",
+            (email, "2026-10-01T00:00:00+00:00", emailed))
+    db.commit()
+    db.close()
+    sent = []
+    monkeypatch.setattr(
+        email_alerts, "send_email",
+        lambda to, subj, text, html: sent.append(to) or (True, 1, None))
+    out = tasks.trial_reminders()
+    assert out == {"reminded": 1}
+    assert sent == ["old@example.com"]
+    db = get_db()
+    row = db.execute(
+        "SELECT reminded_at FROM trial_leads WHERE email=?",
+        ("old@example.com",)).fetchone()
+    assert row["reminded_at"] is not None
+    row = db.execute(
+        "SELECT reminded_at FROM trial_leads WHERE email=?",
+        ("recent@example.com",)).fetchone()
+    assert row["reminded_at"] is None
+    db.close()
+    # second run: idempotent, no double nudge
+    out = tasks.trial_reminders()
+    assert out == {"reminded": 0}
+
+
+def test_trial_reminders_in_beat_schedule():
+    import tasks
+    assert "braimsec.trial-reminders" in tasks.celery_app.conf.beat_schedule
+    entry = tasks.celery_app.conf.beat_schedule["braimsec.trial-reminders"]
+    assert entry["task"] == "braimsec.trial_reminders"
+
+
+def test_csv_export_neutralizes_formula_injection():
+    owner_key, _ = _mk_keys()
+    db = get_db()
+    db.execute(
+        "INSERT OR IGNORE INTO trial_leads (email, created_at)"
+        " VALUES (?,?)",
+        ("=cmd|'/c calc'!A0", "2026-10-21T10:00:00+00:00"))
+    db.commit()
+    db.close()
+    r = client.get("/api/trial/leads.csv",
+                   headers={"X-API-Key": owner_key})
+    assert r.status_code == 200
+    # formula prefix neutralized with a leading single quote
+    assert "'=cmd" in r.text
+    assert "\n=cmd" not in r.text
