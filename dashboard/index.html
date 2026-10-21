@@ -343,12 +343,18 @@
   }
   #api-key { transition: border-color 0.2s ease, box-shadow 0.2s ease; }
   #lang-btn { min-width: 4.2rem; }
+  /* صفوف الإدخال (الجدولة والمراقبة): توزيع مرن يلتف بأناقة على الشاشات الصغيرة */
+  .row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+  .row > input, .row > select { flex: 1 1 11rem; min-width: 0; }
+  .row > input.wide { flex: 2 1 16rem; }
+  .row > .btn, .row > .btn-ghost { flex-shrink: 0; }
   @media (max-width: 640px) {
     .scan-card { flex-direction: column; align-items: flex-start; gap: 0.8rem; }
     th:nth-child(4), td:nth-child(4) { display: none; }
     nav { padding: 0.55rem 1rem; overflow-x: auto; }
     header { padding: 0.8rem 1rem; flex-wrap: wrap; }
     header p { display: none; }
+    #view-sched .row > .btn, #view-sched .row > .btn-ghost { width: 100%; }
   }
 </style>
 </head>
@@ -553,7 +559,7 @@ document.addEventListener('DOMContentLoaded', ()=>{ if(_resetToken) openAuthModa
     <div class="scan-card" style="flex-direction: column; align-items: stretch;">
       <div id="email-status" class="meta"></div>
       <div class="row" style="margin-top: 0.6rem;">
-        <input type="email" id="email-new" placeholder="name@company.com" dir="ltr" style="flex: 1;">
+        <input type="email" id="email-new" placeholder="name@company.com" dir="ltr">
         <button class="btn" data-i18n="sched.add" onclick="addAlertEmail()">+ إضافة</button>
       </div>
       <div id="email-wrap" style="margin-top: 0.6rem;"></div>
@@ -564,8 +570,8 @@ document.addEventListener('DOMContentLoaded', ()=>{ if(_resetToken) openAuthModa
       <h4 style="margin: 0 0 0.4rem;" data-i18n="sched.tg_h">✈️ تيليجرام</h4>
       <div id="tg-status" class="meta"></div>
       <div class="row" style="margin-top: 0.6rem;">
-        <input id="tg-chat-new" data-i18n-ph="sched.tg_chat_ph" dir="ltr" style="flex: 1;">
-        <input id="tg-label-new" data-i18n-ph="sched.lbl_ph" placeholder="تسمية (اختياري)" style="flex: 1;">
+        <input id="tg-chat-new" data-i18n-ph="sched.tg_chat_ph" dir="ltr">
+        <input id="tg-label-new" data-i18n-ph="sched.lbl_ph" placeholder="تسمية (اختياري)">
         <button class="btn" data-i18n="sched.add" onclick="addTelegramChat()">+ إضافة</button>
       </div>
       <div id="tg-wrap" style="margin-top: 0.6rem;"></div>
@@ -574,8 +580,8 @@ document.addEventListener('DOMContentLoaded', ()=>{ if(_resetToken) openAuthModa
       <h4 style="margin: 0 0 0.4rem;" data-i18n="sched.slack_h">💬 Slack</h4>
       <div class="meta" data-i18n="sched.slack_desc">أنشئ Incoming Webhook من Slack (التطبيقات ← Incoming Webhooks) والصقه هنا — يُشفَّر عند الحفظ ولا يُعرض أبداً.</div>
       <div class="row" style="margin-top: 0.6rem;">
-        <input id="slack-url-new" data-i18n-ph="sched.slack_url_ph" dir="ltr" style="flex: 2;">
-        <input id="slack-label-new" data-i18n-ph="sched.slack_ch_ph" style="flex: 1;">
+        <input id="slack-url-new" data-i18n-ph="sched.slack_url_ph" dir="ltr" class="wide">
+        <input id="slack-label-new" data-i18n-ph="sched.slack_ch_ph">
         <button class="btn" data-i18n="sched.add" onclick="addSlackWebhook()">+ إضافة</button>
       </div>
       <div id="slack-wrap" style="margin-top: 0.6rem;"></div>
@@ -584,8 +590,8 @@ document.addEventListener('DOMContentLoaded', ()=>{ if(_resetToken) openAuthModa
       <h4 style="margin: 0 0 0.4rem;" data-i18n="sched.teams_h">👔 Microsoft Teams</h4>
       <div class="meta" data-i18n="sched.teams_desc">أنشئ Incoming Webhook من قناة Teams (Connectors) أو من Power Automate والصقه هنا — يُشفَّر عند الحفظ ولا يُعرض أبداً.</div>
       <div class="row" style="margin-top: 0.6rem;">
-        <input id="teams-url-new" data-i18n-ph="sched.teams_url_ph" dir="ltr" style="flex: 2;">
-        <input id="teams-label-new" data-i18n-ph="sched.lbl_ph" placeholder="تسمية (اختياري)" style="flex: 1;">
+        <input id="teams-url-new" data-i18n-ph="sched.teams_url_ph" dir="ltr" class="wide">
+        <input id="teams-label-new" data-i18n-ph="sched.lbl_ph" placeholder="تسمية (اختياري)">
         <button class="btn" data-i18n="sched.add" onclick="addTeamsWebhook()">+ إضافة</button>
       </div>
       <div id="teams-wrap" style="margin-top: 0.6rem;"></div>
