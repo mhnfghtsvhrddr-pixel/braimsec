@@ -1,0 +1,97 @@
+"""Trial lead capture tests: POST /api/trial/leads stores the email for
+sales follow-up after a trial scan completes. No email is sent.
+
+Hermeticity: BRAIMSEC_DB / BRAIMSEC_API_KEY are setdefault'ed here so this
+file also runs standalone; under the full suite test_async_queue (imported
+first alphabetically) has already fixed them to the session values.
+"""
+import os
+import sys
+import tempfile
+
+_tmp = tempfile.mkdtemp(prefix="braimsec-test-trial-leads-")
+os.environ.setdefault("BRAIMSEC_DB", os.path.join(_tmp, "test.db"))
+os.environ.setdefault("BRAIMSEC_API_KEY", "test-key-123")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+import main  # noqa: E402
+from database import get_db, init_db  # noqa: E402
+
+client = TestClient(main.app)
+
+
+def _mk_trial_scan():
+    init_db()
+    db = get_db()
+    scan_id = "trial_" + os.urandom(4).hex()
+    db.execute(
+        "INSERT INTO scans (id, org_id, target_name, status, created_at)"
+        " VALUES (?,?,?,?,?)",
+        (scan_id, "owner", "t", "done", "2026-01-01T00:00:00+00:00"))
+    db.execute(
+        "INSERT INTO trial_scans (scan_id, ip, repo_url, created_at)"
+        " VALUES (?,?,?,?)",
+        (scan_id, "1.2.3.4", "https://github.com/o/r",
+         "2026-01-01T00:00:00+00:00"))
+    db.commit()
+    db.close()
+    return scan_id
+
+
+def _leads(email):
+    db = get_db()
+    rows = db.execute(
+        "SELECT email, scan_id FROM trial_leads WHERE email=?",
+        (email,)).fetchall()
+    db.close()
+    return rows
+
+
+def test_lead_capture_ok():
+    scan_id = _mk_trial_scan()
+    r = client.post("/api/trial/leads",
+                    data={"email": "Founder@Example.COM ", "scan_id": scan_id})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+    rows = _leads("founder@example.com")
+    assert len(rows) == 1
+    assert rows[0]["scan_id"] == scan_id
+
+
+def test_lead_capture_idempotent():
+    scan_id = _mk_trial_scan()
+    for _ in range(2):
+        r = client.post("/api/trial/leads",
+                        data={"email": "dup@example.com", "scan_id": scan_id})
+        assert r.status_code == 200
+    assert len(_leads("dup@example.com")) == 1
+
+
+def test_lead_capture_without_scan():
+    r = client.post("/api/trial/leads", data={"email": "noref@example.com"})
+    assert r.status_code == 200
+    rows = _leads("noref@example.com")
+    assert len(rows) == 1
+    assert rows[0]["scan_id"] is None
+
+
+def test_lead_rejects_bad_email():
+    for bad in ["not-an-email", "a@b", "@x.com", "a@b.c" * 60]:
+        r = client.post("/api/trial/leads", data={"email": bad})
+        assert r.status_code == 400, bad
+
+
+def test_lead_rejects_unknown_scan():
+    r = client.post("/api/trial/leads",
+                    data={"email": "x@example.com", "scan_id": "nope"})
+    assert r.status_code == 404
+    assert _leads("x@example.com") == []
+
+
+def test_trial_page_contains_cta():
+    r = client.get("/trial")
+    assert r.status_code == 200
+    assert "/api/trial/leads" in r.text
+    assert "Send me the report" in r.text
