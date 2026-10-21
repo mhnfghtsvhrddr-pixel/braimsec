@@ -361,6 +361,19 @@
     header { padding: 0.8rem 1rem; flex-wrap: wrap; }
     header p { display: none; }
     #view-sched .row > .btn, #view-sched .row > .btn-ghost { width: 100%; }
+    /* موبايل: الجداول تُمرَّر أفقياً بدل أن تنكسر، والهوامش والخطوط تنكمش */
+    #leads-wrap, #keys-wrap, #scans-list-wrap, #sched-wrap, #vcs-wrap,
+    #billing-wrap, #uptime-wrap, #incidents-wrap, #notif-wrap, #teams-wrap,
+    #tg-wrap, #slack-wrap, #email-wrap, #cert-wrap, #digest-wrap,
+    #maintenance-wrap, #status-pages-wrap, #repsched-wrap, #findings-wrap {
+      overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    table { font-size: 0.82rem; }
+    th, td { padding: 0.5rem 0.6rem; }
+    main { padding: 1.2rem 1rem; }
+    #api-key { width: 6.5rem; }
+    .toolbar h2 { font-size: 1.05rem; }
+    .stat-card { padding: 0.7rem 0.9rem; }
+    .stat-num { font-size: 1.25rem; }
   }
 </style>
 </head>
@@ -403,6 +416,14 @@
       <span><button class="btn-ghost" data-i18n="cmn.cancel" onclick="closeAuthModal()">إلغاء</button>
       <button class="btn" id="auth-go" data-i18n="auth.go" onclick="submitAuth()">دخول</button></span>
     </div>
+  </div>
+</div>
+<div id="email-preview-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:1.5rem;width:min(40rem,94vw);max-height:85vh;overflow-y:auto">
+    <h3 style="margin:0 0 0.5rem" data-i18n="leads.preview_title">👁️ معاينة إيميل المتابعة</h3>
+    <p style="color:var(--muted);font-size:0.85rem;margin:0 0 1rem"><span data-i18n="leads.preview_subj">الموضوع</span>: <b id="email-preview-subject" dir="ltr"></b></p>
+    <div id="email-preview-body" style="background:#ffffff;color:#111111;border-radius:8px;padding:1rem;font-size:14px"></div>
+    <div style="margin-top:1rem;text-align:end"><button class="btn-ghost" data-i18n="leads.preview_close" onclick="closeEmailPreview()">إغلاق</button></div>
   </div>
 </div>
 <script>
@@ -788,6 +809,7 @@ document.addEventListener('DOMContentLoaded', ()=>{ if(_resetToken) openAuthModa
     <div class="toolbar">
       <h2 data-i18n="leads.title">🎯 ليدز التجربة</h2>
       <div class="row" style="gap:0.5rem">
+        <button class="btn-ghost" data-i18n="leads.preview" onclick="previewLeadEmail()">👁️ معاينة الإيميل</button>
         <button class="btn-ghost" data-i18n="leads.export" onclick="exportLeadsCsv()">📥 CSV</button>
         <button class="btn-ghost" data-i18n="cmn.refresh" onclick="loadLeads()">↻ تحديث</button>
       </div>
@@ -1164,6 +1186,10 @@ const I18N = {
   "leads.empty": "لا يوجد ليدز بعد — شارك صفحة التجربة المجانية.",
   "leads.forbidden": "عرض الليدز يتطلب مفتاح المالك (owner).",
   "leads.export": "📥 تصدير CSV",
+  "leads.preview": "👁️ معاينة الإيميل",
+  "leads.preview_title": "👁️ معاينة إيميل المتابعة",
+  "leads.preview_subj": "الموضوع",
+  "leads.preview_close": "إغلاق",
   "leads.st_scans": "فحص تجريبي",
   "leads.st_done": "فحص مكتمل",
   "leads.st_leads": "ليد",
@@ -1813,6 +1839,10 @@ const I18N = {
   "leads.empty": "No leads yet — share the free trial page.",
   "leads.forbidden": "Viewing leads requires the owner key.",
   "leads.export": "📥 Export CSV",
+  "leads.preview": "👁️ Preview email",
+  "leads.preview_title": "👁️ Follow-up email preview",
+  "leads.preview_subj": "Subject",
+  "leads.preview_close": "Close",
   "leads.st_scans": "Trial scans",
   "leads.st_done": "Completed",
   "leads.st_leads": "Leads",
@@ -2922,6 +2952,23 @@ async function exportLeadsCsv() {
   a.download = "trial-leads.csv";
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+async function previewLeadEmail() {
+  const m = document.getElementById("email-preview-modal");
+  const body = document.getElementById("email-preview-body");
+  m.style.display = "flex";
+  body.innerHTML = `<p style="color:var(--muted)"><span class="spinner"></span> ${t("cmn.loading")}</p>`;
+  try {
+    const r = await api("/trial/email-preview");
+    document.getElementById("email-preview-subject").textContent = r.subject;
+    body.innerHTML = r.html;
+  } catch (e) {
+    body.innerHTML = `<div class="notice">🔒 ${esc(e.message)}</div>`;
+  }
+}
+function closeEmailPreview() {
+  document.getElementById("email-preview-modal").style.display = "none";
 }
 
 async function loadKeys() {
