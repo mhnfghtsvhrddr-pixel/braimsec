@@ -186,6 +186,7 @@ CREATE TABLE IF NOT EXISTS vcs_repos (
     branch TEXT NOT NULL DEFAULT 'main',
     webhook_secret_hash TEXT NOT NULL,
     webhook_secret_enc TEXT,         -- encrypted raw secret (github HMAC only)
+    github_token_enc TEXT,           -- encrypted GitHub PAT for PR comments
     webhook_url TEXT NOT NULL DEFAULT '',
     alert_severity TEXT NOT NULL DEFAULT 'warning',
     enabled INTEGER NOT NULL DEFAULT 1,
@@ -198,6 +199,17 @@ CREATE TABLE IF NOT EXISTS vcs_repos (
 CREATE INDEX IF NOT EXISTS idx_vcs_repos_org ON vcs_repos(org_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vcs_repos_org_url
     ON vcs_repos(org_id, repo_url);
+-- PR scan tracking: one row per PR-triggered scan, so the scan terminal
+-- hook can post/update a comment on the right PR thread.
+CREATE TABLE IF NOT EXISTS pr_scans (
+    scan_id TEXT PRIMARY KEY REFERENCES scans(id),
+    repo_id TEXT NOT NULL REFERENCES vcs_repos(id),
+    pr_number INTEGER NOT NULL,
+    head_sha TEXT NOT NULL,
+    comment_id INTEGER,              -- GitHub issue-comment id (NULL until posted)
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pr_scans_repo ON pr_scans(repo_id, pr_number);
 CREATE TABLE IF NOT EXISTS notifications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     org_id TEXT NOT NULL REFERENCES organizations(id),
@@ -631,5 +643,14 @@ def init_db():
                      " ADD COLUMN report_schedule_id TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_notifications_rsch"
                  " ON notifications(report_schedule_id, created_at DESC)")
+    # Migration: GitHub PR scan comments. vcs_repos gains an encrypted GitHub
+    # PAT (github_token_enc, write-only at the API layer); pr_scans is
+    # covered by CREATE TABLE IF NOT EXISTS in the SCHEMA script above.
+    vcs_cols = {r["name"]
+                for r in conn.execute("PRAGMA table_info(vcs_repos)")}
+    if "github_token_enc" not in vcs_cols:
+        conn.execute("ALTER TABLE vcs_repos ADD COLUMN github_token_enc TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pr_scans_repo"
+                 " ON pr_scans(repo_id, pr_number)")
     conn.commit()
     conn.close()
