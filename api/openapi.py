@@ -2650,6 +2650,28 @@ _doc("GET", "/trial",
          "429": _err429(),
      })
 
+_doc("POST", "/api/trial/leads",
+     tag="Trial",
+     summary="Capture a trial lead email",
+     description=("Public lead capture behind the /trial CTA shown after a "
+                  "scan completes. Stores one row per (email, scan_id) in "
+                  "trial_leads for sales follow-up; no email is sent. "
+                  "Heavily rate-limited against abuse."),
+     auth="public", min_role=None, org_scope=False, rate_limit="10/hour",
+     params=[],
+     request_body=_body(
+         "multipart/form-data: email, scan_id (optional, must be a known "
+         "trial scan id).",
+         {"email": "founder@example.com", "scan_id": "a1b2c3d4e5f6"},
+         content_type="multipart/form-data"),
+     responses={
+         "200": _resp("Lead stored (idempotent).", {"ok": True}),
+         "400": _err400("Please enter a valid email address."),
+         "404": _err404("Trial scan not found"),
+         "422": _err422(),
+         "429": _err429(),
+     })
+
 _doc("GET", "/api/subscription",
      tag="Billing",
      summary="Current subscription",
