@@ -240,7 +240,7 @@ async def api_key_gate(request: Request, call_next):
     is_trial = (path.startswith("/api/trial/")
                 and not (request.method == "GET" and path in (
                     "/api/trial/leads", "/api/trial/leads.csv",
-                    "/api/trial/stats")))
+                    "/api/trial/stats", "/api/trial/email-preview")))
     if (path.startswith("/api/") and path not in public_paths
             and not is_badge and not is_status and not is_trial):
         presented = request.headers.get("x-api-key", "")
@@ -4610,35 +4610,15 @@ def _alert_owner_new_lead(email: str, scan_id: str | None,
         log.exception("trial lead owner alert failed")
 
 
-def _send_trial_lead_report(email: str, scan_id: str | None):
-    """Email the trial lead their full findings list (best-effort).
+def _build_trial_lead_email(target, findings):
+    """Build the trial follow-up email: returns (subject, text, html).
 
-    Runs as a background task after POST /api/trial/leads. Never raises:
-    the lead row is already stored; a failed email just leaves emailed_at
-    NULL so ops can see it was not delivered.
+    Pure function of its inputs so the dashboard preview endpoint renders
+    exactly what the background task sends to leads.
     """
-    from email_alerts import send_email  # noqa: E402
-    target, summary, findings = None, {}, []
-    if scan_id:
-        db = get_db()
-        try:
-            row = db.execute(
-                "SELECT s.target_name, s.status FROM scans s"
-                " JOIN trial_scans t ON t.scan_id=s.id WHERE t.scan_id=?",
-                (scan_id,)).fetchone()
-            if row and row["status"] == "done":
-                target = row["target_name"]
-                for f in db.execute(
-                        "SELECT rule_id, severity, message, file, line"
-                        " FROM findings WHERE scan_id=? ORDER BY"
-                        " severity, file, line LIMIT 100", (scan_id,)):
-                    findings.append({
-                        "rule_id": f["rule_id"], "severity": f["severity"],
-                        "message": f["message"],
-                        "file": _trial_rel_path(f["file"]), "line": f["line"]})
-                    summary[f["severity"]] = summary.get(f["severity"], 0) + 1
-        finally:
-            db.close()
+    summary = {}
+    for f in findings:
+        summary[f["severity"]] = summary.get(f["severity"], 0) + 1
     if findings:
         lines = [f"  [{f['severity']}] {f['rule_id']} — "
                  f"{f['file']}:{f['line']}\n    {f['message'] or ''}"
@@ -4674,6 +4654,55 @@ def _send_trial_lead_report(email: str, scan_id: str | None):
             "<a href=\"https://braimsec.world\">braimsec.world</a> — every "
             "plan starts with a 7-day free trial.</p>"
             "<p>— The BraimSec team</p>" % detail_html)
+    return subject, text, html
+
+
+# Sample data for the owner-only email preview (dashboard "preview" button).
+_TRIAL_PREVIEW_SAMPLE = [
+    {"severity": "high", "rule_id": "python.django.security.injection",
+     "file": "shop/views.py", "line": 87,
+     "message": "Possible SQL injection via raw query string formatting."},
+    {"severity": "medium", "rule_id": "javascript.lang.security.audit",
+     "file": "static/app.js", "line": 204,
+     "message": "Use of eval() with dynamic input."},
+    {"severity": "medium", "rule_id": "generic.secrets",
+     "file": ".env.example", "line": 3,
+     "message": "Hardcoded secret pattern detected."},
+    {"severity": "low", "rule_id": "dockerfile.security.missing-user",
+     "file": "Dockerfile", "line": 1,
+     "message": "Base image uses the mutable 'latest' tag."},
+]
+
+
+def _send_trial_lead_report(email: str, scan_id: str | None):
+    """Email the trial lead their full findings list (best-effort).
+
+    Runs as a background task after POST /api/trial/leads. Never raises:
+    the lead row is already stored; a failed email just leaves emailed_at
+    NULL so ops can see it was not delivered.
+    """
+    from email_alerts import send_email  # noqa: E402
+    target, findings = None, []
+    if scan_id:
+        db = get_db()
+        try:
+            row = db.execute(
+                "SELECT s.target_name, s.status FROM scans s"
+                " JOIN trial_scans t ON t.scan_id=s.id WHERE t.scan_id=?",
+                (scan_id,)).fetchone()
+            if row and row["status"] == "done":
+                target = row["target_name"]
+                for f in db.execute(
+                        "SELECT rule_id, severity, message, file, line"
+                        " FROM findings WHERE scan_id=? ORDER BY"
+                        " severity, file, line LIMIT 100", (scan_id,)):
+                    findings.append({
+                        "rule_id": f["rule_id"], "severity": f["severity"],
+                        "message": f["message"],
+                        "file": _trial_rel_path(f["file"]), "line": f["line"]})
+        finally:
+            db.close()
+    subject, text, html = _build_trial_lead_email(target, findings)
     ok, _, _ = send_email(email, subject, text, html)
     if ok and scan_id:
         db = get_db()
@@ -4685,7 +4714,6 @@ def _send_trial_lead_report(email: str, scan_id: str | None):
             db.commit()
         finally:
             db.close()
-
 
 def _valid_lead_email(email: str) -> bool:
     """Minimal sanity check for trial lead capture (no regex import needed)."""
@@ -4769,6 +4797,22 @@ def list_trial_leads(request: Request, limit: int = 100):
         db.close()
 
 
+@app.get("/api/trial/email-preview")
+@limiter.limit("60/minute")
+def trial_email_preview(request: Request):
+    """Owner-only preview of the trial follow-up email.
+
+    Renders the exact same builder the background task uses, with sample
+    findings — so what the owner sees in the dashboard is what leads
+    actually receive.
+    """
+    require_org_scope(request)
+    require_role(request, "owner")
+    subject, text, html = _build_trial_lead_email(
+        "demo/example-repo", list(_TRIAL_PREVIEW_SAMPLE))
+    return {"subject": subject, "text": text, "html": html}
+
+
 @app.get("/api/trial/leads.csv")
 @limiter.limit("60/minute")
 def export_trial_leads(request: Request):
@@ -4828,6 +4872,16 @@ def trial_page(request: Request):
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BraimSec — Free trial scan</title>
+<meta name="description" content="Paste a public GitHub or GitLab repository URL and get a free security scan summary in minutes. No signup, no card.">
+<meta property="og:title" content="BraimSec — Free trial security scan">
+<meta property="og:description" content="Paste a public repo URL and get a security scan summary in minutes. No signup, no card.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://api.braimsec.world/trial">
+<meta property="og:image" content="https://api.braimsec.world/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="BraimSec — Free trial security scan">
+<meta name="twitter:description" content="Paste a public repo URL and get a security scan summary in minutes. No signup, no card.">
+<meta name="twitter:image" content="https://api.braimsec.world/og.png">
 <style>
 body{font-family:system-ui,sans-serif;background:#0b1020;color:#e6e9f5;
 margin:0;display:flex;justify-content:center;padding:40px 16px}
@@ -4845,6 +4899,9 @@ background:#1b2350;font-size:13px}
 margin:8px 0;font-size:14px}
 .finding b{color:#ffb4b4} code{color:#9fd0ff}
 #status{margin:14px 0;color:#c8ceea} a{color:#8fb0ff}
+#pbar{display:none;height:10px;border-radius:99px;background:#1b2350;overflow:hidden;margin:12px 0}
+#pfill{height:100%;width:0;border-radius:99px;background:linear-gradient(90deg,#4f6df5,#8fb0ff);transition:width 1.4s ease}
+.priv{font-size:13px;color:#8b93b8;margin:4px 0 0;line-height:1.6}
 #lang-btn{position:fixed;top:12px;inset-inline-end:12px;background:#1b2350;
 border:1px solid #2a3358;color:#e6e9f5;padding:8px 14px;border-radius:99px;
 font-size:13px;cursor:pointer}
@@ -4853,10 +4910,12 @@ font-size:13px;cursor:pointer}
 <main>
 <h1 id="t-h1">\U0001f6e1\U0000fe0f BraimSec — free trial scan</h1>
 <p class="sub" id="t-sub"></p>
+<p class="priv" id="t-priv"></p>
 <form id="f"><input id="u" type="url" required
 placeholder="https://github.com/owner/repo">
 <button id="b" type="submit">Scan</button></form>
-<div id="status"></div><div id="out"></div>
+<div id="status"></div>
+<div id="pbar"><div id="pfill"></div></div><div id="out"></div>
 <p class="sub" id="t-limits"></p>
 <script>
 const STR={
@@ -4866,20 +4925,21 @@ starting:"Starting scan\u2026",complete:"\u2705 Scan complete",findings:"finding
 failed:"\u274c Scan failed: ",scanning:"\u23f3 Scanning",cantake:"(this can take a few minutes)",
 cta_t:"Want the full report?",cta_d:"Leave your email and get the complete findings with AI fix suggestions.",
 cta_b:"Send me the report",sending:"Sending\u2026",cta_ok:"Done \u2014 we will be in touch soon.",
-neterr:"Network error: ",err:"Error: ",toggle:"\u0639\u0631\u0628\u064a"},
+neterr:"Network error: ",err:"Error: ",privacy:"\U0001f512 Privacy: we clone, scan, then delete — your code is never stored.",checks:"100+ checks: leaked secrets, injection flaws, insecure configs & more.",toggle:"\u0639\u0631\u0628\u064a"},
 ar:{sub:"\u0627\u0644\u0635\u0642 \u0631\u0627\u0628\u0637 \u0645\u0633\u062a\u0648\u062f\u0639 \u0639\u0627\u0645 \u0639\u0644\u0649 GitHub \u0623\u0648 GitLab \u0648\u0627\u062d\u0635\u0644 \u0639\u0644\u0649 \u0645\u0644\u062e\u0635 \u0641\u062d\u0635 \u0623\u0645\u0646\u064a \u062e\u0644\u0627\u0644 \u062f\u0642\u0627\u0626\u0642. \u0628\u0644\u0627 \u062a\u0633\u062c\u064a\u0644\u060c \u0628\u0644\u0627 \u0628\u0637\u0627\u0642\u0629.",
 scan:"\u0627\u0641\u062d\u0635",limits:'\u062d\u062f\u0648\u062f \u0627\u0644\u062a\u062c\u0631\u0628\u0629: 3 \u0641\u062d\u0648\u0635\u0627\u062a \u0644\u0643\u0644 \u0634\u0628\u0643\u0629 \u064a\u0648\u0645\u064a\u0627\u064b. \u0627\u0644\u062a\u0642\u0631\u064a\u0631 \u0627\u0644\u0643\u0627\u0645\u0644 \u0645\u0639 \u0627\u0642\u062a\u0631\u0627\u062d\u0627\u062a \u0627\u0644\u0625\u0635\u0644\u0627\u062d \u064a\u062a\u0637\u0644\u0628 <a href=\"/\">\u062d\u0633\u0627\u0628\u0627\u064b \u0645\u062c\u0627\u0646\u064a\u0627\u064b</a>.',
 starting:"\u062c\u0627\u0631\u064d \u0628\u062f\u0621 \u0627\u0644\u0641\u062d\u0635\u2026",complete:"\u2705 \u0627\u0643\u062a\u0645\u0644 \u0627\u0644\u0641\u062d\u0635",findings:"\u0646\u062a\u064a\u062c\u0629 \u0641\u064a",
 failed:"\u274c \u0641\u0634\u0644 \u0627\u0644\u0641\u062d\u0635: ",scanning:"\u23f3 \u062c\u0627\u0631\u064d \u0641\u062d\u0635",cantake:"(\u0642\u062f \u064a\u0633\u062a\u063a\u0631\u0642 \u0628\u0636\u0639 \u062f\u0642\u0627\u0626\u0642)",
 cta_t:"\u062a\u0631\u064a\u062f \u0627\u0644\u062a\u0642\u0631\u064a\u0631 \u0627\u0644\u0643\u0627\u0645\u0644\u061f",cta_d:"\u0627\u062a\u0631\u0643 \u0628\u0631\u064a\u062f\u0643 \u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a \u0648\u0627\u062d\u0635\u0644 \u0639\u0644\u0649 \u0643\u0644 \u0627\u0644\u0646\u062a\u0627\u0626\u062c \u0645\u0639 \u0627\u0642\u062a\u0631\u0627\u062d\u0627\u062a \u0627\u0644\u0630\u0643\u0627\u0621 \u0627\u0644\u0627\u0635\u0637\u0646\u0627\u0639\u064a.",
 cta_b:"\u0623\u0631\u0633\u0644 \u0644\u064a \u0627\u0644\u062a\u0642\u0631\u064a\u0631",sending:"\u062c\u0627\u0631\u064d \u0627\u0644\u0625\u0631\u0633\u0627\u0644\u2026",cta_ok:"\u062a\u0645 \u2014 \u0633\u0646\u062a\u0648\u0627\u0635\u0644 \u0645\u0639\u0643 \u0642\u0631\u064a\u0628\u0627\u064b.",
-neterr:"\u062e\u0637\u0623 \u0634\u0628\u0643\u0629: ",err:"\u062e\u0637\u0623: ",toggle:"EN"}};
+neterr:"\u062e\u0637\u0623 \u0634\u0628\u0643\u0629: ",err:"\u062e\u0637\u0623: ",privacy:"\U0001f512 \u062e\u0635\u0648\u0635\u064a\u062a\u0643: \u0646\u0646\u0633\u062e \u0627\u0644\u0645\u0633\u062a\u0648\u062f\u0639\u060c \u0646\u0641\u062d\u0635\u0647\u060c \u062b\u0645 \u0646\u062d\u0630\u0641\u0647 — \u0643\u0648\u062f\u0643 \u0644\u0627 \u064a\u064f\u062e\u0632\u064e\u0651\u0646 \u0623\u0628\u062f\u0627\u064b.",checks:"\u0623\u0643\u062b\u0631 \u0645\u0646 100 \u0641\u062d\u0635: \u0623\u0633\u0631\u0627\u0631 \u0645\u0633\u0631\u064e\u0651\u0628\u0629\u060c \u062b\u063a\u0631\u0627\u062a \u062d\u0642\u0646\u060c \u0625\u0639\u062f\u0627\u062f\u0627\u062a \u063a\u064a\u0631 \u0622\u0645\u0646\u0629 \u0648\u0627\u0644\u0645\u0632\u064a\u062f.",toggle:"EN"}};
 let LANG=localStorage.getItem("braimsec_trial_lang")||((navigator.language||"en").startsWith("ar")?"ar":"en");
 const T=k=>(STR[LANG]&&STR[LANG][k])||STR.en[k]||k;
 function applyLang(){
 document.documentElement.lang=LANG;document.documentElement.dir=LANG==="ar"?"rtl":"ltr";
 document.getElementById("t-h1").textContent=LANG==="ar"?"\U0001f6e1\U0000fe0f BraimSec \u2014 \u0641\u062d\u0635 \u062a\u062c\u0631\u064a\u0628\u064a \u0645\u062c\u0627\u0646\u064a":"\U0001f6e1\U0000fe0f BraimSec \u2014 free trial scan";
 document.getElementById("t-sub").textContent=T("sub");
+document.getElementById("t-priv").textContent=T("privacy")+" "+T("checks");
 document.getElementById("b").textContent=T("scan");
 document.getElementById("t-limits").innerHTML=T("limits");
 document.getElementById("lang-btn").textContent=T("toggle");}
@@ -4888,8 +4948,9 @@ LANG=LANG==="ar"?"en":"ar";localStorage.setItem("braimsec_trial_lang",LANG);appl
 applyLang();
 const f=document.getElementById("f"),b=document.getElementById("b"),
 s=document.getElementById("status"),o=document.getElementById("out");
+let PC=0;
 function esc(t){const d=document.createElement("div");d.textContent=t;return d.innerHTML}
-f.addEventListener("submit",async e=>{e.preventDefault();b.disabled=true;o.innerHTML="";
+f.addEventListener("submit",async e=>{e.preventDefault();b.disabled=true;o.innerHTML="";PC=0;document.getElementById("pbar").style.display="none";document.getElementById("pfill").style.width="0";
 s.textContent=T("starting");
 try{
 const r=await fetch("/api/trial/scans",{method:"POST",
@@ -4899,8 +4960,11 @@ if(!r.ok){s.textContent=T("err")+(j.detail||r.status);b.disabled=false;return}
 poll(j.scan_id);
 }catch(err){s.textContent=T("neterr")+err;b.disabled=false}});
 async function poll(id){
+PC++;
+const pb=document.getElementById("pbar"),pf=document.getElementById("pfill");
 const r=await fetch("/api/trial/scans/"+id);const j=await r.json();
 if(j.status==="done"){
+pb.style.display="none";
 s.innerHTML=T("complete")+" \u2014 <b>"+j.total_findings+"</b> "+T("findings")+" "+esc(j.target);
 let h="";
 for(const [k,v] of Object.entries(j.severity_summary||{}))
@@ -4924,7 +4988,8 @@ body:new URLSearchParams({email:document.getElementById("lead-e").value,scan_id:
 if(rr.ok){m.textContent=T("cta_ok");lf.style.display="none"}
 else{var jj=await rr.json();m.textContent=""+(jj.detail||rr.status)}}catch(e){m.textContent=T("neterr")+e}});
 b.disabled=false;return}
-if(j.status==="failed"){s.textContent=T("failed")+(j.error||"unknown error");b.disabled=false;return}
+if(j.status==="failed"){pb.style.display="none";s.textContent=T("failed")+(j.error||"unknown error");b.disabled=false;return}
+pb.style.display="block";pf.style.width=Math.min(96,8+PC*11)+"%";
 s.textContent=T("scanning")+" "+id+" \u2014 "+j.status+" "+T("cantake");
 setTimeout(()=>poll(id),4000)}
 </script></main></body></html>"""
