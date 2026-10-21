@@ -564,6 +564,12 @@ def init_db():
     # braimsec_taint_rules}. NULL on scans that predate this logging.
     if "engines_json" not in scan_cols:
         conn.execute("ALTER TABLE scans ADD COLUMN engines_json TEXT")
+    # Lightweight migration: emailed_at on trial_leads (auto follow-up
+    # email added after the table first shipped).
+    lead_cols = {r["name"]
+                 for r in conn.execute("PRAGMA table_info(trial_leads)")}
+    if "emailed_at" not in lead_cols:
+        conn.execute("ALTER TABLE trial_leads ADD COLUMN emailed_at TEXT")
     # Lightweight migration: latency-degradation alerts on uptime targets.
     uptime_cols = {r["name"]
                    for r in conn.execute("PRAGMA table_info(uptime_targets)")}
