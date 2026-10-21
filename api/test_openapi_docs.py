@@ -77,7 +77,7 @@ def test_rate_limits_match_source():
     found = {}
     # @app.<method>("<path>") immediately followed by @limiter.limit("<v>")
     pat = re.compile(
-        r'@app\.(get|post|put|patch|delete)\("([^"]+)"\)\s*\n'
+        r'@app\.(get|post|put|patch|delete)\("([^"]+)"[^)]*\)\s*\n'
         r'\s*@limiter\.limit\("([^"]+)"\)')
     for method, path, limit in pat.findall(MAIN_SRC):
         found[(method.upper(), path)] = limit
