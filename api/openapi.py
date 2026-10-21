@@ -2687,7 +2687,7 @@ _doc("GET", "/api/trial/public-stats",
      description=("Public aggregate trial counters for the social-proof "
                   "badge on the trial page. Totals only — no per-scan or "
                   "per-lead data."),
-     auth=None, rate_limit="60/minute",
+     auth="public", min_role=None, org_scope=False, rate_limit="60/minute",
      params=[],
      request_body=None,
      responses={
@@ -2702,7 +2702,7 @@ _doc("GET", "/trial/r/{scan_id}",
      description=("Public read-only HTML report for a trial scan — the same "
                   "payload as the JSON status endpoint, rendered as a "
                   "shareable page with social preview tags."),
-     auth=None, rate_limit="60/minute",
+     auth="public", min_role=None, org_scope=False, rate_limit="60/minute",
      params=[_param("scan_id", "path", "string",
                     "Trial scan id.", True, example="a1b2c3d4e5f6")],
      request_body=None,
