@@ -28,7 +28,9 @@ def test_latency_table_column():
 
 def test_slow_fast_event_options_and_labels():
     h = _html()
-    assert '<option value="uptime.slow">' in h
-    assert '<option value="uptime.fast">' in h
-    assert '"uptime.slow": "🟡 بطء الاستجابة"' in h
-    assert '"uptime.fast": "🟢 تحسّن الاستجابة"' in h
+    assert '<option value="uptime.slow"' in h
+    assert '<option value="uptime.fast"' in h
+    # i18n: labels now come from the I18N dict (ar + en)
+    assert '"uptime.slow": t("sched.ev_slow")' in h
+    assert '"uptime.fast": t("sched.ev_fast")' in h
+    assert '"sched.ev_slow": "🟡 بطء الاستجابة"' in h
