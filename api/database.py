@@ -251,6 +251,19 @@ CREATE INDEX IF NOT EXISTS idx_trial_scans_created
     ON trial_scans(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trial_scans_ip
     ON trial_scans(ip, created_at DESC);
+-- Trial lead capture: emails left on the /trial page CTA after a scan
+-- completes ("send me the full report"). No account, no spam — one row
+-- per email; sales follow-up reads this table.
+CREATE TABLE IF NOT EXISTS trial_leads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    scan_id TEXT REFERENCES trial_scans(scan_id),
+    ip TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(email, scan_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trial_leads_created
+    ON trial_leads(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_emails_org ON alert_emails(org_id);
 -- Telegram alert chats: per-org chat ids for new-findings alerts.
 -- The list itself is the switch: no rows => no telegram alerts.
@@ -474,6 +487,15 @@ CREATE TABLE IF NOT EXISTS finding_suppressions (
     created_by TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     PRIMARY KEY (org_id, fingerprint)
+);
+-- Worker liveness heartbeat: a single row stamped by the braimsec.heartbeat
+-- Celery task (beat, every 60s). Because the task EXECUTES on a worker, a
+-- fresh stamp proves a worker is alive and consuming from the broker.
+-- /api/health reports worker=ok/stale/unknown from this row.
+CREATE TABLE IF NOT EXISTS worker_heartbeat (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_beat_at TEXT NOT NULL,
+    worker_host TEXT NOT NULL DEFAULT ''
 );
 """
 
