@@ -101,6 +101,12 @@ celery_app.conf.update(
             "task": "braimsec.check_schedules",
             "schedule": 60.0,
         },
+        # Worker liveness probe: beat enqueues it every 60s; the WORKER
+        # executes it and stamps the shared DB. /api/health reads the stamp.
+        "braimsec.heartbeat": {
+            "task": "braimsec.heartbeat",
+            "schedule": 60.0,
+        },
     },
 )
 
@@ -648,6 +654,36 @@ def check_schedules():
             "certs": run_cert_checks_once(),
             "uptime": run_uptime_checks_once(),
             "digests": run_digests_once()}
+
+
+@celery_app.task(name="braimsec.heartbeat")
+def heartbeat():
+    """Worker liveness stamp (beat: every 60s).
+
+    The task does nothing but stamp the shared DB with the current time.
+    Because Celery executes it ON A WORKER, a fresh stamp proves a worker
+    is alive and consuming tasks from the broker. /api/health reports
+    worker=ok when the stamp is < 3 minutes old, stale when older, and
+    unknown when no stamp exists yet (e.g. right after deploy).
+    Never raises: a failed stamp must not poison the beat loop.
+    """
+    import socket
+    try:
+        db = get_db()
+        try:
+            db.execute(
+                "INSERT INTO worker_heartbeat (id, last_beat_at, worker_host)"
+                " VALUES (1, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET"
+                " last_beat_at=excluded.last_beat_at,"
+                " worker_host=excluded.worker_host",
+                (_now_iso(), socket.gethostname()))
+            db.commit()
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - heartbeat must never raise
+        log.exception("heartbeat stamp failed")
+    return "ok"
 
 
 def enqueue_vcs_ingest(repo_id: str, sha: str,
