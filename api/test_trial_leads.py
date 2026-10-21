@@ -195,3 +195,40 @@ def test_migration_adds_emailed_at_to_legacy_table(tmp_path):
     cols = {r[1] for r in db.execute("PRAGMA table_info(trial_leads)")}
     db.close()
     assert "emailed_at" in cols
+
+
+def _mk_keys():
+    from billing import (OWNER_ORG_ID, create_org, ensure_owner_org,
+                         provision_key)
+    init_db()
+    ensure_owner_org()
+    org = create_org("Leads Co")
+    owner_key = provision_key(OWNER_ORG_ID, "owner-k", actor="owner",
+                              role="owner")
+    member_key = provision_key(org, "member-k", actor="owner", role="member")
+    return owner_key, member_key
+
+
+def test_list_leads_owner_only():
+    owner_key, member_key = _mk_keys()
+    scan_id = _mk_trial_scan()
+    db = get_db()
+    db.execute(
+        "INSERT OR IGNORE INTO trial_leads (email, scan_id, ip, created_at,"
+        " emailed_at) VALUES (?,?,?, ?,?)",
+        ("boss@example.com", scan_id, "9.9.9.9",
+         "2026-10-21T10:00:00+00:00", "2026-10-21T10:01:00+00:00"))
+    db.commit()
+    db.close()
+    r = client.get("/api/trial/leads",
+                   headers={"X-API-Key": owner_key})
+    assert r.status_code == 200
+    leads = r.json()["leads"]
+    assert any(l["email"] == "boss@example.com" and l["emailed"] is True
+               and l["repo_url"] == "https://github.com/o/r"
+               for l in leads)
+    r = client.get("/api/trial/leads",
+                   headers={"X-API-Key": member_key})
+    assert r.status_code == 403
+    r = client.get("/api/trial/leads")
+    assert r.status_code == 401
