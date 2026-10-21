@@ -43,10 +43,12 @@ def test_uptime_api_calls_wired():
 
 def test_uptime_event_labels_and_options():
     h = _html()
-    assert '<option value="uptime.down">' in h
-    assert '<option value="uptime.recovered">' in h
-    assert '"uptime.down": "🔴 توقف الموقع"' in h
-    assert '"uptime.recovered": "🟢 عودة الموقع"' in h
+    assert '<option value="uptime.down"' in h
+    assert '<option value="uptime.recovered"' in h
+    # i18n: labels now come from the I18N dict (ar + en)
+    assert '"uptime.down": t("sched.ev_down")' in h
+    assert '"uptime.recovered": t("sched.ev_up")' in h
+    assert '"sched.ev_down": "🔴 توقف الموقع"' in h
     assert ".sev-info" in h
 
 
