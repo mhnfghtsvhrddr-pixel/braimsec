@@ -260,6 +260,7 @@ CREATE TABLE IF NOT EXISTS trial_leads (
     scan_id TEXT REFERENCES trial_scans(scan_id),
     ip TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
+    emailed_at TEXT,
     UNIQUE(email, scan_id)
 );
 CREATE INDEX IF NOT EXISTS idx_trial_leads_created
