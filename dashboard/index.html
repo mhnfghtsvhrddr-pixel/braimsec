@@ -423,7 +423,11 @@
 </div>
 <div id="email-preview-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center;padding:1rem">
   <div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:1.5rem;width:min(40rem,94vw);max-height:85vh;overflow-y:auto">
-    <h3 style="margin:0 0 0.5rem" data-i18n="leads.preview_title">👁️ معاينة إيميل المتابعة</h3>
+    <h3 style="margin:0 0 0.5rem"><span data-i18n="leads.preview_title">👁️ معاينة إيميل المتابعة</span>
+      <span style="font-size:0.75rem;font-weight:400">
+        <button class="btn-ghost" style="padding:0.2rem 0.6rem" onclick="previewLeadEmail('ar')">عربي</button>
+        <button class="btn-ghost" style="padding:0.2rem 0.6rem" onclick="previewLeadEmail('en')">EN</button>
+      </span></h3>
     <p style="color:var(--muted);font-size:0.85rem;margin:0 0 1rem"><span data-i18n="leads.preview_subj">الموضوع</span>: <b id="email-preview-subject" dir="ltr"></b></p>
     <div id="email-preview-body" style="background:#ffffff;color:#111111;border-radius:8px;padding:1rem;font-size:14px"></div>
     <div style="margin-top:1rem;text-align:end"><button class="btn-ghost" data-i18n="leads.preview_close" onclick="closeEmailPreview()">إغلاق</button></div>
@@ -2972,13 +2976,14 @@ async function exportLeadsCsv() {
   URL.revokeObjectURL(a.href);
 }
 
-async function previewLeadEmail() {
+async function previewLeadEmail(lang) {
+  lang = (lang === "en") ? "en" : "ar";
   const m = document.getElementById("email-preview-modal");
   const body = document.getElementById("email-preview-body");
   m.style.display = "flex";
   body.innerHTML = `<p style="color:var(--muted)"><span class="spinner"></span> ${t("cmn.loading")}</p>`;
   try {
-    const r = await api("/trial/email-preview");
+    const r = await api("/trial/email-preview?lang=" + lang);
     document.getElementById("email-preview-subject").textContent = r.subject;
     body.innerHTML = r.html;
   } catch (e) {
