@@ -46,8 +46,10 @@ def test_cert_api_calls_wired():
 
 def test_cert_event_label_and_option():
     h = _html()
-    assert '<option value="cert.expiry">' in h
-    assert '"cert.expiry": "🔒 انتهاء شهادة TLS"' in h
+    assert '<option value="cert.expiry"' in h
+    # i18n: label now comes from the I18N dict (ar + en)
+    assert '"cert.expiry": t("sched.ev_cert")' in h
+    assert '"sched.ev_cert": "🔒 انتهاء شهادة TLS"' in h
 
 
 def test_cert_loader_runs_with_sched_view():
