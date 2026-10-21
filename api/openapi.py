@@ -931,7 +931,11 @@ _doc("POST", "/api/vcs/repos",
      description=("Register a GitHub/GitLab repo. Returns the repo plus a "
                   "one-time webhook_secret and the receiver_url to paste "
                   "into the provider's webhook settings. Secrets are shown "
-                  "once and never stored in cleartext. 409 when the repo is "
+                  "once and never stored in cleartext. Optional github_token "
+                  "(a GitHub PAT, write-only, stored encrypted) enables "
+                  "automatic scan comments on pull requests targeting the "
+                  "watched branch; responses carry pr_comments_enabled "
+                  "instead of the token. 409 when the repo is "
                   "already registered for this org. Member+, org scope."),
      auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
      params=[],
@@ -940,7 +944,7 @@ _doc("POST", "/api/vcs/repos",
          {"provider": "github", "repo_url": "https://github.com/acme/myapp",
           "full_name": "acme/myapp", "branch": "main",
           "alert_severity": "warning", "webhook_url": "",
-          "project_id": None}),
+          "github_token": "github_pat_...", "project_id": None}),
      responses={
          "200": _resp("Registered repo with one-time secret.",
                       {"id": "v_1a2b3c4d", "provider": "github",
@@ -973,6 +977,7 @@ _doc("GET", "/api/vcs/repos",
                         "repo_url": "https://github.com/acme/myapp",
                         "full_name": "acme/myapp", "branch": "main",
                         "alert_severity": "warning", "enabled": True,
+                        "pr_comments_enabled": True,
                         "last_scan_id": "a1b2c3d4e5f6",
                         "last_scan_at": "2026-10-01T12:00:00+00:00"}]),
          "401": _err401(),
@@ -991,7 +996,7 @@ _doc("GET", "/api/vcs/repos/{repo_id}",
      responses={
          "200": _resp("Repo with last scan.",
                       {"id": "v_1a2b3c4d", "provider": "github",
-                       "branch": "main",
+                       "branch": "main", "pr_comments_enabled": False,
                        "last_scan": {"id": "a1b2c3d4e5f6",
                                      "status": "done", "total_findings": 7}}),
          "401": _err401(),
@@ -1003,17 +1008,20 @@ _doc("GET", "/api/vcs/repos/{repo_id}",
 _doc("PATCH", "/api/vcs/repos/{repo_id}",
      tag="VCS",
      summary="Update repo",
-     description="Update branch / webhook_url / alert_severity / enabled. "
-                 "Member+, org scope.",
+     description="Update branch / webhook_url / alert_severity / enabled / "
+                 "github_token. The GitHub PAT is write-only: it is stored "
+                 "encrypted and never returned (responses carry "
+                 "pr_comments_enabled instead). Member+, org scope.",
      auth="key", min_role="member", org_scope=True, rate_limit="30/minute",
      params=[_param("repo_id", "path", "string", "Repo id.", True,
                    example="v_1a2b3c4d")],
      request_body=_body("Fields to update.",
-                        {"branch": "develop", "enabled": True}),
+                        {"branch": "develop", "enabled": True,
+                         "github_token": "github_pat_..."}),
      responses={
          "200": _resp("Updated repo row.",
                       {"id": "v_1a2b3c4d", "branch": "develop",
-                       "enabled": True}),
+                       "enabled": True, "pr_comments_enabled": True}),
          "400": _err400("Nothing to update"),
          "401": _err401(),
          "403": _err403(),
@@ -1066,13 +1074,17 @@ _doc("POST", "/api/vcs/repos/{repo_id}/rotate-secret",
 
 _doc("POST", "/api/webhooks/github",
      tag="Webhooks",
-     summary="GitHub push receiver",
-     description=("Public receiver for GitHub push webhooks. Verified with "
-                  "HMAC-SHA256 (X-Hub-Signature-256) against the repo's "
-                  "secret. Non-push events, unknown repos, disabled repos, "
-                  "unwatched branches and already-scanned commits are "
-                  "acknowledged without scanning. Pushes to a watched branch "
-                  "queue a scan (202)."),
+     summary="GitHub push/PR receiver",
+     description=("Public receiver for GitHub push and pull_request webhooks. "
+                  "Verified with HMAC-SHA256 (X-Hub-Signature-256) against "
+                  "the repo's secret. Non-push events, unknown repos, "
+                  "disabled repos, unwatched branches and already-scanned "
+                  "commits are acknowledged without scanning. Pushes to a "
+                  "watched branch queue a scan (202). Pull requests "
+                  "(opened/synchronize/reopened) whose base branch is the "
+                  "watched branch scan the PR head commit (forks supported) "
+                  "and — when a GitHub PAT is registered on the repo — the "
+                  "result is posted as a comment on the PR thread."),
      auth="public", min_role=None, org_scope=False, rate_limit="60/minute",
      params=[],
      request_body=_body("Raw GitHub push event JSON.",
