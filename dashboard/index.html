@@ -152,6 +152,9 @@
     display: flex; align-items: center; justify-content: center; z-index: 50;
     padding: 1rem;
   }
+  /* The `hidden` attribute must win over `display:flex` above, otherwise
+     no modal (including the onboarding wizard) can ever be dismissed. */
+  .modal-back[hidden] { display: none !important; }
   .modal {
     background: var(--bg2); border: 1px solid var(--border); border-radius: 16px;
     padding: 2rem; width: 90%; max-width: 480px; max-height: 90vh; overflow-y: auto;
@@ -252,7 +255,7 @@
   <div style="margin-inline-start: auto; display: flex; align-items: center; gap: 0.5rem;">
     <input id="api-key" type="password" placeholder="API key"
       style="background: var(--bg3); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.45rem 0.7rem; font-size: 0.85rem; width: 11rem;"
-      oninput="localStorage.setItem('braimsec_key', this.value)">
+      oninput="localStorage.setItem('braimsec_key', this.value.trim())">
     <script>document.getElementById('api-key').value = localStorage.getItem('braimsec_key') || '';</script>
     <button class="btn-ghost" title="إعادة معالج البداية" onclick="obRestart()"
       style="padding:0.45rem 0.7rem;font-size:0.9rem">🧭</button>
@@ -325,7 +328,7 @@ async function submitAuth(){
 }
 async function refreshAuthBtn(){
   const btn=document.getElementById('auth-btn'); if(!btn) return;
-  const key=localStorage.getItem('braimsec_key')||'';
+  const key=getKey();
   if(!key){ btn.textContent='👤 دخول'; btn.onclick=openAuthModal; return; }
   try{
     const r=await fetch('/api/me',{headers:{'X-API-Key':key}});
@@ -336,7 +339,7 @@ async function refreshAuthBtn(){
   }catch(e){ btn.textContent='👤 دخول'; btn.onclick=openAuthModal; }
 }
 async function logoutAuth(){
-  const key=localStorage.getItem('braimsec_key')||'';
+  const key=getKey();
   try{ await fetch('/api/auth/logout',{method:'POST',headers:{'X-API-Key':key}}); }catch(e){}
   localStorage.removeItem('braimsec_key');
   document.getElementById('api-key').value='';
@@ -980,7 +983,7 @@ const TRIAGE_AR = {
 async function api(path, opts) {
   opts = opts || {};
   opts.headers = Object.assign({}, opts.headers, {
-    "X-API-Key": localStorage.getItem("braimsec_key") || ""
+    "X-API-Key": getKey()
   });
   const r = await fetch(API + path, opts);
   if (r.status === 401) {
@@ -997,7 +1000,8 @@ async function api(path, opts) {
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmtDT = s => s ? s.slice(0, 16).replace("T", " ") : "—";
 const fmtD = s => s ? s.slice(0, 10) : "—";
-const myPrefix = () => (localStorage.getItem("braimsec_key") || "").slice(0, 8);
+const myPrefix = () => getKey().slice(0, 8);
+function getKey() { return (localStorage.getItem("braimsec_key") || "").trim(); }
 
 /* ---------- التنقل ---------- */
 function showView(name) {
@@ -1255,7 +1259,7 @@ async function downloadPdf() {
   btn.disabled = true;
   try {
     const r = await fetch(API + `/scans/${currentScan}/report.pdf`, {
-      headers: { "X-API-Key": localStorage.getItem("braimsec_key") || "" }
+      headers: { "X-API-Key": getKey() }
     });
     if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || ("خطأ " + r.status)); }
     const blob = await r.blob();
@@ -1273,7 +1277,7 @@ async function downloadSarif() {
   btn.disabled = true;
   try {
     const r = await fetch(API + `/scans/${currentScan}/sarif`, {
-      headers: { "X-API-Key": localStorage.getItem("braimsec_key") || "" }
+      headers: { "X-API-Key": getKey() }
     });
     if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || ("خطأ " + r.status)); }
     const blob = await r.blob();
@@ -1307,7 +1311,7 @@ async function downloadExecutive() {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-API-Key": localStorage.getItem("braimsec_key") || ""
+        "X-API-Key": getKey()
       },
       body: JSON.stringify(body)
     });
@@ -2712,7 +2716,7 @@ async function obAddEmail() {
   msg.style.color = "var(--red)";
   msg.textContent = "";
   if (!email) { msg.textContent = "أدخل بريداً إلكترونياً"; return; }
-  const key = localStorage.getItem("braimsec_key") || "";
+  const key = getKey();
   if (!key) {
     msg.textContent = "ضع مفتاح API في الحقل أعلى الصفحة أولاً (أو أنشئ واحداً من الخطوة 2)";
     return;
