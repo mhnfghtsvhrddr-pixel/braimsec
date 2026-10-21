@@ -456,6 +456,14 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
         except Exception:  # noqa: BLE001
             log.exception("vcs alert evaluation failed for scan %s",
                           scan_id)
+        # GitHub PR comments: post/update the scan summary on the PR thread
+        # when the scan was PR-triggered (no-op otherwise). Best-effort.
+        try:
+            from github_pr import maybe_post_pr_comment  # noqa: E402
+            maybe_post_pr_comment(scan_id)
+        except Exception:  # noqa: BLE001
+            log.exception("pr comment posting failed for scan %s",
+                          scan_id)
 
 
 @celery_app.task(name="braimsec.run_ai_review", bind=True, max_retries=2,
@@ -643,29 +651,48 @@ def check_schedules():
 
 
 def enqueue_vcs_ingest(repo_id: str, sha: str,
-                       background_tasks=None) -> str:
+                       background_tasks=None,
+                       pr_number: int | None = None,
+                       clone_url: str | None = None,
+                       head_ref: str | None = None) -> str:
     """Route a VCS push ingest to the durable queue, or inline when unconfigured.
+
+    PR-triggered ingests carry ``pr_number`` plus the PR head's ``clone_url``
+    (possibly a fork) and ``head_ref`` branch.
 
     Returns "celery" or "inline" so callers (and tests) can observe routing.
     """
     if queue_enabled():
-        vcs_ingest.delay(repo_id, sha)
+        vcs_ingest.delay(repo_id, sha, pr_number=pr_number,
+                         clone_url=clone_url, head_ref=head_ref)
         return "celery"
     if background_tasks is not None:
-        background_tasks.add_task(_vcs_ingest_inline, repo_id, sha)
+        background_tasks.add_task(_vcs_ingest_inline, repo_id, sha,
+                                  pr_number=pr_number, clone_url=clone_url,
+                                  head_ref=head_ref)
     else:
-        _vcs_ingest_inline(repo_id, sha)
+        _vcs_ingest_inline(repo_id, sha, pr_number=pr_number,
+                           clone_url=clone_url, head_ref=head_ref)
     return "inline"
 
 
-def _vcs_ingest_inline(repo_id: str, sha: str):
+def _vcs_ingest_inline(repo_id: str, sha: str, pr_number: int | None = None,
+                       clone_url: str | None = None,
+                       head_ref: str | None = None):
     from vcs import _ingest_vcs_push  # noqa: E402
-    return _ingest_vcs_push(repo_id, sha)
+    return _ingest_vcs_push(repo_id, sha, pr_number=pr_number,
+                            clone_url=clone_url, head_ref=head_ref)
 
 
 @celery_app.task(name="braimsec.vcs_ingest", bind=True, max_retries=0,
                  soft_time_limit=600)
-def vcs_ingest(self, repo_id: str, sha: str):
-    """Celery task: clone a pushed commit and create a scan for it."""
+def vcs_ingest(self, repo_id: str, sha: str, pr_number: int | None = None,
+               clone_url: str | None = None, head_ref: str | None = None):
+    """Celery task: clone a pushed commit and create a scan for it.
+
+    PR-triggered runs additionally record the scan in ``pr_scans`` so the
+    terminal hook can post/update the PR comment (see ``github_pr``).
+    """
     from vcs import _ingest_vcs_push  # noqa: E402
-    return _ingest_vcs_push(repo_id, sha)
+    return _ingest_vcs_push(repo_id, sha, pr_number=pr_number,
+                            clone_url=clone_url, head_ref=head_ref)
