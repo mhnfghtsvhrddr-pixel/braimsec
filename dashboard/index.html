@@ -23,6 +23,9 @@
     --glow: 0 0 24px rgba(34,211,238,.22);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  /* منع أي انزياح أفقي للصفحة (شريط/فراغ على الحافة بالموبايل):
+     clip لا ينشئ حاوية تمرير فلا يكسر sticky مثل hidden */
+  html, body { overflow-x: clip; }
   body {
     font-family: "Segoe UI", Tahoma, Arial, sans-serif;
     background:
