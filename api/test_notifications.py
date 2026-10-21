@@ -36,6 +36,18 @@ def _fresh_limiter():
     main.limiter._storage.reset()
 
 
+@pytest.fixture(autouse=True)
+def _cleanup_rows():
+    # This module's ctx inserts shared-table notifications rows (scan_id
+    # 'scan1'); test_schedules.py reads notifications with a bare
+    # fetchone(), so leftovers break its assertions in unified runs.
+    yield
+    db = get_db()
+    db.execute("DELETE FROM notifications WHERE scan_id='scan1'")
+    db.commit()
+    db.close()
+
+
 def _insert(db, org, channel, event, status, schedule_id=None):
     cur = db.execute(
         "INSERT INTO notifications (org_id, schedule_id, scan_id, event,"
