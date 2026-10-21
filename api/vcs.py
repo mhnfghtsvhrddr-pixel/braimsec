@@ -14,6 +14,13 @@ Supported providers: GitHub and GitLab. Flow:
 4.  New findings above the repo's severity threshold are delivered through the
     existing alert infrastructure (webhooks); FP suppressions are honoured.
 
+``pull_request`` events for PRs targeting the watched branch are ingested the
+same way (the head commit is scanned, possibly from a fork) and the result
+is posted as a comment on the PR thread — see ``github_pr.py``. Posting
+requires a GitHub PAT registered on the repo (``github_token``, write-only,
+stored encrypted in ``github_token_enc``); the token is used solely for
+commenting, never for cloning.
+
 Security notes
 --------------
 * Repo URLs are strictly validated: https only, no credentials/ports, host
@@ -164,6 +171,27 @@ def decrypt_secret(enc: str) -> str:
     return _fernet().decrypt(enc.encode("ascii")).decode("utf-8")
 
 
+# GitHub personal access tokens accepted for PR comments: fine-grained
+# (github_pat_...) or classic (ghp_...). The token is write-only at the API
+# layer and is used solely to post comments — never for cloning.
+_GITHUB_TOKEN_RE = re.compile(
+    r"^(github_pat_[A-Za-z0-9_]{20,300}|ghp_[A-Za-z0-9]{20,100})$")
+
+
+def validate_github_token(token) -> str:
+    """Validate a GitHub PAT for PR comments; returns it stripped.
+
+    Raises ValueError on empty/whitespace or a non-PAT shape.
+    """
+    if not isinstance(token, str) or not token.strip():
+        raise ValueError("github_token: must be a non-empty GitHub PAT")
+    t = token.strip()
+    if not _GITHUB_TOKEN_RE.match(t):
+        raise ValueError("github_token: must look like github_pat_... or "
+                         "ghp_...")
+    return t
+
+
 def verify_github_signature(raw_body: bytes, signature_header: str | None,
                             secret: str) -> bool:
     """Verify ``X-Hub-Signature-256: sha256=<hex>`` (constant-time)."""
@@ -194,8 +222,13 @@ def verify_gitlab_token(provided: str | None, secret_hash: str) -> bool:
 def parse_github_push(payload: dict, event: str) -> dict | None:
     """Return None for ignorable events, else a normalized push dict.
 
-    Normalized dict types: ``ping`` | ``push`` | ``ignore``.
+    Normalized dict types: ``ping`` | ``push`` | ``pull_request`` | ``ignore``.
+
+    ``pull_request`` is only produced for actions that change the PR head
+    (opened/synchronize/reopened); all other PR actions return None.
     """
+    if event == "pull_request":
+        return _parse_github_pull_request(payload)
     if event == "ping":
         repo = payload.get("repository") or {}
         return {"type": "ping",
@@ -218,6 +251,36 @@ def parse_github_push(payload: dict, event: str) -> dict | None:
         "clone_url": repo.get("clone_url") or "",
         "branch": branch,
         "sha": after,
+    }
+
+
+def _parse_github_pull_request(payload: dict) -> dict | None:
+    """Normalize a GitHub ``pull_request`` webhook event.
+
+    Returns None for actions that do not change the PR head (closed,
+    labeled, ...); callers treat those as safely ignorable noise.
+    """
+    if payload.get("action") not in ("opened", "synchronize", "reopened"):
+        return None
+    pr = payload.get("pull_request") or {}
+    repo = payload.get("repository") or {}
+    head = pr.get("head") or {}
+    base = pr.get("base") or {}
+    head_sha = head.get("sha") or ""
+    pr_number = pr.get("number")
+    if not pr_number:
+        return {"type": "ignore", "reason": "missing PR number"}
+    if not head_sha or len(head_sha) != 40:
+        return {"type": "ignore", "reason": "missing head sha"}
+    return {
+        "type": "pull_request",
+        "full_name": repo.get("full_name") or "",
+        "clone_url": repo.get("clone_url") or "",
+        "pr_number": pr_number,
+        "head_sha": head_sha,
+        "head_ref": head.get("ref") or "",
+        "head_clone_url": (head.get("repo") or {}).get("clone_url") or "",
+        "base_ref": base.get("ref") or "",
     }
 
 
@@ -390,8 +453,15 @@ def _set_repo_error(repo_id: str, message: str | None):
         db.close()
 
 
-def _ingest_vcs_push(repo_id: str, sha: str) -> dict:
+def _ingest_vcs_push(repo_id: str, sha: str, pr_number: int | None = None,
+                     clone_url: str | None = None,
+                     head_ref: str | None = None) -> dict:
     """Clone the pushed commit and create a scan. Safe to run in a worker.
+
+    PR-triggered ingests pass ``pr_number`` plus the PR head's ``clone_url``
+    (which may be a fork — public repos only, same as direct pushes) and its
+    ``head_ref`` branch; the scan is then recorded in ``pr_scans`` so the
+    terminal hook can post/update the PR comment.
 
     Returns a small result dict; never raises for business failures (quota,
     clone errors) — those are recorded on the repo row. Unexpected crashes
@@ -414,12 +484,26 @@ def _ingest_vcs_push(repo_id: str, sha: str) -> dict:
     if scan_exists_for_commit(repo_id, sha):
         return {"ingested": False, "reason": "duplicate commit"}
 
+    # PR head source: may be a fork of the registered repo. It goes through
+    # the same strict public-URL validation as registrations (https, no
+    # credentials, allowlisted host, fail-closed DNS) — and is only ever
+    # used for cloning, never to carry secrets.
+    effective_url = repo["repo_url"]
+    effective_branch = repo["branch"]
+    if clone_url:
+        try:
+            effective_url = validate_repo_url(clone_url)
+        except ValueError as e:
+            _set_repo_error(repo_id, f"invalid PR head url: {e}")
+            return {"ingested": False, "reason": "invalid PR head url"}
+        effective_branch = head_ref or repo["branch"]
+
     workdir = os.path.join(SCAN_ROOT, "vcs", repo_id, sha[:12])
     shutil.rmtree(workdir, ignore_errors=True)
     os.makedirs(workdir, exist_ok=True)
     dest = os.path.join(workdir, "src")
     try:
-        actual_sha = clone_repo(repo["repo_url"], repo["branch"], sha, dest)
+        actual_sha = clone_repo(effective_url, effective_branch, sha, dest)
     except RuntimeError as e:
         log.warning("vcs ingest: clone failed for %s: %s", repo["full_name"],
                     e)
@@ -441,11 +525,20 @@ def _ingest_vcs_push(repo_id: str, sha: str) -> dict:
             "UPDATE vcs_repos SET prev_scan_id=last_scan_id,"
             " last_scan_id=?, last_scan_at=?, last_error=NULL WHERE id=?",
             (scan_id, _now_iso(), repo_id))
+        if pr_number is not None:
+            db.execute(
+                "INSERT OR REPLACE INTO pr_scans (scan_id, repo_id, pr_number,"
+                " head_sha, comment_id, created_at)"
+                " VALUES (?,?,?,?,NULL,?)",
+                (scan_id, repo_id, pr_number, actual_sha, _now_iso()))
         db.commit()
     finally:
         db.close()
 
-    target_name = f"{repo['full_name']}@{actual_sha[:8]}"
+    if pr_number is not None:
+        target_name = f"{repo['full_name']}#pr{pr_number}@{actual_sha[:8]}"
+    else:
+        target_name = f"{repo['full_name']}@{actual_sha[:8]}"
     try:
         _new_scan(repo["org_id"], target_name, dest, workdir, None,
                   baseline_scan_id=None, project_id=repo["project_id"],
