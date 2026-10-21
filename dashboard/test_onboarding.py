@@ -122,3 +122,22 @@ def test_js_syntax_with_node():
         path = f.name
     r = subprocess.run(["node", "--check", path], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, f"JS syntax error: {r.stderr}"
+
+
+def test_sched_subsections_nested_inside_view_sched():
+    """Regression: cert/uptime/status sections must live INSIDE #view-sched.
+
+    If they leak outside, they render on every tab ("everything stacked").
+    Between the view-sched opening tag and each subsection opening tag there
+    must be no closing </section> (i.e. view-sched is still open).
+    """
+    h = HTML
+    sched_open = h.find('<section id="view-sched"')
+    assert sched_open != -1
+    for sid in ["cert-section", "uptime-section", "status-section"]:
+        sub_open = h.find(f'<section id="{sid}"')
+        assert sub_open != -1, sid
+        between = h[sched_open:sub_open]
+        opens = between.count("<section")
+        closes = between.count("</section>")
+        assert opens > closes, f"{sid} is outside view-sched (view-sched closed early)"
