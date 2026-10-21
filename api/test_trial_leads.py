@@ -380,3 +380,57 @@ def test_csv_export_neutralizes_formula_injection():
     # formula prefix neutralized with a leading single quote
     assert "'=cmd" in r.text
     assert "\n=cmd" not in r.text
+
+
+def test_email_preview_owner_only():
+    owner_key, member_key = _mk_keys()
+    r = client.get("/api/trial/email-preview",
+                   headers={"X-API-Key": owner_key})
+    assert r.status_code == 200
+    body = r.json()
+    assert "BraimSec trial scan report" in body["subject"]
+    assert "<ul>" in body["html"]
+    assert "shop/views.py" in body["html"]
+    assert "braimsec.world" in body["html"]
+    assert "Full findings list" in body["text"]
+    r = client.get("/api/trial/email-preview",
+                   headers={"X-API-Key": member_key})
+    assert r.status_code == 403
+    r = client.get("/api/trial/email-preview")
+    assert r.status_code == 401
+
+
+def test_email_preview_uses_same_builder_as_sender():
+    # The preview must render exactly what the background task sends:
+    # same builder, same sample data.
+    owner_key, _ = _mk_keys()
+    subject, text, html = main._build_trial_lead_email(
+        "demo/example-repo", list(main._TRIAL_PREVIEW_SAMPLE))
+    r = client.get("/api/trial/email-preview",
+                   headers={"X-API-Key": owner_key})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["subject"] == subject
+    assert body["text"] == text
+    assert body["html"] == html
+
+
+def test_lead_report_email_unchanged_after_refactor(monkeypatch):
+    # The refactor must not change what leads receive: capture the
+    # email the background task builds for a real trial scan.
+    import email_alerts
+    import main as m
+    scan_id = _mk_done_trial_scan_with_findings()
+    sent = []
+    monkeypatch.setattr(
+        email_alerts, "send_email",
+        lambda to, subj, text, html: sent.append((to, subj, text, html))
+        or (True, 1, None))
+    m._send_trial_lead_report("lead2@example.com", scan_id)
+    assert len(sent) == 1
+    to, subj, text, html = sent[0]
+    assert to == "lead2@example.com"
+    assert subj == "Your BraimSec trial scan report (1 finding)"
+    assert "python.test.rule" in text
+    assert "a.py:3" in text
+    assert "braimsec.world" in html
