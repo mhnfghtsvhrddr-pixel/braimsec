@@ -495,7 +495,8 @@ def test_github_webhook_verifies_and_routes(ctx, monkeypatch):
                             AssertionError("clone must not run here")))
     ingested = []
     monkeypatch.setattr("tasks._vcs_ingest_inline",
-                        lambda repo_id, sha: ingested.append((repo_id, sha)))
+                        lambda repo_id, sha, **kw: ingested.append(
+                            (repo_id, sha, kw.get("pr_number"))))
     c = TestClient(main.app)
     rid, secret, url = _register(c, ctx)
     name = url.split("github.com/")[1]
@@ -524,7 +525,7 @@ def test_github_webhook_verifies_and_routes(ctx, monkeypatch):
                headers={"X-Hub-Signature-256": _gh_sig(secret, raw),
                         "X-GitHub-Event": "push"})
     assert r.status_code == 202 and r.json()["queued"] is True
-    assert ingested == [(rid, "a" * 40)]
+    assert ingested == [(rid, "a" * 40, None)]  # no PR context on push
 
 
 def test_github_webhook_ignores_noise(ctx):
@@ -569,7 +570,8 @@ def test_github_webhook_same_repo_two_orgs(ctx, monkeypatch):
     against its own org's secret."""
     ingested = []
     monkeypatch.setattr("tasks._vcs_ingest_inline",
-                        lambda repo_id, sha: ingested.append((repo_id, sha)))
+                        lambda repo_id, sha, **kw: ingested.append(
+                            (repo_id, sha, kw.get("pr_number"))))
     c = TestClient(main.app)
     url = _repo_url()
     name = url.split("github.com/")[1]
@@ -617,7 +619,8 @@ def test_github_webhook_respects_disabled(ctx, monkeypatch):
 def test_gitlab_webhook_verifies_and_routes(ctx, monkeypatch):
     ingested = []
     monkeypatch.setattr("tasks._vcs_ingest_inline",
-                        lambda repo_id, sha: ingested.append((repo_id, sha)))
+                        lambda repo_id, sha, **kw: ingested.append(
+                            (repo_id, sha, kw.get("pr_number"))))
     c = TestClient(main.app)
     url = f"https://gitlab.com/g1/repo-{_uid()}"
     r = c.post("/api/vcs/repos", headers=_h(ctx["member"]), json={
@@ -643,7 +646,7 @@ def test_gitlab_webhook_verifies_and_routes(ctx, monkeypatch):
                headers={"X-Gitlab-Token": secret,
                         "X-Gitlab-Event": "Push Hook"})
     assert r.status_code == 202 and r.json()["queued"] is True
-    assert ingested == [(rid, "b" * 40)]
+    assert ingested == [(rid, "b" * 40, None)]  # no PR context on push
     # Tag push hook -> ignored
     r = c.post("/api/webhooks/gitlab", content=raw,
                headers={"X-Gitlab-Token": secret,
