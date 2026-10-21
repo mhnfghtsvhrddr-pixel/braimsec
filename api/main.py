@@ -4577,6 +4577,48 @@ def trial_scan_status(request: Request, scan_id: str):
         db.close()
 
 
+def _valid_lead_email(email: str) -> bool:
+    """Minimal sanity check for trial lead capture (no regex import needed)."""
+    e = (email or "").strip()
+    if len(e) > 254 or e.count("@") != 1:
+        return False
+    local, domain = e.split("@")
+    return bool(local) and "." in domain and len(domain) >= 3
+
+
+@app.post("/api/trial/leads")
+@limiter.limit("10/hour")
+async def create_trial_lead(request: Request,
+                            email: str = Form(...),
+                            scan_id: str = Form("")):
+    """Capture an email on the /trial CTA after a scan completes.
+
+    Public (the visitor has no account yet); heavily rate-limited. Stores
+    one row per (email, scan_id) for sales follow-up — no email is sent.
+    """
+    email = (email or "").strip().lower()
+    if not _valid_lead_email(email):
+        raise HTTPException(400, "Please enter a valid email address.")
+    db = get_db()
+    try:
+        if scan_id:
+            trial = db.execute(
+                "SELECT scan_id FROM trial_scans WHERE scan_id=?",
+                (scan_id,)).fetchone()
+            if not trial:
+                raise HTTPException(404, "Trial scan not found")
+        else:
+            scan_id = None
+        db.execute(
+            "INSERT OR IGNORE INTO trial_leads (email, scan_id, ip, created_at)"
+            " VALUES (?,?,?,?)",
+            (email, scan_id, get_remote_address(request), now()))
+        db.commit()
+    finally:
+        db.close()
+    return {"ok": True}
+
+
 @app.get("/trial", response_class=HTMLResponse)
 def trial_page(request: Request):
     """Minimal public page for the no-signup trial scan."""
@@ -4634,7 +4676,22 @@ h+='<span class="chip">'+esc(k)+': '+v+'</span>';
 o.innerHTML=h+(j.top_findings||[]).map(x=>
 '<div class="finding"><b>'+esc(x.severity)+'</b> '+esc(x.rule_id)+
 '<br><code>'+esc(x.file)+':'+x.line+'</code><br>'+esc(x.message||'')+'</div>').join('')
-+'<p>'+esc(j.note||'')+'</p>';b.disabled=false;return}
++'<p>'+esc(j.note||'')+'</p>'
++'<div style="border:1px solid #4f6df5;border-radius:10px;padding:14px;margin-top:12px;background:#121a3a">'
++'<b>Want the full report?</b><br>'
++'<span style="color:#9aa3c7;font-size:14px">Leave your email and get the complete findings with AI fix suggestions.</span>'
++'<form id="lead-f" style="display:flex;gap:8px;margin-top:10px">'
++'<input id="lead-e" type="email" required placeholder="you@company.com" style="flex:1;padding:10px;border-radius:8px;border:1px solid #2a3358;background:#0b1020;color:#e6e9f5">'
++'<button type="submit">Send me the report</button></form>'
++'<div id="lead-m" style="margin-top:8px;font-size:14px"></div></div>';
+var lf=document.getElementById('lead-f');
+lf.addEventListener('submit',async ev=>{ev.preventDefault();
+var m=document.getElementById('lead-m');m.textContent='Sending…';
+try{var rr=await fetch('/api/trial/leads',{method:'POST',
+body:new URLSearchParams({email:document.getElementById('lead-e').value,scan_id:id})});
+if(rr.ok){m.textContent='Done — we will be in touch soon.';lf.style.display='none'}
+else{var jj=await rr.json();m.textContent=''+(jj.detail||rr.status)}}catch(e){m.textContent='Network error'}});
+b.disabled=false;return}
 if(j.status==='failed'){s.textContent='❌ Scan failed: '+(j.error||'unknown error');b.disabled=false;return}
 s.textContent='⏳ Scanning '+id+' — status: '+j.status+' (this can take a few minutes)';
 setTimeout(()=>poll(id),4000)}
@@ -4673,7 +4730,31 @@ def api_health(request: Request):
             checks["broker"] = f"error: {type(e).__name__}"
     else:
         checks["broker"] = "inline-mode"
-    healthy = all(v == "ok" or v == "inline-mode" for v in checks.values())
+    # Worker liveness via the braimsec.heartbeat stamp (beat: every 60s).
+    # Fresh (<3 min) = a worker is consuming tasks; stale = workers dead or
+    # stuck; unknown = no stamp yet (fresh deploy, grace period).
+    if queue_enabled():
+        try:
+            from datetime import datetime, timezone
+            db = get_db()
+            row = db.execute(
+                "SELECT last_beat_at FROM worker_heartbeat WHERE id=1"
+            ).fetchone()
+            db.close()
+            if row and row["last_beat_at"]:
+                age_s = (datetime.now(timezone.utc)
+                         - datetime.fromisoformat(row["last_beat_at"])).total_seconds()
+                checks["worker"] = ("ok" if age_s < 180
+                                    else f"stale: last beat {int(age_s)}s ago")
+            else:
+                checks["worker"] = "unknown: no heartbeat yet"
+        except Exception as e:  # noqa: BLE001 - health must report, not raise
+            checks["worker"] = f"error: {type(e).__name__}"
+    else:
+        checks["worker"] = "inline-mode"
+    def _health_ok(v):
+        return v == "ok" or v == "inline-mode" or v.startswith("unknown")
+    healthy = all(_health_ok(v) for v in checks.values())
     return JSONResponse(
         {"status": "ok" if healthy else "degraded", "checks": checks},
         status_code=200 if healthy else 503,
