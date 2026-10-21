@@ -692,6 +692,51 @@ def heartbeat():
     return "ok"
 
 
+def _trial_reminder_email(repo_url, lang="en"):
+    """Second-nudge email content (subject, text, html), bilingual."""
+    if lang == "ar":
+        repo = f" لـ {repo_url}" if repo_url else ""
+        subject = "ما زلت تفكّر بفحص BraimSec؟"
+        text = (
+            "مرحباً،\n\nقبل ثلاثة أيام أجريت فحصاً أمنياً تجريبياً"
+            f"{repo} مع BraimSec.\n\n"
+            "النتائج ما زالت بانتظارك — ومع حساب مجاني تحصل على اقتراحات "
+            "إصلاح بالذكاء الاصطناعي لكل نتيجة، بالإضافة إلى تقرير PDF "
+            "يمكنك تسليمه لفريقك.\n\n"
+            "ابدأ تجربتك المجانية لمدة 7 أيام (بلا بطاقة): "
+            "https://braimsec.world\n\n— فريق BraimSec\n")
+        html = (
+            '<p dir="rtl">مرحباً،</p><p dir="rtl">قبل ثلاثة أيام أجريت '
+            f"فحصاً أمنياً تجريبياً{repo} مع BraimSec.</p>"
+            '<p dir="rtl">النتائج ما زالت بانتظارك — ومع حساب مجاني تحصل '
+            "على اقتراحات إصلاح بالذكاء الاصطناعي لكل نتيجة، بالإضافة إلى "
+            "تقرير PDF يمكنك تسليمه لفريقك.</p>"
+            '<p dir="rtl"><a href="https://braimsec.world">ابدأ تجربتك '
+            "المجانية لمدة 7 أيام</a> (بلا بطاقة).</p>"
+            '<p dir="rtl">— فريق BraimSec</p>')
+    else:
+        repo = f" of {repo_url}" if repo_url else ""
+        subject = "Still thinking about your BraimSec scan?"
+        text = (
+            "Hi,\n\nThree days ago you ran a trial security scan"
+            f"{repo} with BraimSec.\n\n"
+            "The findings are still waiting — and with a free "
+            "account you get AI fix suggestions for each one plus "
+            "a PDF report you can hand to your team.\n\n"
+            "Start your 7-day free trial (no card needed): "
+            "https://braimsec.world\n\n— The BraimSec team\n")
+        html = (
+            "<p>Hi,</p><p>Three days ago you ran a trial security "
+            f"scan{repo} with BraimSec.</p>"
+            "<p>The findings are still waiting — and with a free "
+            "account you get AI fix suggestions for each one plus "
+            "a PDF report you can hand to your team.</p>"
+            '<p><a href="https://braimsec.world">Start your 7-day '
+            "free trial</a> (no card needed).</p>"
+            "<p>— The BraimSec team</p>")
+    return subject, text, html
+
+
 @celery_app.task(name="braimsec.trial_reminders")
 def trial_reminders():
     """Second nudge for trial leads (beat: every 6h).
@@ -709,30 +754,14 @@ def trial_reminders():
             cutoff = (datetime.now(timezone.utc)
                       - timedelta(days=3)).isoformat()
             rows = db.execute(
-                "SELECT l.email, t.repo_url FROM trial_leads l"
+                "SELECT l.email, l.lang, t.repo_url FROM trial_leads l"
                 " LEFT JOIN trial_scans t ON t.scan_id=l.scan_id"
                 " WHERE l.emailed_at IS NOT NULL AND l.reminded_at IS NULL"
                 " AND l.emailed_at < ?", (cutoff,)).fetchall()
             for r in rows:
-                repo = f" of {r['repo_url']}" if r["repo_url"] else ""
-                subject = "Still thinking about your BraimSec scan?"
-                text = (
-                    "Hi,\n\nThree days ago you ran a trial security scan"
-                    f"{repo} with BraimSec.\n\n"
-                    "The findings are still waiting — and with a free "
-                    "account you get AI fix suggestions for each one plus "
-                    "a PDF report you can hand to your team.\n\n"
-                    "Start your 7-day free trial (no card needed): "
-                    "https://braimsec.world\n\n— The BraimSec team\n")
-                html = (
-                    "<p>Hi,</p><p>Three days ago you ran a trial security "
-                    f"scan{repo} with BraimSec.</p>"
-                    "<p>The findings are still waiting — and with a free "
-                    "account you get AI fix suggestions for each one plus "
-                    "a PDF report you can hand to your team.</p>"
-                    '<p><a href="https://braimsec.world">Start your 7-day '
-                    "free trial</a> (no card needed).</p>"
-                    "<p>— The BraimSec team</p>")
+                lang = "ar" if (r["lang"] or "en") == "ar" else "en"
+                subject, text, html = _trial_reminder_email(
+                    r["repo_url"], lang)
                 ok, _, _ = send_email(r["email"], subject, text, html)
                 if ok:
                     db.execute(
