@@ -343,6 +343,12 @@
   }
   #api-key { transition: border-color 0.2s ease, box-shadow 0.2s ease; }
   #lang-btn { min-width: 4.2rem; }
+  /* بطاقات الإحصائيات (تبويب الليدز) */
+  .stat-cards { display: flex; gap: 0.8rem; flex-wrap: wrap; }
+  .stat-card { flex: 1 1 8rem; background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 12px; padding: 0.9rem 1.1rem; }
+  .stat-num { font-size: 1.5rem; font-weight: 700; color: var(--text); }
+  .stat-lbl { font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem; }
   /* صفوف الإدخال (الجدولة والمراقبة): توزيع مرن يلتف بأناقة على الشاشات الصغيرة */
   .row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
   .row > input, .row > select { flex: 1 1 11rem; min-width: 0; }
@@ -781,9 +787,13 @@ document.addEventListener('DOMContentLoaded', ()=>{ if(_resetToken) openAuthModa
   <section id="view-leads" hidden>
     <div class="toolbar">
       <h2 data-i18n="leads.title">🎯 ليدز التجربة</h2>
-      <button class="btn-ghost" data-i18n="cmn.refresh" onclick="loadLeads()">↻ تحديث</button>
+      <div class="row" style="gap:0.5rem">
+        <button class="btn-ghost" data-i18n="leads.export" onclick="exportLeadsCsv()">📥 CSV</button>
+        <button class="btn-ghost" data-i18n="cmn.refresh" onclick="loadLeads()">↻ تحديث</button>
+      </div>
     </div>
     <p style="color:var(--muted);font-size:0.9rem;margin:0 0 1rem" data-i18n="leads.desc">إيميلات الزوار الذين أكملوا فحصاً تجريبياً وطلبوا التقرير الكامل — للمتابعة البيعية.</p>
+    <div id="leads-stats" class="stat-cards" style="margin-bottom:1rem"></div>
     <div id="leads-wrap"></div>
   </section>
 </main>
@@ -1153,6 +1163,11 @@ const I18N = {
   "leads.no": "⏳ بانتظار",
   "leads.empty": "لا يوجد ليدز بعد — شارك صفحة التجربة المجانية.",
   "leads.forbidden": "عرض الليدز يتطلب مفتاح المالك (owner).",
+  "leads.export": "📥 تصدير CSV",
+  "leads.st_scans": "فحص تجريبي",
+  "leads.st_done": "فحص مكتمل",
+  "leads.st_leads": "ليد",
+  "leads.st_conv": "نسبة التحويل",
   "scans.title": "📋 عمليات الفحص",
   "scans.exec_report": "📊 تقرير تنفيذي",
   "scans.new": "+ فحص جديد",
@@ -1797,6 +1812,11 @@ const I18N = {
   "leads.no": "⏳ Pending",
   "leads.empty": "No leads yet — share the free trial page.",
   "leads.forbidden": "Viewing leads requires the owner key.",
+  "leads.export": "📥 Export CSV",
+  "leads.st_scans": "Trial scans",
+  "leads.st_done": "Completed",
+  "leads.st_leads": "Leads",
+  "leads.st_conv": "Conversion",
   "scans.title": "📋 Scans",
   "scans.exec_report": "📊 Executive report",
   "scans.new": "+ New scan",
@@ -2861,10 +2881,18 @@ async function loadBilling() {
 /* ---------- ليدز التجربة ---------- */
 async function loadLeads() {
   const wrap = document.getElementById("leads-wrap");
+  const statsEl = document.getElementById("leads-stats");
   wrap.innerHTML = `<p style="color:var(--muted)"><span class="spinner"></span> ${t("cmn.loading")}</p>`;
+  statsEl.innerHTML = "";
   let data;
   try {
-    data = await api("/trial/leads");
+    [data] = await Promise.all([api("/trial/leads"), api("/trial/stats").then(st => {
+      statsEl.innerHTML = `
+        <div class="stat-card"><div class="stat-num">${st.trial_scans}</div><div class="stat-lbl">${t("leads.st_scans")}</div></div>
+        <div class="stat-card"><div class="stat-num">${st.trial_scans_done}</div><div class="stat-lbl">${t("leads.st_done")}</div></div>
+        <div class="stat-card"><div class="stat-num">${st.leads}</div><div class="stat-lbl">${t("leads.st_leads")}</div></div>
+        <div class="stat-card"><div class="stat-num">${st.conversion_pct}%</div><div class="stat-lbl">${t("leads.st_conv")}</div></div>`;
+    }).catch(() => {})]);
   } catch (e) {
     wrap.innerHTML = `<div class="notice">🔒 ${t("leads.forbidden")}</div>`;
     return;
@@ -2883,6 +2911,17 @@ async function loadLeads() {
       <td>${esc(fmtDT(l.created_at))}</td>
       <td>${l.emailed ? t("leads.yes") : t("leads.no")}</td>
     </tr>`).join("") + `</tbody></table>`;
+}
+
+async function exportLeadsCsv() {
+  const r = await fetch(API + "/trial/leads.csv", { headers: { "X-API-Key": getKey() } });
+  if (!r.ok) { alert("HTTP " + r.status); return; }
+  const blob = await r.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "trial-leads.csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 async function loadKeys() {
