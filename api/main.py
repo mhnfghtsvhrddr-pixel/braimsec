@@ -1543,7 +1543,11 @@ def run_schedule_endpoint(request: Request, schedule_id: str):
 # ---------------------------------------------------------------------------
 
 def _serialize_vcs_repo(row: dict) -> dict:
-    """Repo row for API responses — never exposes secret material."""
+    """Repo row for API responses — never exposes secret material.
+
+    The GitHub PAT itself is never returned; ``pr_comments_enabled``
+    reports whether one is stored.
+    """
     return {
         "id": row["id"],
         "provider": row["provider"],
@@ -1554,6 +1558,7 @@ def _serialize_vcs_repo(row: dict) -> dict:
         "webhook_url": row["webhook_url"],
         "alert_severity": row["alert_severity"],
         "enabled": bool(row["enabled"]),
+        "pr_comments_enabled": bool(row.get("github_token_enc")),
         "last_scan_id": row["last_scan_id"],
         "prev_scan_id": row["prev_scan_id"],
         "last_scan_at": row["last_scan_at"],
@@ -1565,7 +1570,8 @@ def _serialize_vcs_repo(row: dict) -> dict:
 def _validate_vcs_body(body: dict) -> dict:
     """Validate repo registration/update fields. Returns a clean spec dict."""
     from ssrf_guard import validate_webhook_url  # noqa: E402
-    from vcs import VCS_PROVIDERS, validate_branch, validate_repo_url  # noqa: E402
+    from vcs import (VCS_PROVIDERS, validate_branch, validate_github_token,
+                     validate_repo_url)  # noqa: E402
     provider = (body.get("provider") or "").strip().lower()
     if provider not in VCS_PROVIDERS:
         raise HTTPException(
@@ -1589,8 +1595,18 @@ def _validate_vcs_body(body: dict) -> dict:
         except ValueError as e:
             raise HTTPException(400, f"webhook_url: {e}")
     # "" = webhook alerts disabled for this repo (email-only).
+    # github_token is optional and write-only: a GitHub PAT that enables
+    # automatic scan comments on pull requests targeting the watched
+    # branch. Stored encrypted, never returned by the API.
+    github_token = None
+    if "github_token" in body and body["github_token"] is not None:
+        try:
+            github_token = validate_github_token(body["github_token"])
+        except ValueError as e:
+            raise HTTPException(400, str(e))
     return {"provider": provider, "repo_url": repo_url, "branch": branch,
-            "alert_severity": severity, "webhook_url": webhook_url}
+            "alert_severity": severity, "webhook_url": webhook_url,
+            "github_token": github_token}
 
 
 def _resolve_vcs_project(request: Request, body: dict) -> str | None:
@@ -1624,6 +1640,9 @@ async def create_vcs_repo(request: Request):
 
     Returns the repo plus the one-time ``webhook_secret`` and the
     ``receiver_url`` to paste into the provider's webhook settings.
+    Optional ``github_token`` (a GitHub PAT) enables automatic scan
+    comments on pull requests targeting the watched branch; it is
+    write-only and never returned.
     """
     from vcs import encrypt_secret, generate_webhook_secret, hash_secret  # noqa: E402
     require_role(request, "member")
@@ -1642,16 +1661,19 @@ async def create_vcs_repo(request: Request):
     rid = uuid.uuid4().hex[:12]
     secret = generate_webhook_secret()
     enc = encrypt_secret(secret) if spec["provider"] == "github" else None
+    token_enc = (encrypt_secret(spec["github_token"])
+                 if spec["github_token"] else None)
     db = get_db()
     try:
         db.execute(
             "INSERT INTO vcs_repos (id, org_id, project_id, provider,"
             " repo_url, full_name, branch, webhook_secret_hash,"
-            " webhook_secret_enc, webhook_url, alert_severity, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            " webhook_secret_enc, github_token_enc, webhook_url,"
+            " alert_severity, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (rid, request.state.org_id, project_id, spec["provider"],
              spec["repo_url"], full_name, spec["branch"],
-             hash_secret(secret), enc, spec["webhook_url"],
+             hash_secret(secret), enc, token_enc, spec["webhook_url"],
              spec["alert_severity"], now()))
         db.commit()
         row = db.execute("SELECT * FROM vcs_repos WHERE id=?",
@@ -1720,9 +1742,13 @@ def get_vcs_repo(request: Request, repo_id: str):
 @app.patch("/api/vcs/repos/{repo_id}")
 @limiter.limit("30/minute")
 async def update_vcs_repo(request: Request, repo_id: str):
-    """Update branch / webhook_url / alert_severity / enabled (member+)."""
+    """Update branch / webhook_url / alert_severity / enabled / github_token
+    (member+). ``github_token`` is write-only: a GitHub PAT that enables
+    automatic scan comments on pull requests; it is stored encrypted and
+    never returned (responses carry ``pr_comments_enabled`` instead).
+    """
     from ssrf_guard import validate_webhook_url  # noqa: E402
-    from vcs import validate_branch  # noqa: E402
+    from vcs import encrypt_secret, validate_branch, validate_github_token  # noqa: E402
     require_role(request, "member")
     require_org_scope(request)
     try:
@@ -1766,6 +1792,14 @@ async def update_vcs_repo(request: Request, repo_id: str):
     if "enabled" in body:
         updates.append("enabled=?")
         params.append(1 if body["enabled"] else 0)
+    if "github_token" in body:
+        try:
+            token = validate_github_token(body["github_token"])
+        except ValueError as e:
+            db.close()
+            raise HTTPException(400, str(e))
+        updates.append("github_token_enc=?")
+        params.append(encrypt_secret(token))
     if not updates:
         db.close()
         raise HTTPException(400, "Nothing to update")
@@ -1782,7 +1816,7 @@ async def update_vcs_repo(request: Request, repo_id: str):
 @app.delete("/api/vcs/repos/{repo_id}")
 @limiter.limit("30/minute")
 def delete_vcs_repo(request: Request, repo_id: str):
-    """Delete a repo and its notification history (member+, org scope).
+    """Delete a repo and its notification/PR-scan history (member+, org scope).
 
     Scans stay (org audit data); only the repo link is removed.
     """
@@ -1795,6 +1829,7 @@ def delete_vcs_repo(request: Request, repo_id: str):
         db.close()
         raise HTTPException(404, "Repo not found")
     db.execute("DELETE FROM notifications WHERE vcs_repo_id=?", (repo_id,))
+    db.execute("DELETE FROM pr_scans WHERE repo_id=?", (repo_id,))
     db.execute("DELETE FROM vcs_repos WHERE id=?", (repo_id,))
     db.commit()
     db.close()
@@ -1878,6 +1913,8 @@ def _handle_vcs_webhook(provider: str, raw: bytes, headers, payload: dict,
         return 200, {"ok": True, "pong": True}
     if not repo["enabled"]:
         return 200, {"ok": True, "ignored": "repository disabled"}
+    if parsed["type"] == "pull_request":
+        return _handle_vcs_pr_webhook(repo, parsed, background_tasks)
     if parsed["branch"] != repo["branch"]:
         return 200, {"ok": True,
                      "ignored": f"branch '{parsed['branch']}' not watched"}
@@ -1887,6 +1924,34 @@ def _handle_vcs_webhook(provider: str, raw: bytes, headers, payload: dict,
     log.info("vcs webhook: push %s@%s queued via %s",
              repo["full_name"], parsed["sha"][:8], mode)
     return 202, {"ok": True, "queued": True, "commit": parsed["sha"][:12]}
+
+
+def _handle_vcs_pr_webhook(repo: dict, parsed: dict,
+                           background_tasks: BackgroundTasks):
+    """Pull-request receiver: scan the PR head commit for the comment bot.
+
+    Only PRs whose *base* branch is the watched branch are ingested; the
+    head is cloned from ``head_clone_url`` (public repos only, possibly a
+    fork). Returns (status_code, body).
+    """
+    from tasks import enqueue_vcs_ingest  # noqa: E402
+    from vcs import scan_exists_for_commit  # noqa: E402
+
+    base = parsed["base_ref"]
+    if base != repo["branch"]:
+        return 200, {"ok": True,
+                     "ignored": f"base branch '{base}' not watched"}
+    sha = parsed["head_sha"]
+    if scan_exists_for_commit(repo["id"], sha):
+        return 200, {"ok": True, "deduped": True}
+    mode = enqueue_vcs_ingest(repo["id"], sha, background_tasks,
+                              pr_number=parsed["pr_number"],
+                              clone_url=parsed["head_clone_url"],
+                              head_ref=parsed["head_ref"])
+    log.info("vcs webhook: PR #%s %s@%s queued via %s",
+             parsed["pr_number"], repo["full_name"], sha[:8], mode)
+    return 202, {"ok": True, "queued": True, "commit": sha[:12],
+                 "pr_number": parsed["pr_number"]}
 
 
 @app.post("/api/webhooks/github")
