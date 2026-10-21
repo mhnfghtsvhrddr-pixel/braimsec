@@ -2659,6 +2659,41 @@ _doc("GET", "/api/trial/leads",
          "429": _err429(),
      })
 
+_doc("GET", "/api/trial/leads.csv",
+     tag="Trial",
+     summary="Export trial leads (CSV)",
+     description=("Owner-only CSV download of captured trial leads for "
+                  "manual sales follow-up or import into other tools."),
+     auth="key", min_role="owner", org_scope=False, rate_limit="60/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("CSV file.",
+                      "email,scan_id,repo_url,created_at,emailed_at,"
+                      "reminded_at\n",
+                      content_type="text/csv"),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
+_doc("GET", "/api/trial/stats",
+     tag="Trial",
+     summary="Trial funnel stats",
+     description=("Owner-only funnel overview: trial scans started, "
+                  "completed, leads captured and scan-to-lead conversion."),
+     auth="key", min_role="owner", org_scope=False, rate_limit="60/minute",
+     params=[],
+     request_body=None,
+     responses={
+         "200": _resp("Funnel stats.",
+                      {"trial_scans": 42, "trial_scans_done": 38,
+                       "leads": 5, "conversion_pct": 13.2}),
+         "401": _err401(),
+         "403": _err403(),
+         "429": _err429(),
+     })
+
 _doc("GET", "/trial",
      tag="Trial",
      summary="Trial scan page",
