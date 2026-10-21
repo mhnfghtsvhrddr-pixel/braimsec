@@ -938,8 +938,8 @@ document.addEventListener('DOMContentLoaded', ()=>{ if(_resetToken) openAuthModa
         <div style="flex:1;min-width:12rem"><label>البريد الإلكتروني</label><input type="email" id="ob-email" placeholder="security@company.com" dir="ltr"></div>
         <button class="btn" onclick="obAddEmail()">+ إضافة</button>
       </div>
-      <p id="ob-email-msg" style="font-size:0.88rem;margin-top:0.8rem"></p>
-      <p class="warn" style="font-size:0.82rem;margin-top:0.6rem">💡 الإرسال يتطلب تهيئة SMTP على السيرفر (<code dir="ltr">BRAIMSEC_SMTP_HOST</code>) — وحتى ذلك الحين تُسجَّل التنبيهات كـ«متخطاة» في سجل التنبيهات. تنبيهات الويبهوك تُضبط لاحقاً من تبويب «الجدولة».</p>
+      <p id="ob-email-msg" style="font-size:0.88rem;margin-top:0.8rem;min-height:1.4em"></p>
+      <p id="ob-smtp-warn" class="warn" style="font-size:0.82rem;margin-top:0.6rem" hidden>💡 خادم البريد غير مهيأ على السيرفر — ستُسجَّل التنبيهات كـ«متخطاة» في السجل حتى يتم تفعيل الإرسال.</p>
       <div class="wiz-nav"><button class="btn-ghost" onclick="obGo(3)">→ رجوع</button><button class="btn-ghost" onclick="obGo(5)">تخطي هذه الخطوة</button></div>
     </div>
 
@@ -1647,7 +1647,7 @@ async function loadAlertEmails() {
   const st = document.getElementById("email-status");
   st.innerHTML = data.smtp_configured
     ? `✅ خادم البريد مهيأ — التنبيهات تُرسل عند النتائج الجديدة.`
-    : `⚠️ خادم البريد <b>غير مهيأ</b> — اضبط <code dir="ltr">BRAIMSEC_SMTP_HOST</code> على السيرفر لتفعيل الإرسال (ستُسجَّل التنبيهات كـ«متخطاة» حتى ذلك الحين).`;
+    : `⚠️ خادم البريد <b>غير مهيأ</b> على السيرفر — ستُسجَّل التنبيهات كـ«متخطاة» حتى يتم تفعيل الإرسال.`;
   const el = document.getElementById("email-wrap");
   if (!data.emails.length) {
     el.innerHTML = `<div class="empty"><p>لا عناوين بعد — أضف بريد الفريق ليصله تنبيه النتائج الجديدة.</p></div>`;
@@ -2594,6 +2594,17 @@ function obGo(n) {
     steps[i].querySelector(".wiz-dot").textContent = i + 1 < obStep ? "✓" : String(i + 1);
   }
   if (obStep === 5) obRenderSummary();
+  if (obStep === 4) obCheckSmtp();
+}
+// Show the SMTP warning in the wizard only when the server genuinely has
+// no mail configured (fetched live; stays hidden when unknown/offline).
+async function obCheckSmtp() {
+  const w = document.getElementById("ob-smtp-warn");
+  w.hidden = true;
+  try {
+    const data = await api("/alert-emails");
+    w.hidden = !!data.smtp_configured;
+  } catch (e) { /* no key / offline: stay quiet, don't add noise */ }
 }
 function obFinish(skip) {
   if (obPoll) { clearInterval(obPoll); obPoll = null; }
@@ -2701,6 +2712,11 @@ async function obAddEmail() {
   msg.style.color = "var(--red)";
   msg.textContent = "";
   if (!email) { msg.textContent = "أدخل بريداً إلكترونياً"; return; }
+  const key = localStorage.getItem("braimsec_key") || "";
+  if (!key) {
+    msg.textContent = "ضع مفتاح API في الحقل أعلى الصفحة أولاً (أو أنشئ واحداً من الخطوة 2)";
+    return;
+  }
   try {
     await api("/alert-emails", {
       method: "POST",
@@ -2711,7 +2727,12 @@ async function obAddEmail() {
     msg.textContent = "✅ تمت الإضافة — ستصلك التنبيهات عند النتائج الجديدة";
     inp.value = "";
     obState.email = true;
-  } catch (e) { msg.textContent = e.message; }
+  } catch (e) {
+    const m = String(e.message || "");
+    msg.textContent = (/401|X-API-Key|غير صالح/i.test(m))
+      ? "مفتاح API غير صالح أو منتهي — أنشئ مفتاحاً جديداً من الخطوة 2"
+      : m;
+  }
 }
 function obRenderSummary() {
   const item = (ok, t, d) =>
