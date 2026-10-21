@@ -14,12 +14,23 @@ os.environ.setdefault("BRAIMSEC_DB", os.path.join(_tmp, "test.db"))
 os.environ.setdefault("BRAIMSEC_API_KEY", "test-key-123")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import pytest  # noqa: E402
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
 from database import get_db, init_db  # noqa: E402
 
 client = TestClient(main.app)
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    # POST /api/trial/leads is capped at 10/hour per IP: reset between
+    # tests so each test gets a fresh quota.
+    main.limiter._storage.reset()
+    yield
+    main.limiter._storage.reset()
 
 
 def _mk_trial_scan():
@@ -95,3 +106,69 @@ def test_trial_page_contains_cta():
     assert r.status_code == 200
     assert "/api/trial/leads" in r.text
     assert "Send me the report" in r.text
+
+
+def _mk_done_trial_scan_with_findings():
+    init_db()
+    db = get_db()
+    scan_id = "trial_" + os.urandom(4).hex()
+    db.execute(
+        "INSERT INTO scans (id, org_id, target_name, status, created_at,"
+        " finished_at, total_findings) VALUES (?,?,?,?,?,?,?)",
+        (scan_id, "owner", "github.com/o/r", "done",
+         "2026-01-01T00:00:00+00:00", "2026-01-01T00:05:00+00:00", 2))
+    db.execute(
+        "INSERT INTO trial_scans (scan_id, ip, repo_url, created_at)"
+        " VALUES (?,?,?,?)",
+        (scan_id, "1.2.3.4", "https://github.com/o/r",
+         "2026-01-01T00:00:00+00:00"))
+    db.execute(
+        "INSERT INTO findings (scan_id, tool, rule_id, severity, message,"
+        " file, line) VALUES (?,?,?,?,?,?,?)",
+        (scan_id, "semgrep", "python.test.rule", "error", "test issue",
+         "/src/a.py", 3))
+    db.commit()
+    db.close()
+    return scan_id
+
+
+def test_lead_triggers_report_email(monkeypatch):
+    import email_alerts
+    scan_id = _mk_done_trial_scan_with_findings()
+    sent = []
+    monkeypatch.setattr(
+        email_alerts, "send_email",
+        lambda to, subj, text, html: sent.append((to, subj, text, html))
+        or (True, 1, None))
+    r = client.post("/api/trial/leads",
+                    data={"email": "lead@example.com", "scan_id": scan_id})
+    assert r.status_code == 200
+    assert len(sent) == 1
+    to, subj, text, html = sent[0]
+    assert to == "lead@example.com"
+    assert "python.test.rule" in text
+    assert "a.py:3" in text
+    db = get_db()
+    row = db.execute(
+        "SELECT emailed_at FROM trial_leads WHERE email=?",
+        ("lead@example.com",)).fetchone()
+    db.close()
+    assert row["emailed_at"] is not None
+
+
+def test_lead_stored_even_when_email_fails(monkeypatch):
+    init_db()
+    import email_alerts
+    monkeypatch.setattr(
+        email_alerts, "send_email",
+        lambda to, subj, text, html: (False, 3, "SMTP down"))
+    r = client.post("/api/trial/leads", data={"email": "fail@example.com"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+    db = get_db()
+    row = db.execute(
+        "SELECT emailed_at FROM trial_leads WHERE email=?",
+        ("fail@example.com",)).fetchone()
+    db.close()
+    assert row is not None
+    assert row["emailed_at"] is None
