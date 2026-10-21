@@ -235,7 +235,11 @@ async def api_key_gate(request: Request, call_next):
     # their org's targets / public incidents — no auth material, no keys.
     is_status = (path.startswith("/api/status/") or
                  path.startswith("/status/"))
-    is_trial = path.startswith("/api/trial/")
+    # The trial namespace is public by design (no-signup scans + lead
+    # capture) — except GET /api/trial/leads, the owner-only sales list.
+    is_trial = (path.startswith("/api/trial/")
+                and not (request.method == "GET"
+                         and path == "/api/trial/leads"))
     if (path.startswith("/api/") and path not in public_paths
             and not is_badge and not is_status and not is_trial):
         presented = request.headers.get("x-api-key", "")
@@ -4698,6 +4702,32 @@ async def create_trial_lead(request: Request,
     background_tasks.add_task(_send_trial_lead_report, email,
                              scan_id or None)
     return {"ok": True}
+
+
+@app.get("/api/trial/leads")
+@limiter.limit("60/minute")
+def list_trial_leads(request: Request, limit: int = 100):
+    """List captured trial leads (owner-only, for sales follow-up).
+
+    Trial leads are pre-account, so they belong to the business owner,
+    not to any customer org: only owner-role keys can list them.
+    """
+    require_org_scope(request)
+    require_role(request, "owner")
+    limit = max(1, min(int(limit), 500))
+    db = get_db()
+    try:
+        rows = db.execute(
+            "SELECT l.email, l.scan_id, t.repo_url, l.created_at,"
+            " l.emailed_at FROM trial_leads l"
+            " LEFT JOIN trial_scans t ON t.scan_id=l.scan_id"
+            " ORDER BY l.created_at DESC LIMIT ?", (limit,)).fetchall()
+        return {"leads": [
+            {"email": r["email"], "scan_id": r["scan_id"],
+             "repo_url": r["repo_url"], "created_at": r["created_at"],
+             "emailed": bool(r["emailed_at"])} for r in rows]}
+    finally:
+        db.close()
 
 
 @app.get("/trial", response_class=HTMLResponse)
