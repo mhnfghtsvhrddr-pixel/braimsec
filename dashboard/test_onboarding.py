@@ -141,3 +141,22 @@ def test_sched_subsections_nested_inside_view_sched():
         opens = between.count("<section")
         closes = between.count("</section>")
         assert opens > closes, f"{sid} is outside view-sched (view-sched closed early)"
+
+
+def test_leads_view_wired():
+    """Regression: the trial-leads view must be fully wired — nav button,
+    section, showView entry and loader call."""
+    h = HTML
+    assert 'id="nav-leads"' in h
+    assert 'id="view-leads"' in h
+    assert 'id="leads-wrap"' in h
+    assert '"leads"' in h  # showView view list
+    assert 'document.getElementById("view-leads").hidden' in h
+    assert 'if (name === "leads") loadLeads();' in h
+    assert 'async function loadLeads()' in h
+    assert 'api("/trial/leads")' in h
+    # i18n keys used by the view must exist in both languages
+    for key in ["nav.leads", "leads.title", "leads.desc", "leads.email",
+                "leads.repo", "leads.captured", "leads.emailed", "leads.yes",
+                "leads.no", "leads.empty", "leads.forbidden"]:
+        assert key in h, key
