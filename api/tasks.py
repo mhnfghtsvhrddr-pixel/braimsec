@@ -25,11 +25,13 @@ directories / extracted zips) and MUST see the same ``BRAIMSEC_DB``.
 
 import hashlib
 import hmac
+import html
 import json
 import logging
 import os
 import shutil
 import sys
+import tempfile
 import time
 
 from celery import Celery
@@ -112,6 +114,14 @@ celery_app.conf.update(
         "braimsec.trial-reminders": {
             "task": "braimsec.trial_reminders",
             "schedule": 6 * 3600.0,
+        },
+        # Daily backup restore test: unpack the newest backup tarball to a
+        # temp dir and verify the DB snapshot restores cleanly (integrity
+        # check + core tables queryable). Every run is recorded; the owner
+        # is alerted on failure.
+        "braimsec.backup-restore-test": {
+            "task": "braimsec.backup_restore_test",
+            "schedule": 24 * 3600.0,
         },
     },
 )
@@ -246,6 +256,265 @@ def _deliver_failure_email(scan_id: str) -> None:
             db.close()
     except Exception:  # noqa: BLE001 - best-effort by design
         log.exception("failure email dispatch crashed for %s", scan_id)
+
+
+# --- Owner platform-health alerts ----------------------------------------
+# Scan failures and backup restore-test failures are platform signals for
+# Mahmoud (engine/docker trouble, broken backups), so they go to the owner
+# org's own alert channels — the same dashboard-managed email addresses +
+# Telegram chats used by the trial-lead alert. Every alert kind is
+# throttled by cooldown (env-tunable) so a broken engine cannot spam him.
+# All of this is best-effort: alerting must never raise, never break the
+# scan, and never break the beat task.
+
+def _alert_cooldown_s(event: str) -> int:
+    """Per-event alert cooldown in seconds (read at call time for tests)."""
+    if event == "scan.failed":
+        return int(os.environ.get("BRAIMSEC_SCAN_FAIL_ALERT_COOLDOWN_S",
+                                 "1800"))
+    return int(os.environ.get("BRAIMSEC_BACKUP_RESTORE_ALERT_COOLDOWN_S",
+                              "21600"))
+
+
+def _owner_alert_due(db, event: str) -> bool:
+    """True when no owner alert for `event` fired within its cooldown.
+
+    Self-healing: creates the throttle table when a worker runs ahead of
+    the API's init_db. Fail-open: any DB trouble means "due" — one extra
+    alert beats a silently missed platform failure.
+    """
+    from datetime import datetime, timezone  # noqa: E402
+    db.execute("CREATE TABLE IF NOT EXISTS owner_alert_throttle ("
+               "event TEXT PRIMARY KEY, last_sent_at TEXT NOT NULL)")
+    try:
+        row = db.execute("SELECT last_sent_at FROM owner_alert_throttle"
+                         " WHERE event=?", (event,)).fetchone()
+    except Exception:  # noqa: BLE001 - fail-open
+        return True
+    if not row or not row["last_sent_at"]:
+        return True
+    try:
+        last = datetime.fromisoformat(row["last_sent_at"])
+    except ValueError:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+    return elapsed >= _alert_cooldown_s(event)
+
+
+def _owner_alert_stamp(db, event: str) -> None:
+    db.execute("INSERT INTO owner_alert_throttle(event, last_sent_at)"
+               " VALUES(?,?)"
+               " ON CONFLICT(event) DO UPDATE SET"
+               " last_sent_at=excluded.last_sent_at",
+               (event, _now_iso()))
+
+
+def _send_owner_alert(subject: str, text: str) -> bool:
+    """Dispatch subject/text to the owner org's email + Telegram channels.
+
+    Returns True when at least one channel was configured (individual
+    sends stay best-effort). Never raises.
+    """
+    from email_alerts import get_org_emails, send_email, smtp_configured  # noqa: E402
+    from telegram_alerts import (get_org_chats, send_telegram,  # noqa: E402
+                                 telegram_configured)
+    from billing import OWNER_ORG_ID  # noqa: E402
+    configured = False
+    try:
+        html_body = "<p>" + html.escape(text).replace("\n", "<br>") + "</p>"
+        if smtp_configured():
+            configured = True
+            for row in get_org_emails(OWNER_ORG_ID):
+                try:
+                    send_email(row["email"], subject, text, html_body)
+                except Exception:  # noqa: BLE001 - per-recipient best-effort
+                    log.exception("owner alert email failed")
+        if telegram_configured():
+            configured = True
+            for row in get_org_chats(OWNER_ORG_ID):
+                try:
+                    send_telegram(row["chat_id"], "\u26a0\ufe0f " + text)
+                except Exception:  # noqa: BLE001 - per-recipient best-effort
+                    log.exception("owner alert telegram failed")
+    except Exception:  # noqa: BLE001 - alerting must never raise
+        log.exception("owner alert dispatch crashed")
+    return configured
+
+
+def _alert_owner_scan_failed(scan_id: str) -> None:
+    """Ping the owner's channels when a scan fails terminally.
+
+    Throttled by cooldown; no-op for non-failed scans. Best-effort: never
+    raises, never breaks scan completion.
+    """
+    try:
+        db = get_db()
+        try:
+            row = db.execute(
+                "SELECT id, org_id, target_name, error FROM scans"
+                " WHERE id=? AND status='failed'", (scan_id,)).fetchone()
+            if not row:
+                return
+            if not _owner_alert_due(db, "scan.failed"):
+                return
+            text = ("Scan failed: %s\nscan_id=%s org=%s\nerror: %s"
+                    % (row["target_name"] or scan_id, row["id"],
+                       row["org_id"], (row["error"] or "unknown")[:300]))
+            if _send_owner_alert("BraimSec scan failed", text):
+                _owner_alert_stamp(db, "scan.failed")
+                db.commit()
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - owner alert must never raise
+        log.exception("owner scan-failure alert failed for %s", scan_id)
+
+
+# --- Backup restore test ---------------------------------------------------
+# The nightly backup.sh writes tarballs to BRAIMSEC_BACKUP_DIR (host
+# /root/backups/daily, bind-mounted read-only into the worker at
+# /backups). A backup that cannot be restored is worthless, so beat runs
+# this every 24h: unpack the newest tarball to a temp dir, verify the DB
+# snapshot (integrity + core tables queryable), record the result, and
+# alert the owner on failure. Never raises.
+
+_RESTORE_REQUIRED_TABLES = ("organizations", "scans", "findings",
+                            "api_keys", "subscriptions")
+
+
+def _newest_backup_tarball(backup_dir: str) -> str | None:
+    try:
+        names = os.listdir(backup_dir)
+    except OSError:
+        return None
+    cands = [os.path.join(backup_dir, n) for n in names
+             if n.startswith("braimsec-") and n.endswith(".tar.gz")
+             and os.path.isfile(os.path.join(backup_dir, n))]
+    if not cands:
+        return None
+    return max(cands, key=os.path.getmtime)
+
+
+def _extract_backup_db(tarball_path: str, dest_dir: str) -> str:
+    """Extract the braimsec-backup.db member; return its extracted path."""
+    import tarfile  # noqa: E402
+    with tarfile.open(tarball_path, "r:gz") as tf:
+        db_members = [m for m in tf.getmembers()
+                      if os.path.basename(m.name) == "braimsec-backup.db"
+                      and m.isfile()]
+        if not db_members:
+            raise RuntimeError("tarball has no braimsec-backup.db member")
+        member = db_members[0]
+        # filter="data" (3.12+): no absolute paths, no ".." traversal, no
+        # devices/symlinks. The tarball comes from our own backup job, but
+        # restores stay defensive.
+        tf.extract(member, path=dest_dir, filter="data")
+        extracted = os.path.join(dest_dir, member.name)
+        if not os.path.isfile(extracted):
+            raise RuntimeError("extracted DB missing after unpack")
+        return extracted
+
+
+def _verify_restored_db(db_path: str) -> str:
+    """Sanity-check a restored snapshot; returns detail, raises on failure."""
+    import sqlite3  # noqa: E402
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        row = con.execute("PRAGMA integrity_check").fetchone()
+        if not row or row[0] != "ok":
+            raise RuntimeError(
+                "integrity_check: %s" % (row[0] if row else "no result"))
+        tables = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        missing = [t for t in _RESTORE_REQUIRED_TABLES if t not in tables]
+        if missing:
+            raise RuntimeError("missing tables: " + ",".join(missing))
+        counts = {}
+        for t in ("organizations", "scans"):
+            counts[t] = con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+        return ("integrity ok; tables ok; organizations=%d scans=%d"
+                % (counts["organizations"], counts["scans"]))
+    finally:
+        con.close()
+
+
+def _run_backup_restore_test(backup_dir: str | None = None):
+    """Verify the newest backup actually restores.
+
+    Returns (status, detail, backup_file); status is "ok", "failed" or
+    "missing". backup_dir is explicit so tests can point at fixtures
+    (defaults to BRAIMSEC_BACKUP_DIR).
+    """
+    bdir = backup_dir or os.environ.get("BRAIMSEC_BACKUP_DIR",
+                                        "/backups/daily")
+    tarball = _newest_backup_tarball(bdir)
+    if not tarball:
+        return ("missing", "no braimsec-*.tar.gz found in %s" % bdir, "")
+    tmpdir = tempfile.mkdtemp(prefix="braimsec-restore-test-")
+    try:
+        db_path = _extract_backup_db(tarball, tmpdir)
+        detail = _verify_restored_db(db_path)
+        return ("ok", "%s: %s" % (os.path.basename(tarball), detail),
+                tarball)
+    except Exception as e:  # noqa: BLE001 - any failure is the signal
+        return ("failed", "%s: %s" % (os.path.basename(tarball), e),
+                tarball)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _alert_owner_backup_restore_failed(backup_file: str, status: str,
+                                       detail: str) -> None:
+    """Ping the owner's channels when the restore test fails or backups vanish.
+
+    Throttled separately from scan failures. Best-effort: never raises.
+    """
+    try:
+        db = get_db()
+        try:
+            if not _owner_alert_due(db, "backup.restore_test"):
+                return
+            text = ("Backup restore verification %s.\nbackup: %s\ndetail: %s"
+                    % (status, backup_file or "(none found)", detail[:500]))
+            if _send_owner_alert("BraimSec backup restore test FAILED",
+                                 text):
+                _owner_alert_stamp(db, "backup.restore_test")
+                db.commit()
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - owner alert must never raise
+        log.exception("owner backup-restore alert failed")
+
+
+@celery_app.task(name="braimsec.backup_restore_test")
+def backup_restore_test():
+    """Daily backup restore verification (beat). Records + alerts. Never raises."""
+    try:
+        status, detail, backup_file = _run_backup_restore_test()
+    except Exception as e:  # noqa: BLE001 - the crash IS the signal
+        log.exception("backup restore test crashed")
+        status, detail, backup_file = "failed", "test crashed: %s" % e, ""
+    try:
+        db = get_db()
+        try:
+            db.execute("CREATE TABLE IF NOT EXISTS backup_restore_tests ("
+                       "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                       " checked_at TEXT NOT NULL,"
+                       " backup_file TEXT NOT NULL DEFAULT '',"
+                       " status TEXT NOT NULL DEFAULT 'unknown',"
+                       " detail TEXT NOT NULL DEFAULT '')")
+            db.execute("INSERT INTO backup_restore_tests"
+                       " (checked_at, backup_file, status, detail)"
+                       " VALUES (?,?,?,?)",
+                       (_now_iso(), backup_file, status, detail[:2000]))
+            db.commit()
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - recording must not break the task
+        log.exception("recording backup restore test result failed")
+    if status != "ok":
+        _alert_owner_backup_restore_failed(backup_file, status, detail)
 
 
 @celery_app.task(name="braimsec.run_scan", bind=True, max_retries=2,
@@ -452,6 +721,9 @@ def _run_scan_impl(task_self, scan_id: str, target_dir: str,
     if not will_retry:
         _deliver_webhook(scan_id)
         _deliver_failure_email(scan_id)
+        # Platform-health signal for the owner: scan failures usually mean
+        # engine/docker trouble. Throttled + best-effort (see helper).
+        _alert_owner_scan_failed(scan_id)
         # Scheduled scans: diff vs the previous scheduled run and fire the
         # new-findings alert webhook. Best-effort: alerting must never break
         # scan completion.
