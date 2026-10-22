@@ -500,6 +500,22 @@ CREATE TABLE IF NOT EXISTS worker_heartbeat (
     last_beat_at TEXT NOT NULL,
     worker_host TEXT NOT NULL DEFAULT ''
 );
+-- Owner alert throttle: one row per event kind, so platform-health alerts
+-- (scan failures, backup restore-test failures) do not spam the owner when
+-- failures cluster. last_sent_at is a UTC ISO timestamp.
+CREATE TABLE IF NOT EXISTS owner_alert_throttle (
+    event TEXT PRIMARY KEY,
+    last_sent_at TEXT NOT NULL
+);
+-- Backup restore-test history: every periodic verification run records its
+-- result here (ops trail; alert on failure goes through owner_alert_throttle).
+CREATE TABLE IF NOT EXISTS backup_restore_tests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    checked_at TEXT NOT NULL,
+    backup_file TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'unknown',
+    detail TEXT NOT NULL DEFAULT ''
+);
 """
 
 
