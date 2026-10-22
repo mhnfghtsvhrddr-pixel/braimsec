@@ -90,11 +90,17 @@ services:
       # no DOCKER_HOST, no socket, no CLI path to a daemon.
       BRAIMSEC_RUNNER_URL: http://runner:8001
       RUNNER_API_KEY: ${RUNNER_API_KEY}
+      # Read-only view of the host backup dir for the daily restore-test
+      # task (braimsec.backup_restore_test executes on the worker).
+      # Bind-mounting /root/backups directly avoids /root's 700 traversal
+      # bit (the daemon resolves the mount, not the container user).
+      BRAIMSEC_BACKUP_DIR: /backups/daily
     depends_on:
       - redis
       - runner
     volumes:
       - ${HOST_DATA_DIR:-/data/braimsec}:${HOST_DATA_DIR:-/data/braimsec}
+      - /root/backups:/backups:ro
     command: ["celery", "-A", "tasks", "worker", "--loglevel=info", "--concurrency=2"]
 
   # Dedicated scan-runner service: the ONLY component allowed to spawn
