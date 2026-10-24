@@ -212,12 +212,20 @@ def _mk_keys():
 def test_list_leads_owner_only():
     owner_key, member_key = _mk_keys()
     scan_id = _mk_trial_scan()
+    # Relative timestamp on purpose: a fixed emailed_at ages past the
+    # 3-day trial_reminders() cutoff and then pollutes that test's global
+    # scan (this bit the full suite on 2026-10-24, when 2026-10-21 aged
+    # past the cutoff). The listing only needs emailed=True, so "recent"
+    # is the correct fixture here.
+    from datetime import datetime, timedelta, timezone
+    emailed_recent = (datetime.now(timezone.utc)
+                      - timedelta(hours=1)).isoformat()
     db = get_db()
     db.execute(
         "INSERT OR IGNORE INTO trial_leads (email, scan_id, ip, created_at,"
         " emailed_at) VALUES (?,?,?, ?,?)",
         ("boss@example.com", scan_id, "9.9.9.9",
-         "2026-10-21T10:00:00+00:00", "2026-10-21T10:01:00+00:00"))
+         "2026-10-21T10:00:00+00:00", emailed_recent))
     db.commit()
     db.close()
     r = client.get("/api/trial/leads",
@@ -327,6 +335,12 @@ def test_trial_reminders_nudge_after_3_days(monkeypatch):
     old = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
     recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     db = get_db()
+    # trial_reminders() scans the whole table, so start from a known
+    # state: rows left by earlier tests (e.g. an emailed lead from the
+    # listing test) would otherwise be reminded too once they age past
+    # the 3-day cutoff. Later tests insert their own rows, so this
+    # cleanup is safe.
+    db.execute("DELETE FROM trial_leads")
     for email, emailed in [("old@example.com", old),
                           ("recent@example.com", recent),
                           ("never@example.com", None)]:
