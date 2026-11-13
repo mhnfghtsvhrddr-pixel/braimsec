@@ -229,8 +229,15 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('braimsec.openFinding', (item: FindingItem) => {
+      const uri = item.fileUri;
+      if (!uri) {
+        void vscode.window.showWarningMessage(
+          `BraimSec: skipped ${item.finding.file} — it points outside the workspace.`
+        );
+        return;
+      }
       void vscode.window
-        .showTextDocument(item.fileUri, { preview: true })
+        .showTextDocument(uri, { preview: true })
         .then((editor) => {
           const line = Math.max(1, item.lineNumber) - 1;
           const pos = new vscode.Position(line, 0);
