@@ -3,9 +3,9 @@
  * offending lines are underlined in the editor, grouped per file.
  */
 
-import * as path from 'path';
 import * as vscode from 'vscode';
 import { Finding } from './api';
+import { resolveFindingPath } from './paths';
 
 function toVsSeverity(sev: string): vscode.DiagnosticSeverity {
   switch (sev) {
@@ -24,7 +24,12 @@ export function findingsToDiagnostics(
 ): Map<string, vscode.Diagnostic[]> {
   const byFile = new Map<string, vscode.Diagnostic[]>();
   for (const f of findings) {
-    const abs = path.isAbsolute(f.file) ? f.file : path.join(workspaceRoot, f.file);
+    // Drop findings whose file escapes the workspace (hostile scan
+    // results must not attach diagnostics to arbitrary local files).
+    const abs = resolveFindingPath(f.file, workspaceRoot);
+    if (abs === null) {
+      continue;
+    }
     const line = Math.max(1, f.line ?? 1) - 1; // VS Code is 0-based
     const col = Math.max(0, (f.col ?? 1) - 1);
     const range = new vscode.Range(line, col, line, col + 1);
