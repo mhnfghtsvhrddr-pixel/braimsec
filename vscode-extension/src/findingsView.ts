@@ -3,9 +3,9 @@
  * Clicking a finding opens the file at the reported line.
  */
 
-import * as path from 'path';
 import * as vscode from 'vscode';
 import { Finding } from './api';
+import { resolveFindingPath } from './paths';
 
 const SEVERITY_ORDER = ['error', 'warning', 'note'] as const;
 const SEVERITY_LABEL: Record<string, string> = {
@@ -37,11 +37,13 @@ export class FindingItem extends vscode.TreeItem {
     this.iconPath = icon;
   }
 
-  /** Absolute file URI the finding points at (best effort). */
-  get fileUri(): vscode.Uri {
-    const p = this.finding.file;
-    const abs = path.isAbsolute(p) ? p : path.join(this.workspaceRoot, p);
-    return vscode.Uri.file(abs);
+  /**
+   * Absolute file URI the finding points at, or null when the reported
+   * path escapes the workspace (hostile scan results are not opened).
+   */
+  get fileUri(): vscode.Uri | null {
+    const abs = resolveFindingPath(this.finding.file, this.workspaceRoot);
+    return abs === null ? null : vscode.Uri.file(abs);
   }
 
   get lineNumber(): number {
